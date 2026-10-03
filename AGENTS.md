@@ -26,11 +26,12 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- __main__.py           python -m fallingwater entry point
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Redis-backed conversation client
-|   |-- cli.py                argparse CLI for workers, chat, and reset
+|   |-- cli.py                argparse CLI for workers, chat, web, and reset
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- proxy.py              Pydantic AI turn processing
 |   |-- streams.py            Redis key and event names
 |   |-- utils.py              Shared logger and CLI logging setup
+|   |-- web.py                FastAPI router, SSE feed, and standalone app
 |   |-- worker.py             Proxy pool and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       `-- __init__.py       haiku_master and flaky_agent demos
@@ -39,7 +40,8 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks
-    `-- test_proxy.py         Conversation loading and turn processing checks
+    |-- test_proxy.py         Conversation loading and turn processing checks
+    `-- test_web.py           Web route and SSE feed checks
 ```
 
 `roadmap.md` tracks high-level features and decisions visible to users or

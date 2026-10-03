@@ -34,13 +34,57 @@ def test_redis_options_are_global() -> None:
     assert args.proxies == 2
 
 
+def test_web_command_passes_config_to_app_and_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("fastapi")
+    pytest.importorskip("uvicorn")
+    app = object()
+    create_app = MagicMock(return_value=app)
+    serve = MagicMock()
+    monkeypatch.setattr("fallingwater.web.create_app", create_app)
+    monkeypatch.setattr("uvicorn.run", serve)
+
+    assert (
+        main(
+            [
+                "-r",
+                "redis://example:6379/1",
+                "-n",
+                "fw-test",
+                "web",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "9000",
+            ]
+        )
+        == 0
+    )
+
+    create_app.assert_called_once_with(
+        redis_url="redis://example:6379/1", namespace="fw-test"
+    )
+    serve.assert_called_once_with(app, host="0.0.0.0", port=9000)
+
+
 def test_chat_positional_conversation_and_short_options() -> None:
     args = build_parser().parse_args(
-        ["chat", "boring_wozniak", "-a", "example:agent", "-m", "test"]
+        [
+            "chat",
+            "boring_wozniak",
+            "-a",
+            "example:agent",
+            "-m",
+            "test",
+            "--group",
+            "web-user",
+        ]
     )
     assert args.conversation == "boring_wozniak"
     assert args.agent == "example:agent"
     assert args.model == "test"
+    assert args.group == "web-user"
 
 
 def test_chat_argument_defaults_come_from_environment(
@@ -54,6 +98,7 @@ def test_chat_argument_defaults_come_from_environment(
     assert args.conversation is None
     assert args.agent == "fallingwater.demo:haiku_master"
     assert args.model == "openai:gpt-4o-mini"
+    assert args.group == "user"
 
     explicit = build_parser().parse_args(
         [
@@ -100,6 +145,8 @@ def test_named_chat_passes_agent_and_model_to_chat(
                 "fallingwater.demo:haiku_master",
                 "--model",
                 "openai:gpt-4o-mini",
+                "--group",
+                "reader-one",
             ]
         )
         == 0
@@ -111,6 +158,7 @@ def test_named_chat_passes_agent_and_model_to_chat(
         "conversation_id": "test",
         "agent_path": "fallingwater.demo:haiku_master",
         "model": "openai:gpt-4o-mini",
+        "group": "reader-one",
     }
 
 
@@ -135,6 +183,7 @@ def test_chat_uses_agent_and_model_environment_defaults(
         "conversation_id": "bright_turing",
         "agent_path": "fallingwater.demo:haiku_master",
         "model": "openai:gpt-4o-mini",
+        "group": "user",
     }
 
 

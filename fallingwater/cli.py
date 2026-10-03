@@ -58,7 +58,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("FW_MODEL"),
         help="Model for a new conversation (default: FW_MODEL).",
     )
+    chat_parser.add_argument(
+        "--group", default="user", help="Conversation reader group (default: user)."
+    )
     chat_parser.set_defaults(handler=run_chat)
+
+    web_parser = subparsers.add_parser("web", help="Serve the Fallingwater API.")
+    web_parser.add_argument("--host", default="127.0.0.1")
+    web_parser.add_argument("--port", type=int, default=8000)
+    web_parser.set_defaults(handler=run_web)
 
     reset_parser = subparsers.add_parser(
         "reset", help="Delete all Redis keys in a Fallingwater namespace."
@@ -107,6 +115,7 @@ def run_chat(args: argparse.Namespace) -> int:
                 conversation_id=conversation_id,
                 agent_path=args.agent,
                 model=args.model,
+                group=args.group,
             )
         except ValueError as error:
             logger.debug(
@@ -114,6 +123,21 @@ def run_chat(args: argparse.Namespace) -> int:
             )
             raise SystemExit(f"fw chat: {error}") from None
         chat.run()
+    return 0
+
+
+def run_web(args: argparse.Namespace) -> int:
+    """Run the optional FastAPI app with Uvicorn."""
+    try:
+        import uvicorn
+
+        from .web import create_app
+    except ModuleNotFoundError as error:
+        logger.debug("Web dependency is missing", exc_info=True)
+        raise SystemExit("fw web requires fallingwater[web]") from error
+
+    app = create_app(redis_url=args.redis_url, namespace=args.namespace)
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

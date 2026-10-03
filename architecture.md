@@ -81,3 +81,34 @@ can reconstruct the agent and handle the next turn from saved history. An
 in-progress Pydantic AI run is not resumed midway through a turn. Acknowledged
 entries remain in the dispatch stream, and pending entries are not reclaimed
 after a worker crash.
+
+## AD7 — Web conversation feed
+
+The module-level `router` exposes a read-only SSE route at
+`/conversations/{conversation_id}/events`. The small `create_app` wrapper mounts
+it under `/fw-api`, and `fw web` serves it with Uvicorn. The route gets its
+asynchronous Redis client and namespace from the hosting app's state, so a feed
+can wait for new entries without blocking other requests. The app closes the
+Redis client it creates when it shuts down.
+
+The route returns 404 for an unknown conversation. For an existing one, it reads
+the conversation stream from the beginning with `XREAD`, then follows new
+entries. Each SSE message carries the Redis stream entry ID, the stored event
+type, and its fields. The route currently replays from the beginning on every
+connection; it does not use `Last-Event-ID` to resume from a cursor.
+
+## AD8 — CLI reader groups
+
+`Chat.run` creates a consumer group on its conversation stream, starting at ID
+`0`. The default group is `user`; `fw chat --group` selects another. It uses the
+stable consumer name `terminal` so a later CLI process can read entries left
+pending by an interrupted session. On startup it reads pending entries with
+`XREADGROUP` at `0`, then reads new entries with `>`.
+
+The CLI acknowledges ordinary status events as it reads them. It keeps a
+`turn.queued` entry pending until it prints that turn's `turn.completed` or
+`turn.failed` event, then acknowledges both entries together. This lets a
+resumed CLI wait for a turn that was still running when it closed. A terminal
+exit between printing and acknowledgement can cause the result to be printed
+again. Each group represents one logical terminal reader; the library's
+`Chat.receive` and the web feed still use independent `XREAD` calls.

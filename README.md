@@ -1,7 +1,8 @@
-# Fallingwater
+# FallingWater
 
 Fallingwater is a Python library for durable AI conversations backed by Redis
 Streams, with a CLI and web interface in development.
+
 
 ## Local development
 
@@ -48,6 +49,28 @@ Resumed chats always use their saved agent and model, `--agent` and
 `--model` apply only when starting a new conversation.  Without
 `FW_AGENT`, new chats use Pydantic AI's plain `Agent`. It has no
 default model, so set `FW_MODEL` or pass `-m`.
+
+`fw chat` uses the `user` reader group on each conversation stream. Reopening a
+chat shows answers or failures that arrived while the terminal was closed. Use
+`--group NAME` to keep an independent read position, and reuse that name when
+resuming. A new group replays stored answers from the beginning; run one terminal
+session per group at a time.
+
+
+## Web
+
+Install the web dependencies with `python -m pip install -e '.[web]'`, then
+start the API with `fw web`. It listens on `http://localhost:8000` by default.
+
+To follow an existing conversation, replace `boring_wozniak` with its ID:
+
+```shell
+curl -N -H 'Accept: text/event-stream' \
+  http://localhost:8000/fw-api/conversations/boring_wozniak/events
+```
+
+The feed replays existing events and stays open for new ones.
+
 
 ## Testing
 

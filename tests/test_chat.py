@@ -9,6 +9,10 @@ from fallingwater.chat import Chat
 from fallingwater.streams import EventType
 
 
+def _end_input(_prompt: str) -> str:
+    raise EOFError
+
+
 def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
     redis = MagicMock(spec=Redis)
     redis.xrange.return_value = []
@@ -129,3 +133,131 @@ def test_resume_rejects_unavailable_saved_agent() -> None:
         Chat(
             redis, conversation_id="test", agent_path="pydantic_ai:Agent", model="test"
         )
+
+
+def test_cli_group_replays_unread_completed_turn(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xrange.return_value = []
+    stream = "fw:conversation:abc:events"
+    redis.xreadgroup.side_effect = [
+        [(stream, [])],
+        [
+            (
+                stream,
+                [
+                    ("1-0", {"type": EventType.CONVERSATION_CREATED}),
+                    ("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "turn-1"}),
+                    (
+                        "3-0",
+                        {
+                            "type": EventType.TURN_COMPLETED,
+                            "turn_id": "turn-1",
+                            "output": "answer",
+                        },
+                    ),
+                ],
+            )
+        ],
+        [(stream, [])],
+    ]
+    monkeypatch.setattr("builtins.input", _end_input)
+    chat = Chat(
+        redis,
+        conversation_id="abc",
+        agent_path="pydantic_ai:Agent",
+        model="test",
+        group="reader-one",
+    )
+
+    chat.run()
+
+    assert "answer" in capsys.readouterr().out
+    redis.xgroup_create.assert_called_once_with(stream, "reader-one", id="0")
+    redis.xack.assert_any_call(stream, "reader-one", "2-0", "3-0")
+    assert redis.xreadgroup.call_args_list[0].args == (
+        "reader-one",
+        "terminal",
+        {stream: "0"},
+    )
+    assert redis.xreadgroup.call_args_list[1].args == (
+        "reader-one",
+        "terminal",
+        {stream: ">"},
+    )
+
+
+def test_cli_group_recovers_pending_turn_and_waits_for_its_answer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xrange.return_value = []
+    stream = "fw:conversation:abc:events"
+    redis.xreadgroup.side_effect = [
+        [(stream, [("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "turn-1"})])],
+        [(stream, [])],
+        [(stream, [])],
+        [
+            (
+                stream,
+                [
+                    (
+                        "3-0",
+                        {
+                            "type": EventType.TURN_COMPLETED,
+                            "turn_id": "turn-1",
+                            "output": "late answer",
+                        },
+                    )
+                ],
+            )
+        ],
+    ]
+    monkeypatch.setattr("builtins.input", _end_input)
+    chat = Chat(
+        redis, conversation_id="abc", agent_path="pydantic_ai:Agent", model="test"
+    )
+
+    chat.run()
+
+    assert "late answer" in capsys.readouterr().out
+    redis.xack.assert_called_once_with(stream, "user", "2-0", "3-0")
+    assert redis.xreadgroup.call_args_list[-1].kwargs["block"] == 1000
+
+
+def test_cli_group_replays_pending_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xrange.return_value = []
+    stream = "fw:conversation:abc:events"
+    redis.xreadgroup.side_effect = [
+        [
+            (
+                stream,
+                [
+                    ("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "turn-1"}),
+                    (
+                        "3-0",
+                        {
+                            "type": EventType.TURN_FAILED,
+                            "turn_id": "turn-1",
+                            "error": "boom",
+                        },
+                    ),
+                ],
+            )
+        ],
+        [(stream, [])],
+        [(stream, [])],
+    ]
+    monkeypatch.setattr("builtins.input", _end_input)
+    chat = Chat(
+        redis, conversation_id="abc", agent_path="pydantic_ai:Agent", model="test"
+    )
+
+    chat.run()
+
+    assert "Turn failed: boom" in capsys.readouterr().out
+    redis.xack.assert_called_once_with(stream, "user", "2-0", "3-0")
