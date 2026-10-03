@@ -9,20 +9,49 @@ Use a virtual environment, then run `python -m pip install -e '.[test]'`. Start
 local Redis with `docker compose up -d redis`. Run tests with `pytest`, and
 inspect the CLI with `fw --help`.
 
-## Project principles
 
-- Prefer Pydantic AI agent specs, capabilities, tools, message history, and event
-  streaming before building equivalents.
-- A worker finishes an agent turn and may then stop. A later turn resumes from
-  saved conversation history; exact mid-turn continuation is outside the current
-  scope.
-- `fw chat` sends and receives messages through Redis so it exercises the full
-  worker path.
-- Keep FastAPI support optional. The package should remain easy to import into
-  an existing application.
+## Cli test drive
 
-## Development conventions
+Start `fw worker` in one terminal and run:
 
-- Build `fw` commands with the standard library's `argparse` subparsers.
-- Install the Typeguard import hook for `fallingwater` in `tests/conftest.py`
-  before importing package code in tests.
+``` shell
+fw chat --agent fallingwater.demo:haiku_master --model openai:gpt-6-luna
+```
+
+in another. The chat prints its conversation ID; later, use `fw chat
+<id>` to continue it.
+
+The model needs its provider's credentials and the corresponding
+Pydantic AI extra.
+
+If the selected agent has a default model,  `--model`
+is not required.
+
+New CLI conversations receive a readable ID such as
+`hopeful_morse`. Use that name as the positional argument to
+resume.
+
+Library-created conversations will use UUID IDs.  For repeated new
+chats, set `FW_AGENT` and `FW_MODEL` instead and run `fw chat`;
+explicit CLI options take precedence.
+
+Resumed chats always use their saved agent and model, `--agent` and
+`--model` apply only when starting a new conversation.  Without
+`FW_AGENT`, new chats use Pydantic AI's plain `Agent`. It has no
+default model, so set `FW_MODEL` or pass `-m`.
+
+## Testing
+
+Test can be run with `pytest tests`
+
+Tests use the `fw-test` key namespace (the default namespace is `fw`).
+
+For a fresh development instance, stop the workers and run `fw
+reset`. Use `fw reset --namespace fw-test` to clear the testing
+namespace. Beware, the command deletes all Redis keys with the selected
+namespace prefix.
+
+
+## Tooling
+
+- iredis: https://github.com/laixintao/iredis

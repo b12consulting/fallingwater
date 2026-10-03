@@ -5,7 +5,7 @@ Fallingwater is a light library for running Pydantic AI conversations through Re
 ## 0. Repository setup — complete
 
 - Add an installable Python package, `fw` entry point, Redis-only Docker Compose service, pytest and Typeguard setup.
-- Start this roadmap and `raid.md`; add `concept/architecture.md` with `TODO`; update `AGENTS.md`.
+- Start this roadmap and `raid.md`; add `architecture.md` with `TODO`; update `AGENTS.md`.
 - Done when the package installs, `fw --help` works, pytest runs, and Compose configuration validates.
 
 ## 1. Agent reification

@@ -22,5 +22,5 @@ Track open risks, assumptions, issues, and dependencies here. Close or revise an
 ## Dependencies
 
 - **D1 — Pydantic AI (available).** Agent specs, capabilities, message history, and event streaming provide the agent primitives.
-- **D2 — Redis (local setup pending).** `compose.yaml` supplies a development instance; integration tests will require it when Redis behavior is implemented.
+- **D2 — Redis (available via Compose).** `compose.yaml` supplies a development instance; integration tests will require it when Redis behavior is implemented.
 - **D3 — Model provider (later).** Real chats need provider credentials. Tests should use Pydantic AI test models wherever possible.
