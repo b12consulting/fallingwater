@@ -1,26 +1,47 @@
 # RAID log
 
-Track open risks, assumptions, issues, and dependencies here. Close or revise an item when a milestone resolves it; keep the reason in the entry.
+Track technical risks, assumptions, issues, and decisions that depend on how
+Fallingwater is implemented. Record the status and reason for each choice,
+including when to revisit it. Add a decision when a technical choice is
+discussed or an implementation must be revisited. Close or revise an item when
+the code resolves it.
 
 ## Risks
 
-- **R1 — Duplicate turn execution (open).** A worker can finish work and fail before acknowledging its queue entry. Use stable run IDs and idempotent completion writes in milestone 2.
-- **R2 — Conversation changes across upgrades (open).** An agent spec may change while a conversation is idle. Record the spec identity and version used for each run; decide when an existing conversation adopts a newer version.
+- **R1 — Duplicate turn execution (open).** A worker can publish a result and fail before acknowledging its work entry. Recovery could run the same turn again. Turn IDs already remain stable across both streams, but completion writes and agent side effects are not idempotent yet.
+- **R2 — Conversation changes across upgrades (open).** An agent definition may change while a conversation is idle. The conversation stores its import path but no version, so later turns may run different behavior.
 - **R3 — Event volume (open).** Persisting every output delta may create more Redis writes than useful history. Measure this in milestone 2 and batch display deltas if needed.
+- **R4 — Claimed work can stall (open).** A worker crash leaves its entry pending in the `workers` group. The current proxy reads only new entries and never reclaims pending work.
 
 ## Assumptions
 
-- **A1 — One active turn per conversation (to validate).** Serialize turns for a conversation even when multiple workers are available.
-- **A2 — Redis is the first transport (to validate).** Keep application interfaces independent of Redis commands where practical, without making another backend part of the first release.
+- **A1 — Serialized prompts when required (accepted).** A sender that needs sequential conversation history waits for one turn to finish before submitting the next. Independent senders may submit overlapping turns, which can read the same prior history.
+- **A2 — Redis is the first transport (to validate).** Other backends are outside the first release; assess whether application interfaces can stay independent of Redis commands when they are expanded.
 
 ## Issues
 
-- **I1 — Conversation ownership (open).** Choose how workers prevent two turns for one conversation from running at once; resolve in milestone 2.
-- **I2 — Agent catalog (open).** Decide how file-based specs and Python-registered tools or capabilities are named, listed, and combined; resolve in milestone 1.
-- **I3 — Event contract (open).** Define durable conversation events, display events, and cursor behavior before the SSE endpoint in milestone 3.
+- **I1 — Conversation ownership (closed).** Workers do not reserve a conversation; senders coordinate prompt submission when sequential history is required.
+- **I2 — Agent catalog (open).** Import-path loading works, including `AgentSpec` objects, but file-based specs, capability composition, and `fw ls` do not. Decide how these are named, listed, and combined in milestone 1.
+- **I3 — Event contract and retention (open).** Decide which progress events are durable, how long conversation history remains available, and how readers resume from a cursor before the SSE endpoint. Completion deltas must remain available until a snapshot covers them; creation and queued events must remain while workers may need to load them from a poke.
+- **I4 — Conversation ending (open).** Decide what ends a conversation, how its status is recorded, and what happens to its stream and future submissions.
+- **I5 — Dispatch stream retention (open).** `XACK` clears pending status but leaves the entry in `fw:dispatch`; decide when acknowledged entries are deleted without losing recoverable work.
+- **I6 — Redis integration coverage (open).** Current tests do not exercise restart, pending-work recovery, or concurrent workers against Redis. Add integration coverage as those behaviors are implemented.
 
-## Dependencies
+## Decisions
 
-- **D1 — Pydantic AI (available).** Agent specs, capabilities, message history, and event streaming provide the agent primitives.
-- **D2 — Redis (available via Compose).** `compose.yaml` supplies a development instance; integration tests will require it when Redis behavior is implemented.
-- **D3 — Model provider (later).** Real chats need provider credentials. Tests should use Pydantic AI test models wherever possible.
+- **D1 — Two stream roles (decided).** Use one shared `fw:dispatch` stream for worker dispatch and one event stream per conversation for history and observers. The dispatch name leaves room for other message types later; workers can discover work through one consumer group while readers follow a conversation independently.
+- **D2 — Turn boundary (decided).** A work entry runs one complete Pydantic AI turn. Workers finish claimed turns before shutdown; a later worker reconstructs history for a later turn. Mid-turn execution state is not restored.
+- **D3 — Completion history as deltas (decided).** Write `new_messages_json()` in `turn.completed` and replay completed turns in stream order. Treat older entries without `history_format` as full-history snapshots.
+- **D4 — Conversation IDs (decided).** The CLI generates readable `qualifier_scientist` IDs for resumption; library-created conversations use UUIDs. Both map to the same per-conversation stream naming scheme.
+- **D5 — Fixed agent and model (decided).** The creation event identifies the agent import path and model for a conversation. `Chat` uses those saved values on resume, ignoring supplied agent and model options so a conversation cannot change them.
+- **D6 — Admission of overlapping turns (decided).** Fallingwater does not enforce one active turn per conversation. Senders serialize prompts when they need each turn to include the preceding result. The `workers` consumer group assigns dispatch entries individually, so overlapping turns can run on different workers.
+- **D7 — Pending work and duplicate effects (open).** Choose how to reclaim abandoned group entries and detect a result already written for the same turn ID. Retrying an agent can repeat tool side effects, so completion deduplication alone is insufficient.
+- **D8 — Dispatch stream cleanup (open).** Choose when to delete acknowledged dispatch entries without removing pending entries that still need recovery. `XACK` alone leaves the entry in `fw:dispatch`.
+- **D9 — History cache and snapshots (open).** Cache reconstructed history by its last completed stream entry ID and read only later entries; Redis Stream IDs increase monotonically. Decide when to write snapshots and when earlier deltas may be removed.
+- **D10 — Conversation ending (open).** Choose how an ended state is represented in the event stream, how submissions are rejected afterward, and when its data can be removed.
+- **D11 — Agent definition versioning (open).** Decide what identity or version to store with a turn and how a resumed conversation selects an agent definition after an upgrade.
+- **D12 — Progress event contract (open).** Choose which output, tool, and delegate events to persist, how readers use stream cursors, and how to limit write volume.
+- **D13 — Transport boundary (open).** Decide which library interfaces should hide Redis commands while preserving stream semantics for a possible later backend.
+- **D14 — Catalog composition (open).** Decide how file-based specs and application-provided tools and capabilities are registered, named, and combined before adding catalog listing commands.
+- **D15 — Dispatch payload (decided).** A `conversation.poke` instruction carries only a conversation ID and turn ID. Workers load the matching `turn.queued` prompt, fixed agent and model, and prior history from the conversation stream. Keeping the turn ID identifies the queued event even when senders allow overlapping turns; the dispatch stream can carry other instruction types later.
+- **D16 — Chat validation (decided).** `Chat` validates the selected agent and available model before creating or resuming a conversation. The CLI passes its agent and model arguments directly to `Chat`, which chooses saved settings for an existing conversation. CLI-generated names are checked for existing streams before use.

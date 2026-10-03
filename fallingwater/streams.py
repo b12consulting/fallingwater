@@ -6,6 +6,7 @@ from enum import StrEnum
 
 class EventType(StrEnum):
     CONVERSATION_CREATED = "conversation.created"
+    CONVERSATION_POKE = "conversation.poke"
     TURN_QUEUED = "turn.queued"
     TURN_STARTED = "turn.started"
     TURN_COMPLETED = "turn.completed"
@@ -21,8 +22,8 @@ class StreamNames:
             raise ValueError("namespace must be nonempty and contain no colon")
 
     @property
-    def work(self) -> str:
-        return f"{self.namespace}:work"
+    def dispatch(self) -> str:
+        return f"{self.namespace}:dispatch"
 
     def conversation(self, conversation_id: str) -> str:
         if not conversation_id or ":" in conversation_id:

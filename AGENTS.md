@@ -14,9 +14,8 @@ This is the quick-start guide for agents working in this repository. See
 |-- architecture.md           Architecture decisions and conventions
 |-- pyproject.toml            Package, dependencies, CLI entry point, pytest setup
 |-- compose.yaml              Local Redis service
-|-- raid.md                   Risks, assumptions, issues, dependencies
-|-- roadmap.md                Milestones and completion criteria
-|-- temp-update.md            Proposed planning document revisions
+|-- raid.md                   Technical risks, issues, assumptions, decisions
+|-- roadmap.md                High-level features and milestone outcomes
 |-- concept/
 |   |-- pydantic-ai-agent.md   Agent specs and conversation turns
 |   `-- redis-streams.md      Redis Streams concepts and examples
@@ -34,17 +33,21 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- worker.py             Proxy pool and graceful shutdown
 |   `-- demo/                 Example client-defined agents
-|       `-- __init__.py       haiku_master agent for pai
+|       `-- __init__.py       haiku_master and flaky_agent demos
 `-- tests/                    Pytest tests; conftest enables Typeguard
     |-- conftest.py           Typeguard import hook
     |-- test_catalog.py       Agent import-path checks
-    `-- test_cli.py           CLI smoke checks
+    |-- test_chat.py          Chat submission checks
+    |-- test_cli.py           CLI smoke checks
+    `-- test_proxy.py         Conversation loading and turn processing checks
 ```
 
-`raid.md` tracks the project's risks, assumptions, issues, and dependencies,
-including their resolution. `roadmap.md` sets out the milestones and their
-completion criteria. `architecture.md` records design decisions as short,
-numbered sections (`AD1`, `AD2`, ...). Give each decision one or a few paragraphs
-explaining the choice and its reason; revise its section when the decision
-changes. Update the ASCII tree above when a file is added or removed, or when
-its role changes significantly.
+`roadmap.md` tracks high-level features and decisions visible to users or
+developers integrating the library. `raid.md` tracks technical risks,
+assumptions, issues, and implementation choices, including their outcomes and
+reasons. Add a RAID decision when a technical choice is discussed or an
+implementation must be revisited. `architecture.md` records the implemented
+design as short, numbered sections (`AD1`, `AD2`, ...). Give each section one
+or a few paragraphs explaining the choice and its reason; revise it when the
+implementation changes. Update the ASCII tree above when a file is added or
+removed, or when its role changes significantly.

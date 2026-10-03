@@ -7,7 +7,6 @@ from collections.abc import Sequence
 
 from redis import Redis
 
-from .catalog import reify_agent
 from .chat import Chat
 from .names import generate_name
 from .streams import StreamNames
@@ -45,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser("chat", help="Start or resume a conversation.")
     chat_parser.add_argument(
-        "conversation", nargs="?", help="Existing conversation ID to resume."
+        "conversation", nargs="?", help="Conversation ID to start or resume."
     )
     chat_parser.add_argument(
         "-a",
@@ -90,55 +89,32 @@ def run_worker(args: argparse.Namespace) -> int:
 
 
 def run_chat(args: argparse.Namespace) -> int:
-    if args.conversation is None:
-        _check_agent(args.agent, args.model)
     with Redis.from_url(args.redis_url, decode_responses=True) as redis:
-        if args.conversation is None:
-            chat = _new_cli_chat(redis, args.namespace, args.agent, args.model)
-        else:
+        conversation_id = args.conversation
+        if conversation_id is None:
+            names = StreamNames(args.namespace)
+            for _ in range(100):
+                candidate = generate_name()
+                if not redis.exists(names.conversation(candidate)):
+                    conversation_id = candidate
+                    break
+            else:
+                raise SystemExit("fw chat: could not find an unused conversation name")
+        try:
             chat = Chat(
-                redis, namespace=args.namespace, conversation_id=args.conversation
+                redis,
+                namespace=args.namespace,
+                conversation_id=conversation_id,
+                agent_path=args.agent,
+                model=args.model,
             )
-            _check_agent(chat.agent_path, chat.model)
+        except ValueError as error:
+            logger.debug(
+                "Could not open conversation %s", conversation_id, exc_info=True
+            )
+            raise SystemExit(f"fw chat: {error}") from None
         chat.run()
     return 0
-
-
-def _new_cli_chat(
-    redis: Redis, namespace: str, agent_path: str, model: str | None
-) -> Chat:
-    """Pick an unused readable conversation ID for a new chat."""
-    names = StreamNames(namespace)
-    for _ in range(100):
-        conversation_id = generate_name()
-        if redis.exists(names.conversation(conversation_id)):
-            continue
-        return Chat(
-            redis,
-            namespace=namespace,
-            conversation_id=conversation_id,
-            agent_path=agent_path,
-            model=model,
-        )
-    raise SystemExit("fw chat: could not find an unused conversation name")
-
-
-def _check_agent(path: str, model: str | None) -> None:
-    try:
-        agent = reify_agent(path)
-    except Exception as error:
-        logger.debug("Could not instantiate agent %s", path, exc_info=True)
-        raise SystemExit(
-            f"fw chat: cannot instantiate agent {path!r}: {error}"
-        ) from None
-    if model or agent.model is not None:
-        return
-    # Pydantic AI also allows capabilities to select a model during a run.
-    if agent._root_capability.get_model() is not None:
-        return
-    raise SystemExit(
-        f"fw chat: agent {path!r} has no model; pass --model or configure one on the agent"
-    )
 
 
 def run_reset(args: argparse.Namespace) -> int:

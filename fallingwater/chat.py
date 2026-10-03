@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from redis import Redis
 
+from .catalog import reify_agent
 from .streams import EventType, StreamNames
 from .utils import logger
 
@@ -32,25 +33,45 @@ class Chat:
                 raise ValueError(f"{self.events} is not a Fallingwater conversation")
             existing_agent = record["agent"]
             existing_model = record.get("model", "")
-            if agent_path is not None and agent_path != existing_agent:
-                raise ValueError("conversation uses a different agent")
-            if model is not None and model != existing_model:
-                raise ValueError("conversation uses a different model")
             self.agent_path = existing_agent
             self.model = existing_model
         else:
             if agent_path is None:
-                raise ValueError("--agent is required for a new conversation")
+                raise ValueError("agent is required for a new conversation")
             self.agent_path = agent_path
             self.model = model or ""
+
+        self._check_agent()
+        if not first:
             redis.xadd(
                 self.events,
                 {
                     "type": EventType.CONVERSATION_CREATED,
-                    "agent": agent_path,
-                    "model": model or "",
+                    "agent": self.agent_path,
+                    "model": self.model,
                 },
             )
+
+    def _check_agent(self) -> None:
+        """Validate the effective agent and model before using the chat."""
+        try:
+            agent = reify_agent(self.agent_path)
+        except Exception as error:
+            logger.debug(
+                "Could not instantiate agent %s", self.agent_path, exc_info=True
+            )
+            raise ValueError(
+                f"cannot instantiate agent {self.agent_path!r}: {error}"
+            ) from error
+        if self.model or agent.model is not None:
+            return
+        # Pydantic AI also allows capabilities to select a model during a run.
+        if agent._root_capability.get_model() is not None:
+            return
+        raise ValueError(
+            f"agent {self.agent_path!r} has no model; "
+            "pass --model or configure one on the agent"
+        )
 
     def send(self, prompt: str) -> tuple[str, str]:
         """Record a queued turn and return its turn ID and event cursor."""
@@ -61,17 +82,14 @@ class Chat:
                 {"type": EventType.TURN_QUEUED, "turn_id": turn_id, "prompt": prompt},
             )
             pipeline.xadd(
-                self.names.work,
+                self.names.dispatch,
                 {
-                    "type": EventType.TURN_QUEUED,
+                    "type": EventType.CONVERSATION_POKE,
                     "turn_id": turn_id,
                     "conversation_id": self.conversation_id,
-                    "agent": self.agent_path,
-                    "model": self.model,
-                    "prompt": prompt,
                 },
             )
-            queued_id, _work_id = pipeline.execute()
+            queued_id, _dispatch_id = pipeline.execute()
         return turn_id, queued_id
 
     def receive(self, turn_id: str, cursor: str) -> str:

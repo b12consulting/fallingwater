@@ -27,6 +27,15 @@ Pydantic AI extra.
 If the selected agent has a default model,  `--model`
 is not required.
 
+To see a `turn.failed` event, run:
+
+```shell
+fw chat -a fallingwater.demo:flaky_agent -m openai:gpt-6-luna
+```
+
+This plain Pydantic AI agent fails before the model call on about half of its
+turns. The CLI prints the failure and keeps the chat open for another prompt.
+
 New CLI conversations receive a readable ID such as
 `hopeful_morse`. Use that name as the positional argument to
 resume.

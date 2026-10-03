@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from redis import Redis
 
-from fallingwater.cli import _new_cli_chat, build_parser, main
+from fallingwater.cli import build_parser, main
 
 
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -78,30 +78,9 @@ def test_chat_uses_plain_pydantic_agent_by_default(
     assert args.agent == "pydantic_ai:Agent"
 
 
-def test_chat_rejects_invalid_agent_before_creating_conversation(
+def test_named_chat_passes_agent_and_model_to_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    redis_from_url = MagicMock()
-    monkeypatch.setattr("fallingwater.cli.Redis.from_url", redis_from_url)
-
-    with pytest.raises(SystemExit, match="cannot instantiate agent"):
-        main(["chat", "--agent", "fallingwater.demo:missing_agent"])
-
-    redis_from_url.assert_not_called()
-
-
-def test_chat_requires_model_if_agent_has_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("FW_MODEL", raising=False)
-    redis_from_url = MagicMock()
-    monkeypatch.setattr("fallingwater.cli.Redis.from_url", redis_from_url)
-
-    with pytest.raises(SystemExit, match="pass --model"):
-        main(["chat", "--agent", "fallingwater.demo:haiku_master"])
-
-    redis_from_url.assert_not_called()
-
-
-def test_chat_accepts_explicit_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FW_AGENT", "fallingwater.demo:missing_agent")
     monkeypatch.setenv("FW_MODEL", "openai:another-model")
     connection = MagicMock()
@@ -109,13 +88,14 @@ def test_chat_accepts_explicit_model(monkeypatch: pytest.MonkeyPatch) -> None:
         "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
     )
     chat = MagicMock()
-    new_chat = MagicMock(return_value=chat)
-    monkeypatch.setattr("fallingwater.cli._new_cli_chat", new_chat)
+    chat_class = MagicMock(return_value=chat)
+    monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
 
     assert (
         main(
             [
                 "chat",
+                "test",
                 "--agent",
                 "fallingwater.demo:haiku_master",
                 "--model",
@@ -126,10 +106,12 @@ def test_chat_accepts_explicit_model(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     chat.run.assert_called_once_with()
-    assert new_chat.call_args.args[2:] == (
-        "fallingwater.demo:haiku_master",
-        "openai:gpt-4o-mini",
-    )
+    assert chat_class.call_args.kwargs == {
+        "namespace": "fw",
+        "conversation_id": "test",
+        "agent_path": "fallingwater.demo:haiku_master",
+        "model": "openai:gpt-4o-mini",
+    }
 
 
 def test_chat_uses_agent_and_model_environment_defaults(
@@ -138,33 +120,41 @@ def test_chat_uses_agent_and_model_environment_defaults(
     monkeypatch.setenv("FW_AGENT", "fallingwater.demo:haiku_master")
     monkeypatch.setenv("FW_MODEL", "openai:gpt-4o-mini")
     connection = MagicMock()
+    connection.__enter__.return_value.exists.return_value = False
     monkeypatch.setattr(
         "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
     )
-    new_chat = MagicMock()
-    monkeypatch.setattr("fallingwater.cli._new_cli_chat", new_chat)
+    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "bright_turing")
+    chat_class = MagicMock()
+    monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
 
     assert main(["chat"]) == 0
 
-    assert new_chat.call_args.args[2:] == (
-        "fallingwater.demo:haiku_master",
-        "openai:gpt-4o-mini",
-    )
+    assert chat_class.call_args.kwargs == {
+        "namespace": "fw",
+        "conversation_id": "bright_turing",
+        "agent_path": "fallingwater.demo:haiku_master",
+        "model": "openai:gpt-4o-mini",
+    }
 
 
-def test_new_cli_chat_retries_existing_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_chat_retries_existing_generated_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     names = iter(["happy_turing", "hopeful_morse"])
     monkeypatch.setattr("fallingwater.cli.generate_name", lambda: next(names))
     redis = MagicMock(spec=Redis)
     redis.exists.side_effect = [True, False]
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
+    )
     chat = MagicMock()
     chat_class = MagicMock(return_value=chat)
     monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
 
-    assert (
-        _new_cli_chat(redis, "fw-test", "fallingwater.demo:haiku_master", "test")
-        is chat
-    )
+    assert main(["-n", "fw-test", "chat"]) == 0
 
     assert [call.args[0] for call in redis.exists.call_args_list] == [
         "fw-test:conversation:happy_turing:events",
@@ -173,7 +163,7 @@ def test_new_cli_chat_retries_existing_name(monkeypatch: pytest.MonkeyPatch) -> 
     assert chat_class.call_args.kwargs["conversation_id"] == "hopeful_morse"
 
 
-def test_chat_resume_uses_saved_values_despite_options_and_environment(
+def test_cli_passes_resume_options_to_chat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FW_AGENT", "fallingwater.demo:missing_agent")
@@ -202,23 +192,11 @@ def test_chat_resume_uses_saved_values_despite_options_and_environment(
         == 0
     )
 
-    assert "agent_path" not in chat_class.call_args.kwargs
-    assert "model" not in chat_class.call_args.kwargs
-    chat.run.assert_called_once_with()
-
-
-def test_chat_checks_saved_agent_on_resume(monkeypatch: pytest.MonkeyPatch) -> None:
-    connection = MagicMock()
-    monkeypatch.setattr(
-        "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
+    assert (
+        chat_class.call_args.kwargs["agent_path"] == "fallingwater.demo:missing_agent"
     )
-    chat = MagicMock(agent_path="fallingwater.demo:missing_agent")
-    monkeypatch.setattr("fallingwater.cli.Chat", MagicMock(return_value=chat))
-
-    with pytest.raises(SystemExit, match="cannot instantiate agent"):
-        main(["chat", "abc"])
-
-    chat.run.assert_not_called()
+    assert chat_class.call_args.kwargs["model"] == "openai:another-model"
+    chat.run.assert_called_once_with()
 
 
 def test_reset_deletes_only_selected_namespace(
@@ -226,7 +204,12 @@ def test_reset_deletes_only_selected_namespace(
 ) -> None:
     redis = MagicMock()
     redis.scan_iter.return_value = iter(
-        ["fw:work", "fw-test:work", "fw-test:conversation:abc:events", "fw-tests:work"]
+        [
+            "fw:dispatch",
+            "fw-test:dispatch",
+            "fw-test:conversation:abc:events",
+            "fw-tests:dispatch",
+        ]
     )
     redis.delete.return_value = 2
     connection = MagicMock()
@@ -238,6 +221,6 @@ def test_reset_deletes_only_selected_namespace(
     assert main(["-n", "fw", "reset", "-n", "fw-test"]) == 0
 
     redis.delete.assert_called_once_with(
-        "fw-test:work", "fw-test:conversation:abc:events"
+        "fw-test:dispatch", "fw-test:conversation:abc:events"
     )
     assert "Deleted 2 key(s) from namespace 'fw-test'." in capsys.readouterr().out

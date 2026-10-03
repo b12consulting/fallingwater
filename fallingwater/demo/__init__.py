@@ -1,6 +1,8 @@
 """Example client-defined agents for trying Fallingwater integrations."""
 
-from pydantic_ai import Agent, AgentSpec
+from random import random
+
+from pydantic_ai import Agent, AgentSpec, RunContext
 
 
 haiku_master = Agent.from_spec(
@@ -17,3 +19,13 @@ haiku_master = Agent.from_spec(
         }
     )
 )
+
+
+flaky_agent = Agent()
+
+
+@flaky_agent.instructions
+def sometimes_fail(ctx: RunContext[None]) -> None:
+    """Draw once per turn, before its first model request."""
+    if ctx.run_step == 1 and random() < 0.5:
+        raise RuntimeError("Flaky demo agent failed this turn")
