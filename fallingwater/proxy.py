@@ -21,7 +21,7 @@ class Proxy:
     def __init__(self, redis: Redis, *, namespace: str = "fw") -> None:
         self.redis = redis
         self.names = StreamNames(namespace)
-        self.consumer = uuid4().hex
+        self.consumer = str(uuid4())
         self.stop_event = Event()
         try:
             redis.xgroup_create(self.names.dispatch, self.group, id="0", mkstream=True)

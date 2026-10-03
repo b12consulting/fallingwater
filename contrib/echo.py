@@ -60,7 +60,7 @@ class Proxy:
         self.redis = redis
         self.stream = stream
         self.group = "echo-proxy"
-        self.consumer = uuid4().hex
+        self.consumer = str(uuid4())
         try:
             redis.xgroup_create(stream, self.group, id="0", mkstream=True)
         except ResponseError as error:

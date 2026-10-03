@@ -31,7 +31,7 @@ class Chat:
             raise ValueError("chat group must be nonempty")
         self.group = group
         self._pending_turns: dict[str, str] = {}
-        self.conversation_id = conversation_id or uuid4().hex
+        self.conversation_id = conversation_id or str(uuid4())
         self.events = self.names.conversation(self.conversation_id)
 
         first = redis.xrange(self.events, count=1)
@@ -83,7 +83,7 @@ class Chat:
 
     def send(self, prompt: str) -> tuple[str, str]:
         """Record a queued turn and return its turn ID and event cursor."""
-        turn_id = uuid4().hex
+        turn_id = str(uuid4())
         with self.redis.pipeline(transaction=True) as pipeline:
             pipeline.xadd(
                 self.events,
