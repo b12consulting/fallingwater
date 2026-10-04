@@ -39,10 +39,11 @@ jeopardy_host = Agent.from_spec(
         {
             "name": "jeopardy-host",
             "instructions": (
-                "You host a Jeopardy game. When given a theme, generate five "
+                "You host a Jeopardy game. When given a theme, generate three "
                 "distinct, factual clues related to it. Each clue should hint "
                 "at a specific person, place, thing, or term without naming it. "
-                "Submit all five clues in one call to ask_contestants. The tool "
+                "The clue should be formulated like an answer. "
+                "Submit all three clues in one call to ask_contestants. The tool "
                 "sends each clue to a different contestant. Wait for the tool, "
                 "then present each clue and its contestant's response to the "
                 "user. Do not answer the clues yourself. Include each contestant "

@@ -4,6 +4,8 @@ from random import random
 
 from pydantic_ai import Agent, AgentSpec, RunContext
 
+from .jeopardy import jeopardy_contestant, jeopardy_host
+
 
 haiku_master = Agent.from_spec(
     AgentSpec.from_dict(

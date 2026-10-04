@@ -38,12 +38,14 @@ This is the quick-start guide for agents working in this repository. See
 |   |       `-- monitor.html  Read-only recent conversation monitor
 |   |-- worker.py             Proxy pool and graceful shutdown
 |   `-- demo/                 Example client-defined agents
-|       `-- __init__.py       haiku_master and flaky_agent demos
+|       |-- __init__.py       Demo agent exports and small examples
+|       `-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
 `-- tests/                    Pytest tests; conftest enables Typeguard
     |-- conftest.py           Typeguard import hook
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks
+    |-- test_jeopardy.py      Redis-backed Jeopardy tool checks
     |-- test_proxy.py         Conversation loading and turn processing checks
     `-- test_web.py           Web routes, page, and SSE feed checks
 ```
