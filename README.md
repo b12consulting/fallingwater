@@ -57,20 +57,38 @@ When you resume a chat, it prints any answers or failures that arrived
 while the terminal was closed. This includes a response to a prompt sent
 just before exit.
 
+For a single non-interactive turn, run `fw chat <id> --msg "Hello"`. The
+command waits for that turn's result, prints it to stdout, and exits. If
+you omit the ID, it starts a conversation and prints its new ID to stderr.
+Any earlier unread results are also printed to stderr before the new turn.
+
 
 ## Web
 
 Install the web dependencies with `python -m pip install -e '.[web]'`, then
 start the API with `fw web`. It listens on `http://localhost:8000` by default.
+Open `http://localhost:8000/fw-api/monitor` for a read-only page that follows
+the recent conversation feed.
 
 To follow an existing conversation, replace `boring_wozniak` with its ID:
 
 ```shell
-curl -N -H 'Accept: text/event-stream' \
-  http://localhost:8000/fw-api/conversations/boring_wozniak/events
+curl -N -H 'Accept: text/event-stream' http://localhost:8000/fw-api/conversations/boring_wozniak/events
 ```
 
 The feed replays existing events and stays open for new ones.
+
+To follow the ten most recently active conversations in one feed:
+
+```shell
+curl -N -H 'Accept: text/event-stream' http://localhost:8000/fw-api/conversations/recent/events
+```
+
+This feed discovers conversations from dispatched prompts. It adds newly active
+conversations and drops the least recently active one when the limit is reached.
+For each selected conversation, it first sends up to ten retained events, then
+follows new ones. Each event includes a `conversation_id`; ordering across
+conversations is approximate.
 
 
 ## Testing

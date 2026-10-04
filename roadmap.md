@@ -20,13 +20,13 @@ implementation choices and concerns belong in `raid.md`.
 
 ## 2. Durable CLI conversations — partial
 
-- **Available:** The CLI can start and resume a chat by ID, including answers or failures that arrived while it was closed. Its conversation reader group defaults to `user` and can be selected with `--group`. Prompts and completed answers pass through Redis, and a worker can finish its current turn before shutdown. A later turn uses the saved conversation history.
+- **Available:** The CLI can start and resume a chat by ID, including answers or failures that arrived while it was closed. `fw chat --msg` submits one prompt, prints its result, and exits. Its conversation reader group defaults to `user` and can be selected with `--group`. Prompts and completed answers pass through Redis, and a worker can finish its current turn before shutdown. A later turn uses the saved conversation history.
 - **Remaining:** List conversations, show responses as they arrive, and show tool or delegate progress. Decide how long conversations remain available.
 - **Decision:** Senders that need sequential conversation history wait for a turn to finish before submitting the next prompt. Decide what ends a conversation, whether ending can happen automatically, and what later submissions do.
 - **Done when:** A client can disconnect and return to the same conversation, worker crashes and restarts do not lose accepted turns, and serialized prompts produce a coherent sequence of answers. Automated tests demonstrate these behaviors.
 
 ## 3. Web integration and monitoring — partial
 
-- **Available:** `fw web` serves an optional FastAPI router with a read-only SSE feed for a conversation. The feed replays its events and follows new ones.
-- **Remaining:** Add health and statistics endpoints, a simple read-only monitoring UI, and a documented way for clients to reconnect from their last event instead of replaying the full stream.
+- **Available:** `fw web` serves an optional FastAPI router with read-only SSE feeds for one conversation or the ten most recently active conversations. The per-conversation feed replays its full retained stream; the recent feed replays up to ten events per selected conversation. Both follow new events. A simple monitoring page displays the recent feed.
+- **Remaining:** Add health and statistics endpoints, and a documented way for clients to reconnect from their last event instead of replaying the full stream.
 - **Done when:** A browser can observe an active conversation and reconnect without starting or consuming its work.

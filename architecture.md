@@ -97,12 +97,30 @@ entries. Each SSE message carries the Redis stream entry ID, the stored event
 type, and its fields. The route currently replays from the beginning on every
 connection; it does not use `Last-Event-ID` to resume from a cursor.
 
+The `/conversations/recent/events` route scans dispatch entries backward for
+the ten most recently poked distinct conversations. It fetches up to ten
+retained events from each selected stream with `XREVRANGE`, sends them in stream
+order, then follows the streams alongside `fw:dispatch` in one `XREAD` call.
+A new poke moves its conversation to the recent set and evicts the least
+recently poked one when the set is full; a newly selected stream gets the same
+ten-event replay. Each SSE event includes its conversation ID and uses
+`conversation_id:stream_entry_id` as its SSE ID. The feed is a monitoring
+heuristic: a conversation appears after its first prompt, and events from
+different streams have no strict global order.
+
+The optional web package keeps the module-level router in `web/apirouter.py`
+and its packaged Jinja2 template in `web/templates`. The `/monitor` route
+renders a small read-only page whose `EventSource` subscribes to the recent
+feed. It listens for each current conversation event type and keeps at most
+200 rendered entries in the browser.
+
 ## AD8 — CLI reader groups
 
-`Chat.run` creates a consumer group on its conversation stream, starting at ID
-`0`. The default group is `user`; `fw chat --group` selects another. It uses the
-stable consumer name `terminal` so a later CLI process can read entries left
-pending by an interrupted session. On startup it reads pending entries with
+`Chat.run` and `Chat.run_once` use a consumer group on the conversation stream,
+starting at ID `0`. The default group is `user`; `fw chat --group` selects
+another. They use the stable consumer name `terminal` so a later CLI process
+can read entries left pending by an interrupted session. On startup it reads
+pending entries with
 `XREADGROUP` at `0`, then reads new entries with `>`.
 
 The CLI acknowledges ordinary status events as it reads them. It keeps a
@@ -110,5 +128,7 @@ The CLI acknowledges ordinary status events as it reads them. It keeps a
 `turn.failed` event, then acknowledges both entries together. This lets a
 resumed CLI wait for a turn that was still running when it closed. A terminal
 exit between printing and acknowledgement can cause the result to be printed
-again. Each group represents one logical terminal reader; the library's
-`Chat.receive` and the web feed still use independent `XREAD` calls.
+again. Each group represents one logical terminal reader. In one-shot mode,
+`--msg` prints the new turn's result to stdout and any earlier unread results
+to stderr. The library's `Chat.receive` and the web feed still use independent
+`XREAD` calls.

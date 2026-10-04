@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.135,<1", "uvicorn>=0.30,<1"]
+web = ["fastapi>=0.135,<1", "jinja2>=3.1,<4", "uvicorn>=0.30,<1"]
 openai = ["pydantic-ai-slim[openai]>=2.54,<3"]
 test = [
   "pytest>=8,<10",
@@ -25,7 +25,10 @@ test = [
 fw = "fallingwater.cli:main"
 
 [tool.setuptools]
-packages = ["fallingwater", "fallingwater.demo"]
+packages = ["fallingwater", "fallingwater.demo", "fallingwater.web"]
+
+[tool.setuptools.package-data]
+"fallingwater.web" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

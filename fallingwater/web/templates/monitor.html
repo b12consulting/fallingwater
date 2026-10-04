@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fallingwater monitor</title>
+  <style>
+    body { font: 1rem/1.5 system-ui, sans-serif; max-width: 72rem; margin: 2rem auto; padding: 0 1rem; }
+    header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+    #status { color: #555; }
+    #events { list-style: none; padding: 0; }
+    #events li { border-top: 1px solid #ddd; padding: 1rem 0; }
+    #events pre { margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Recent conversations</h1>
+    <span id="status" role="status">Connecting…</span>
+  </header>
+  <p>Events from the ten most recently active conversations appear below.</p>
+  <noscript>Enable JavaScript to follow the event feed.</noscript>
+  <ul id="events"></ul>
+  <script>
+    const list = document.getElementById("events");
+    const status = document.getElementById("status");
+    const source = new EventSource({{ events_url | tojson }});
+
+    source.onopen = () => { status.textContent = "Connected"; };
+    source.onerror = () => { status.textContent = "Reconnecting…"; };
+
+    for (const type of {{ event_types | tojson }}) {
+      source.addEventListener(type, (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          data = { raw: event.data };
+        }
+
+        const item = document.createElement("li");
+        const heading = document.createElement("strong");
+        heading.textContent = `${data.conversation_id ?? "unknown"} · ${event.type}`;
+        const details = document.createElement("pre");
+        const visible = { ...data };
+        delete visible.history;
+        details.textContent = JSON.stringify(visible, null, 2);
+        item.append(heading, details);
+        list.prepend(item);
+        while (list.children.length > 200) {
+          list.lastElementChild.remove();
+        }
+      });
+    }
+  </script>
+</body>
+</html>

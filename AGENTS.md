@@ -31,7 +31,11 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- proxy.py              Pydantic AI turn processing
 |   |-- streams.py            Redis key and event names
 |   |-- utils.py              Shared logger and CLI logging setup
-|   |-- web.py                FastAPI router, SSE feed, and standalone app
+|   |-- web/                  Optional FastAPI integration and monitoring page
+|   |   |-- __init__.py       Web exports
+|   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
+|   |   `-- templates/
+|   |       `-- monitor.html  Read-only recent conversation monitor
 |   |-- worker.py             Proxy pool and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       `-- __init__.py       haiku_master and flaky_agent demos
@@ -41,7 +45,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks
     |-- test_proxy.py         Conversation loading and turn processing checks
-    `-- test_web.py           Web route and SSE feed checks
+    `-- test_web.py           Web routes, page, and SSE feed checks
 ```
 
 `roadmap.md` tracks high-level features and decisions visible to users or

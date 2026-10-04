@@ -38,11 +38,12 @@ def test_web_command_passes_config_to_app_and_uvicorn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pytest.importorskip("fastapi")
+    pytest.importorskip("jinja2")
     pytest.importorskip("uvicorn")
     app = object()
     create_app = MagicMock(return_value=app)
     serve = MagicMock()
-    monkeypatch.setattr("fallingwater.web.create_app", create_app)
+    monkeypatch.setattr("fallingwater.web.apirouter.create_app", create_app)
     monkeypatch.setattr("uvicorn.run", serve)
 
     assert (
@@ -99,6 +100,7 @@ def test_chat_argument_defaults_come_from_environment(
     assert args.agent == "fallingwater.demo:haiku_master"
     assert args.model == "openai:gpt-4o-mini"
     assert args.group == "user"
+    assert args.msg is None
 
     explicit = build_parser().parse_args(
         [
@@ -246,6 +248,25 @@ def test_cli_passes_resume_options_to_chat(
     )
     assert chat_class.call_args.kwargs["model"] == "openai:another-model"
     chat.run.assert_called_once_with()
+
+
+def test_chat_msg_sends_one_prompt_without_starting_terminal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    connection = MagicMock()
+    connection.__enter__.return_value.exists.return_value = False
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
+    )
+    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "bright_turing")
+    chat = MagicMock(conversation_id="bright_turing")
+    monkeypatch.setattr("fallingwater.cli.Chat", MagicMock(return_value=chat))
+
+    assert main(["chat", "--msg", "Hello"]) == 0
+
+    chat.run_once.assert_called_once_with("Hello")
+    chat.run.assert_not_called()
+    assert capsys.readouterr().err.strip() == "Conversation: bright_turing"
 
 
 def test_reset_deletes_only_selected_namespace(

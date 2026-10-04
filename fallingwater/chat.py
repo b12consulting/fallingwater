@@ -1,5 +1,6 @@
 """Synchronous Redis-backed conversation client."""
 
+import sys
 from uuid import uuid4
 
 from redis import Redis
@@ -51,6 +52,7 @@ class Chat:
 
         self._check_agent()
         if not first:
+            # XXX is it correct ??
             redis.xadd(
                 self.events,
                 {
@@ -128,7 +130,9 @@ class Chat:
                 raise
             logger.debug("Chat group %s already exists on %s", self.group, self.events)
 
-    def _handle_group_event(self, entry_id: str, fields: dict[str, str]) -> str | None:
+    def _handle_group_event(
+        self, entry_id: str, fields: dict[str, str], *, to_stderr: bool = False
+    ) -> str | None:
         event_type = fields.get("type")
         turn_id = fields.get("turn_id")
         if event_type == EventType.TURN_QUEUED and turn_id is not None:
@@ -136,10 +140,11 @@ class Chat:
             return None
 
         if event_type in (EventType.TURN_COMPLETED, EventType.TURN_FAILED):
+            output = sys.stderr if to_stderr else sys.stdout
             if event_type == EventType.TURN_COMPLETED:
-                print(fields["output"], flush=True)
+                print(fields["output"], file=output, flush=True)
             else:
-                print(f"Turn failed: {fields['error']}", flush=True)
+                print(f"Turn failed: {fields['error']}", file=output, flush=True)
             queued_id = self._pending_turns.pop(turn_id, None)
             if queued_id is None:
                 self.redis.xack(self.events, self.group, entry_id)
@@ -150,7 +155,7 @@ class Chat:
         self.redis.xack(self.events, self.group, entry_id)
         return None
 
-    def _drain_pending(self) -> None:
+    def _drain_pending(self, *, to_stderr: bool = False) -> None:
         """Replay entries assigned to this stable consumer before reading new ones."""
         cursor = "0"
         while True:
@@ -162,9 +167,11 @@ class Chat:
             for _, entries in batches:
                 for entry_id, fields in entries:
                     cursor = entry_id
-                    self._handle_group_event(entry_id, fields)
+                    self._handle_group_event(entry_id, fields, to_stderr=to_stderr)
 
-    def _read_new(self, *, block: int | None = None) -> set[str]:
+    def _read_new(
+        self, *, block: int | None = None, to_stderr: bool = False
+    ) -> set[str]:
         completed: set[str] = set()
         while True:
             batches = self.redis.xreadgroup(
@@ -174,29 +181,43 @@ class Chat:
                 return completed
             for _, entries in batches:
                 for entry_id, fields in entries:
-                    turn_id = self._handle_group_event(entry_id, fields)
+                    turn_id = self._handle_group_event(
+                        entry_id, fields, to_stderr=to_stderr
+                    )
                     if turn_id is not None:
                         completed.add(turn_id)
             if block is not None:
                 return completed
 
+    def _resume_group(self, *, to_stderr: bool = False) -> None:
+        """Catch up with unread events before accepting another turn."""
+        self._ensure_group()
+        self._drain_pending(to_stderr=to_stderr)
+        self._read_new(to_stderr=to_stderr)
+        while self._pending_turns:
+            self._read_new(block=1000, to_stderr=to_stderr)
+
+    def _send_and_wait(self, prompt: str) -> None:
+        turn_id, _ = self.send(prompt)
+        while turn_id not in self._read_new(block=1000):
+            pass
+
+    def run_once(self, prompt: str) -> None:
+        """Print the result of one prompt and return without opening a terminal."""
+        self._resume_group(to_stderr=True)
+        self._send_and_wait(prompt)
+
     def run(self) -> None:
         """Run a small terminal chat; Ctrl-C leaves the conversation intact."""
-        self._ensure_group()
         print(f"Conversation: {self.conversation_id}")
         print(f"Model: {self.model}")
         print(f"Agent: {self.agent_path}")
         try:
-            self._drain_pending()
-            self._read_new()
+            self._resume_group()
             while True:
-                while self._pending_turns:
-                    self._read_new(block=1000)
                 prompt = input("> ")
                 if prompt:
-                    turn_id, _ = self.send(prompt)
-                    while turn_id not in self._read_new(block=1000):
-                        pass
+                    self._send_and_wait(prompt)
         except (EOFError, KeyboardInterrupt):
             logger.debug("Chat %s closed from the terminal", self.conversation_id)
             print()

@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 from importlib.metadata import version
 from collections.abc import Sequence
 
@@ -60,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_parser.add_argument(
         "--group", default="user", help="Conversation reader group (default: user)."
+    )
+    chat_parser.add_argument(
+        "--msg", help="Send one message, print the response, and exit."
     )
     chat_parser.set_defaults(handler=run_chat)
 
@@ -122,7 +126,12 @@ def run_chat(args: argparse.Namespace) -> int:
                 "Could not open conversation %s", conversation_id, exc_info=True
             )
             raise SystemExit(f"fw chat: {error}") from None
-        chat.run()
+        if args.msg is None:
+            chat.run()
+        else:
+            if args.conversation is None:
+                print(f"Conversation: {chat.conversation_id}", file=sys.stderr)
+            chat.run_once(args.msg)
     return 0
 
 
@@ -131,7 +140,7 @@ def run_web(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from .web import create_app
+        from .web.apirouter import create_app
     except ModuleNotFoundError as error:
         logger.debug("Web dependency is missing", exc_info=True)
         raise SystemExit("fw web requires fallingwater[web]") from error
