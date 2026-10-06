@@ -30,3 +30,8 @@ implementation choices and concerns belong in `raid.md`.
 - **Available:** `fw web` serves an optional FastAPI router with read-only SSE feeds for one conversation or the ten most recently active conversations. The per-conversation feed replays its full retained stream; the recent feed replays up to ten events per selected conversation. Both follow new events. A simple monitoring page displays the recent feed.
 - **Remaining:** Add health and statistics endpoints, and a documented way for clients to reconnect from their last event instead of replaying the full stream.
 - **Done when:** A browser can observe an active conversation and reconnect without starting or consuming its work.
+
+## 4. Refactoring — planned
+
+- **Scope:** Put Redis stream access behind synchronous `DispatchStream` and `ConversationStream` classes so chat, workers, and web monitoring use the same stream API. Keep shared command mechanics in a small internal abstraction where they are genuinely common, and keep cross-stream turn submission atomic.
+- **Done when:** Chat, worker, and web code use the stream classes for Redis stream operations, with existing event and transaction behavior preserved.

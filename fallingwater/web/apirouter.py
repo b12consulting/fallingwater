@@ -1,6 +1,6 @@
 """FastAPI router and small standalone app for conversation events."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import EventSourceResponse, HTMLResponse
 from fastapi.sse import ServerSentEvent
 from fastapi.templating import Jinja2Templates
-from redis.asyncio import Redis
+from redis import Redis
 
 from ..streams import EventType, StreamNames
 from ..utils import logger
@@ -48,7 +48,7 @@ def monitor(request: Request) -> HTMLResponse:
     )
 
 
-async def conversation_stream(
+def conversation_stream(
     conversation_id: str,
     redis: Annotated[Redis, Depends(get_redis)],
     names: Annotated[StreamNames, Depends(get_names)],
@@ -58,12 +58,12 @@ async def conversation_stream(
     except ValueError as error:
         logger.debug("Invalid conversation ID %s", conversation_id, exc_info=True)
         raise HTTPException(status_code=400, detail=str(error)) from error
-    if not await redis.exists(stream):
+    if not redis.exists(stream):
         raise HTTPException(status_code=404, detail="Conversation not found")
     return stream
 
 
-async def _recent_streams(
+def _recent_streams(
     redis: Redis, names: StreamNames
 ) -> tuple[str, dict[str, str]]:
     """Find the latest dispatch ID and ten distinct recently poked conversations."""
@@ -71,7 +71,7 @@ async def _recent_streams(
     before = "+"
     recent_ids: dict[str, None] = {}
     while len(recent_ids) < RECENT_CONVERSATION_LIMIT:
-        entries = await redis.xrevrange(names.dispatch, max=before, min="-", count=100)
+        entries = redis.xrevrange(names.dispatch, max=before, min="-", count=100)
         if not entries:
             break
         if dispatch_cursor == "0-0":
@@ -93,11 +93,11 @@ async def _recent_streams(
     return dispatch_cursor, streams
 
 
-async def _recent_tail(
+def _recent_tail(
     redis: Redis, stream: str
 ) -> tuple[str, list[tuple[str, dict[str, str]]]]:
     """Return up to ten retained events in stream order and their latest ID."""
-    entries = await redis.xrevrange(stream, max="+", min="-", count=RECENT_EVENT_LIMIT)
+    entries = redis.xrevrange(stream, max="+", min="-", count=RECENT_EVENT_LIMIT)
     return (entries[0][0] if entries else "0-0"), list(reversed(entries))
 
 
@@ -115,21 +115,21 @@ def _recent_sse(
 
 
 @router.get("/conversations/recent/events", response_class=EventSourceResponse)
-async def recent_events(
+def recent_events(
     redis: Annotated[Redis, Depends(get_redis)],
     names: Annotated[StreamNames, Depends(get_names)],
-) -> AsyncIterator[ServerSentEvent]:
+) -> Iterator[ServerSentEvent]:
     """Follow streams for the ten most recently dispatched conversations."""
-    dispatch_cursor, streams = await _recent_streams(redis, names)
+    dispatch_cursor, streams = _recent_streams(redis, names)
 
     for stream in streams:
-        streams[stream], entries = await _recent_tail(redis, stream)
+        streams[stream], entries = _recent_tail(redis, stream)
         for entry_id, fields in entries:
             yield _recent_sse(names, stream, entry_id, fields)
 
     while True:
         new_streams: dict[str, None] = {}
-        batches = await redis.xread(
+        batches = redis.xread(
             {names.dispatch: dispatch_cursor, **streams}, count=100, block=1000
         )
         for stream, entries in batches:
@@ -162,7 +162,7 @@ async def recent_events(
         for stream in new_streams:
             if stream not in streams or streams[stream] != "0-0":
                 continue
-            streams[stream], entries = await _recent_tail(redis, stream)
+            streams[stream], entries = _recent_tail(redis, stream)
             for entry_id, fields in entries:
                 yield _recent_sse(names, stream, entry_id, fields)
 
@@ -171,14 +171,14 @@ async def recent_events(
     "/conversations/{conversation_id}/events",
     response_class=EventSourceResponse,
 )
-async def events(
+def events(
     stream: Annotated[str, Depends(conversation_stream)],
     redis: Annotated[Redis, Depends(get_redis)],
-) -> AsyncIterator[ServerSentEvent]:
+) -> Iterator[ServerSentEvent]:
     """Replay all conversation events, then follow new entries."""
     cursor = "0-0"
     while True:
-        batches = await redis.xread({stream: cursor}, count=100, block=1000)
+        batches = redis.xread({stream: cursor}, count=100, block=1000)
         for _, entries in batches:
             for entry_id, fields in entries:
                 cursor = entry_id
@@ -201,9 +201,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        yield
-        if owns_redis:
-            await client.aclose()
+        try:
+            yield
+        finally:
+            if owns_redis:
+                client.close()
 
     app = FastAPI(lifespan=lifespan)
     app.state.fw_redis = client
