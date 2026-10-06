@@ -46,7 +46,7 @@ class RedisStream:
             lower = f"({entries[-1][0]}"
 
     def one(self):
-        first = self.redis.xrange(self.events, count=1)
+        first = self.redis.xrange(self.name, count=1)
         if not first:
             return None
         return first[0][1]

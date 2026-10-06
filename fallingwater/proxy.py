@@ -1,6 +1,7 @@
 """Run complete Pydantic AI turns from the Redis dispatch stream."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from threading import Event
 from uuid import uuid4
 
@@ -11,6 +12,14 @@ from redis.exceptions import RedisError, ResponseError
 from .catalog import reify_agent
 from .streams import EventType, StreamNames, ConversationStream
 from .utils import logger
+
+
+@dataclass(frozen=True, slots=True)
+class Turn:
+    agent_path: str
+    model: str
+    prompt: str
+    history: Sequence[ModelMessage]
 
 
 class Proxy:
@@ -47,7 +56,7 @@ class Proxy:
 
     def load_turn(
         self, conversation_stream: ConversationStream, turn_id: str
-    ) -> tuple[str, str, str, Sequence[ModelMessage]]:
+    ) -> Turn:
         """Load the queued prompt, fixed agent settings, and prior history."""
 
         history: list[ModelMessage] = []
@@ -75,9 +84,11 @@ class Proxy:
         if prompt is None:
             raise ValueError(f"No prompt found for turn: {turn_id}")
         if agent_path is None:
-            raise ValueError(f"Conversation settings not found in {events}")
+            raise ValueError(
+                f"Conversation settings not found in {conversation_stream.name}"
+            )
 
-        return agent_path, model, prompt, history or None
+        return Turn(agent_path, model, prompt, history)
 
     def process(self, fields: dict[str, str]) -> None:
         turn_id = fields["turn_id"]
@@ -109,15 +120,14 @@ class Proxy:
             return
 
         # Reify agent and run it
-        agent_path, model, prompt, history = turn
         try:
-            agent = reify_agent(agent_path)
+            agent = reify_agent(turn.agent_path)
             result = agent.run_sync(
-                prompt,
-                message_history=history,
+                turn.prompt,
+                message_history=turn.history,
                 conversation_id=fields["conversation_id"],
                 run_id=turn_id,
-                model=model or None,
+                model=turn.model or None,
             )
         except Exception as error:
             logger.exception(

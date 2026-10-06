@@ -60,6 +60,10 @@ Each completed event stores only the new Pydantic AI messages for that turn.
 The `history` field contains their JSON representation; the proxy appends
 these deltas in stream order when reconstructing history.
 
+`Proxy.load_turn` returns the queued prompt, fixed agent path and model, and
+prior history together in a frozen `Turn` dataclass. This gives turn processing
+one named value instead of a positional tuple.
+
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
 conversation, and each may load the same prior history.
