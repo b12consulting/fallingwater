@@ -61,14 +61,10 @@ class Proxy:
                     event_type == EventType.TURN_QUEUED
                     and fields.get("turn_id") == turn_id
                 ):
-                    prompt = fields["prompt"]
+                    prompt = fields["message"]
                 elif event_type == EventType.TURN_COMPLETED:
                     messages = ModelMessagesTypeAdapter.validate_json(fields["history"])
-                    if fields.get("history_format", "snapshot") == "delta":
-                        history.extend(messages)
-                    else:
-                        # Older completion events contain the full history.
-                        history = messages
+                    history.extend(messages)
             if len(entries) < 100:
                 if agent_path is None or prompt is None:
                     raise ValueError(f"Queued turn {turn_id} not found in {events}")
@@ -79,8 +75,6 @@ class Proxy:
         turn_id = fields["turn_id"]
         events = self.names.conversation(fields["conversation_id"])
         agent_path, model, prompt, history = self._load_turn(events, turn_id)
-        self.redis.xadd(events, {"type": EventType.TURN_STARTED, "turn_id": turn_id})
-
         try:
             agent = reify_agent(agent_path)
             result = agent.run_sync(
@@ -108,9 +102,8 @@ class Proxy:
                 {
                     "type": EventType.TURN_COMPLETED,
                     "turn_id": turn_id,
-                    "output": str(result.output),
+                    "message": str(result.output),
                     "history": result.new_messages_json().decode(),
-                    "history_format": "delta",
                 },
             )
             logger.info(

@@ -32,7 +32,7 @@ def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
         [
             call(
                 "fw:conversation:abc:events",
-                {"type": EventType.TURN_QUEUED, "turn_id": turn_id, "prompt": "hello"},
+                {"type": EventType.TURN_QUEUED, "turn_id": turn_id, "message": "hello"},
             ),
             call(
                 "fw:dispatch",
@@ -65,6 +65,34 @@ def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
             "model": "test",
         },
     )
+
+
+def test_receive_reads_completed_message() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xrange.return_value = []
+    stream = "fw:conversation:abc:events"
+    redis.xread.return_value = [
+        (
+            stream,
+            [
+                ("3-0", {"type": EventType.TURN_QUEUED, "turn_id": "other"}),
+                (
+                    "4-0",
+                    {
+                        "type": EventType.TURN_COMPLETED,
+                        "turn_id": "turn-1",
+                        "message": "answer",
+                    },
+                ),
+            ],
+        )
+    ]
+    chat = Chat(
+        redis, conversation_id="abc", agent_path="pydantic_ai:Agent", model="test"
+    )
+
+    assert chat.receive("turn-1", "2-0") == "answer"
+    redis.xread.assert_called_once_with({stream: "2-0"}, block=1000)
 
 
 def test_invalid_agent_does_not_create_conversation() -> None:
@@ -154,7 +182,7 @@ def test_cli_group_replays_unread_completed_turn(
                         {
                             "type": EventType.TURN_COMPLETED,
                             "turn_id": "turn-1",
-                            "output": "answer",
+                            "message": "answer",
                         },
                     ),
                 ],
@@ -207,7 +235,7 @@ def test_cli_group_recovers_pending_turn_and_waits_for_its_answer(
                         {
                             "type": EventType.TURN_COMPLETED,
                             "turn_id": "turn-1",
-                            "output": "late answer",
+                            "message": "late answer",
                         },
                     )
                 ],
@@ -282,7 +310,7 @@ def test_run_once_prints_its_response_and_acknowledges_it(
                         {
                             "type": EventType.TURN_COMPLETED,
                             "turn_id": "turn-1",
-                            "output": "answer",
+                            "message": "answer",
                         },
                     ),
                 ],
@@ -320,7 +348,7 @@ def test_run_once_keeps_prior_answers_out_of_stdout(
                         {
                             "type": EventType.TURN_COMPLETED,
                             "turn_id": "old",
-                            "output": "earlier answer",
+                            "message": "earlier answer",
                         },
                     ),
                 ],
@@ -337,7 +365,7 @@ def test_run_once_keeps_prior_answers_out_of_stdout(
                         {
                             "type": EventType.TURN_COMPLETED,
                             "turn_id": "new",
-                            "output": "new answer",
+                            "message": "new answer",
                         },
                     ),
                 ],

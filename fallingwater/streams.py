@@ -8,7 +8,6 @@ class EventType(StrEnum):
     CONVERSATION_CREATED = "conversation.created"
     CONVERSATION_POKE = "conversation.poke"
     TURN_QUEUED = "turn.queued"
-    TURN_STARTED = "turn.started"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
 

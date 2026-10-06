@@ -69,7 +69,7 @@ def test_sse_replays_events_then_reads_the_tail() -> None:
                                     "agent": "demo",
                                 },
                             ),
-                            ("2-0", {"type": EventType.TURN_QUEUED, "prompt": "hello"}),
+                            ("2-0", {"type": EventType.TURN_QUEUED, "message": "hello"}),
                         ],
                     )
                 ],
@@ -79,7 +79,11 @@ def test_sse_replays_events_then_reads_the_tail() -> None:
                         [
                             (
                                 "3-0",
-                                {"type": EventType.TURN_STARTED, "turn_id": "turn-1"},
+                                {
+                                    "type": EventType.TURN_COMPLETED,
+                                    "turn_id": "turn-1",
+                                    "message": "answer",
+                                },
                             )
                         ],
                     )
@@ -100,7 +104,7 @@ def test_sse_replays_events_then_reads_the_tail() -> None:
             "demo",
         )
         assert (second.id, second.event) == ("2-0", EventType.TURN_QUEUED)
-        assert (third.id, third.event) == ("3-0", EventType.TURN_STARTED)
+        assert (third.id, third.event) == ("3-0", EventType.TURN_COMPLETED)
         assert redis.xread.await_args_list[0].args[0] == {
             "fw-test:conversation:abc:events": "0-0"
         }
@@ -194,14 +198,14 @@ def test_recent_feed_replays_only_ten_events_then_follows_the_tail() -> None:
                 [
                     (
                         f"{number}-0",
-                        {"type": EventType.TURN_COMPLETED, "output": str(number)},
+                        {"type": EventType.TURN_COMPLETED, "message": str(number)},
                     )
                     for number in range(12, 2, -1)
                 ],
             ]
         )
         redis.xread = AsyncMock(
-            return_value=[(stream, [("13-0", {"type": EventType.TURN_STARTED})])]
+            return_value=[(stream, [("13-0", {"type": EventType.TURN_QUEUED})])]
         )
         feed = recent_events(redis, names)
 
@@ -240,7 +244,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
                 ]
             if stream == names.conversation("c11"):
                 return [
-                    ("3-0", {"type": EventType.TURN_STARTED}),
+                    ("3-0", {"type": EventType.TURN_COMPLETED}),
                     ("2-0", {"type": EventType.TURN_QUEUED}),
                     ("1-0", {"type": EventType.CONVERSATION_CREATED}),
                 ]
@@ -252,7 +256,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
                 [
                     (
                         names.conversation("c10"),
-                        [("20-0", {"type": EventType.TURN_COMPLETED, "output": "old"})],
+                        [("20-0", {"type": EventType.TURN_COMPLETED, "message": "old"})],
                     )
                 ],
                 [
@@ -273,7 +277,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
                         [
                             (
                                 "21-0",
-                                {"type": EventType.TURN_COMPLETED, "output": "evicted"},
+                                {"type": EventType.TURN_COMPLETED, "message": "evicted"},
                             )
                         ],
                     ),

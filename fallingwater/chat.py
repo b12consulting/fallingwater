@@ -89,7 +89,7 @@ class Chat:
         with self.redis.pipeline(transaction=True) as pipeline:
             pipeline.xadd(
                 self.events,
-                {"type": EventType.TURN_QUEUED, "turn_id": turn_id, "prompt": prompt},
+                {"type": EventType.TURN_QUEUED, "turn_id": turn_id, "message": prompt},
             )
             pipeline.xadd(
                 self.names.dispatch,
@@ -112,7 +112,7 @@ class Chat:
                     if fields.get("turn_id") != turn_id:
                         continue
                     if fields.get("type") == EventType.TURN_COMPLETED:
-                        return fields["output"]
+                        return fields["message"]
                     if fields.get("type") == EventType.TURN_FAILED:
                         raise RuntimeError(fields["error"])
 
@@ -142,7 +142,7 @@ class Chat:
         if event_type in (EventType.TURN_COMPLETED, EventType.TURN_FAILED):
             output = sys.stderr if to_stderr else sys.stdout
             if event_type == EventType.TURN_COMPLETED:
-                print(fields["output"], file=output, flush=True)
+                print(fields["message"], file=output, flush=True)
             else:
                 print(f"Turn failed: {fields['error']}", file=output, flush=True)
             queued_id = self._pending_turns.pop(turn_id, None)

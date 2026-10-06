@@ -17,14 +17,22 @@ def _messages_json(prompt: str) -> str:
     return ModelMessagesTypeAdapter.dump_json(messages).decode()
 
 
-def test_history_replays_deltas_after_legacy_snapshot() -> None:
+def test_history_replays_implicit_deltas_across_pages() -> None:
     redis = MagicMock(spec=Redis)
     first_page = [
         ("1-0", {"type": EventType.CONVERSATION_CREATED, "agent": "example:agent"}),
-        ("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "turn-1", "prompt": "go"}),
+        ("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "turn-1", "message": "go"}),
     ]
     first_page.extend(
-        (f"{index}-0", {"type": EventType.TURN_STARTED}) for index in range(3, 100)
+        (
+            f"{index}-0",
+            {
+                "type": EventType.TURN_QUEUED,
+                "turn_id": f"other-{index}",
+                "message": "other",
+            },
+        )
+        for index in range(3, 100)
     )
     first_page.append(
         (
@@ -40,7 +48,6 @@ def test_history_replays_deltas_after_legacy_snapshot() -> None:
                 {
                     "type": EventType.TURN_COMPLETED,
                     "history": _messages_json("second"),
-                    "history_format": "delta",
                 },
             )
         ],
@@ -60,8 +67,8 @@ def test_load_turn_selects_prompt_by_turn_id() -> None:
     redis = MagicMock(spec=Redis)
     redis.xrange.return_value = [
         ("1-0", {"type": EventType.CONVERSATION_CREATED, "agent": "example:agent"}),
-        ("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "first", "prompt": "one"}),
-        ("3-0", {"type": EventType.TURN_QUEUED, "turn_id": "second", "prompt": "two"}),
+        ("2-0", {"type": EventType.TURN_QUEUED, "turn_id": "first", "message": "one"}),
+        ("3-0", {"type": EventType.TURN_QUEUED, "turn_id": "second", "message": "two"}),
     ]
 
     _, _, prompt, _ = Proxy(redis)._load_turn("fw:conversation:abc:events", "second")
@@ -84,7 +91,7 @@ def test_completed_turn_stores_only_new_messages(
         ),
         (
             "2-0",
-            {"type": EventType.TURN_QUEUED, "turn_id": "turn-1", "prompt": "hello"},
+            {"type": EventType.TURN_QUEUED, "turn_id": "turn-1", "message": "hello"},
         ),
     ]
     result = MagicMock(output="reply")
@@ -103,11 +110,13 @@ def test_completed_turn_stores_only_new_messages(
     agent.run_sync.assert_called_once()
     assert agent.run_sync.call_args.args == ("hello",)
     assert agent.run_sync.call_args.kwargs["model"] == "test"
+    assert redis.xadd.call_count == 1
     completed = redis.xadd.call_args_list[-1].args[1]
     assert completed["type"] == EventType.TURN_COMPLETED
     messages = ModelMessagesTypeAdapter.validate_json(completed["history"])
     assert messages[0].parts[0].content == "hello"
-    assert completed["history_format"] == "delta"
+    assert completed["message"] == "reply"
+    assert "history_format" not in completed
     result.all_messages_json.assert_not_called()
 
 
@@ -126,7 +135,7 @@ def test_flaky_demo_failure_is_recorded_as_turn_failed(
         ),
         (
             "2-0",
-            {"type": EventType.TURN_QUEUED, "turn_id": "turn-1", "prompt": "hello"},
+            {"type": EventType.TURN_QUEUED, "turn_id": "turn-1", "message": "hello"},
         ),
     ]
     monkeypatch.setattr("fallingwater.demo.random", lambda: 0.0)
@@ -139,6 +148,7 @@ def test_flaky_demo_failure_is_recorded_as_turn_failed(
             }
         )
 
+    assert redis.xadd.call_count == 1
     failed = redis.xadd.call_args_list[-1].args[1]
     assert failed == {
         "type": EventType.TURN_FAILED,

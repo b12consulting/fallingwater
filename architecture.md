@@ -35,27 +35,31 @@ Fallingwater coordinates the turns; the imported agent defines their behavior.
 
 Redis Streams connect message submitters, workers, and readers. The shared
 `fw:dispatch` stream distributes turns through the `workers` consumer group. A
-per-conversation stream records the creation event, turn status, response, and
-history needed for the next turn. `Chat` reads that stream with `XREAD` without
-joining the worker group.
+per-conversation stream records the creation event, queued prompts, outcomes,
+and history needed for the next turn. `Chat.receive` reads that stream with
+`XREAD`; the CLI uses a separate consumer group on the same stream.
 
-| Stream                                      | Event type             | Fields                                                      |
-|---------------------------------------------|------------------------|-------------------------------------------------------------|
-| Conversation, `fw:conversation:<id>:events` | `conversation.created` | Agent import path, model                                    |
-| Conversation                                | `turn.queued`          | Turn ID, user prompt                                        |
-| Conversation                                | `turn.started`         | Turn ID                                                     |
-| Conversation                                | `turn.completed`       | Turn ID, response text, new Pydantic AI messages, format    |
-| Conversation                                | `turn.failed`          | Turn ID, error text                                         |
-| Dispatch, `fw:dispatch`                     | `conversation.poke`    | Conversation ID, turn ID                                    |
+| Stream                                      | `type`                 | Other fields                                      |
+|---------------------------------------------|------------------------|---------------------------------------------------|
+| Conversation, `fw:conversation:<id>:events` | `conversation.created` | `agent`, `model`                                  |
+| Conversation                                | `turn.queued`          | `turn_id`, `message` (user prompt)                |
+| Conversation                                | `turn.completed`       | `turn_id`, `message` (response), `history`        |
+| Conversation                                | `turn.failed`          | `turn_id`, `error`                                |
+| Dispatch, `fw:dispatch`                     | `conversation.poke`    | `conversation_id`, `turn_id`                      |
 
 Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in one Redis transaction. The
 entries have different Redis stream IDs but share a turn ID. A worker uses the
 conversation ID and turn ID to load the queued prompt, fixed agent and model,
-and prior history from the conversation stream. Workers write later turn status
-events only to that stream.
-Existing completion events without a format field contain full-history
-snapshots; the proxy can read those alongside newer delta events.
+and prior history from the conversation stream. Workers write completion or
+failure events to that stream. A claimed dispatch entry stays pending in the
+`workers` group until the worker acknowledges it after processing; pending
+entries can also remain after a worker crash.
+
+Each completed event stores only the new Pydantic AI messages for that turn.
+The `history` field contains their JSON representation; the proxy appends
+these deltas in stream order when reconstructing history.
+
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
 conversation, and each may load the same prior history.
@@ -120,15 +124,14 @@ feed. It listens for each current conversation event type and keeps at most
 starting at ID `0`. The default group is `user`; `fw chat --group` selects
 another. They use the stable consumer name `terminal` so a later CLI process
 can read entries left pending by an interrupted session. On startup it reads
-pending entries with
-`XREADGROUP` at `0`, then reads new entries with `>`.
+pending entries with `XREADGROUP` at `0`, then reads new entries with `>`.
 
-The CLI acknowledges ordinary status events as it reads them. It keeps a
-`turn.queued` entry pending until it prints that turn's `turn.completed` or
-`turn.failed` event, then acknowledges both entries together. This lets a
-resumed CLI wait for a turn that was still running when it closed. A terminal
-exit between printing and acknowledgement can cause the result to be printed
-again. Each group represents one logical terminal reader. In one-shot mode,
-`--msg` prints the new turn's result to stdout and any earlier unread results
-to stderr. The library's `Chat.receive` and the web feed still use independent
-`XREAD` calls.
+The CLI acknowledges `conversation.created` and unrecognized events as it reads
+them. It keeps a `turn.queued` entry pending until it prints that turn's
+`turn.completed` or `turn.failed` event, then acknowledges both entries
+together. This lets a resumed CLI wait for a turn that was still running when
+it closed. A terminal exit between printing and acknowledgement can cause the
+result to be printed again. Each group represents one logical terminal reader.
+In one-shot mode, `--msg` prints the new turn's result to stdout and any
+earlier unread results to stderr. The library's `Chat.receive` and the web
+feed still use independent `XREAD` calls.
