@@ -81,11 +81,13 @@ unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
 
 ## AD6 — Worker lifecycle
 
-Each proxy reads one dispatch entry at a time with `XREADGROUP`, reconstructs the
-agent and the latest completed message history, writes a result event, and
-acknowledges the dispatch entry. On SIGINT or SIGTERM, `Worker` signals its proxies
-to stop; a proxy finishes any turn it has taken before exiting. A later worker
-can reconstruct the agent and handle the next turn from saved history. An
+Each proxy reads one dispatch entry at a time through a `ReadGroup`. A
+`DispatchStream` creates the consumer group and returns the `ReadGroup`, which
+handles `XREADGROUP` and `XACK`. `Proxy` validates and processes each poke,
+reconstructs the agent and latest completed message history, and writes a
+result event. On SIGINT or SIGTERM, `Worker` signals its proxies to stop; a
+proxy finishes any turn it has taken before exiting. A later worker can
+reconstruct the agent and handle the next turn from saved history. An
 in-progress Pydantic AI run is not resumed midway through a turn. Acknowledged
 entries remain in the dispatch stream, and pending entries are not reclaimed
 after a worker crash. If a poke is malformed or has no matching queued event,

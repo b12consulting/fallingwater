@@ -30,5 +30,8 @@ packages = ["fallingwater", "fallingwater.demo", "fallingwater.web"]
 [tool.setuptools.package-data]
 "fallingwater.web" = ["templates/*.html"]
 
+[tool.black]
+line-length = 80
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
