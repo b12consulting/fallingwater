@@ -152,7 +152,7 @@ class Proxy:
 
     def run(self) -> None:
         """Read new work until stopped, finishing any turn already claimed."""
-        group = self.dispatch_stream.group(self.group)
+        group = self.dispatch_stream.group(self.group, mkstream=True)
         while not self.stop_event.is_set():
             entries = group.read_new(
                 self.consumer,

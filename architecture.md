@@ -39,6 +39,12 @@ per-conversation stream records the creation event, queued prompts, outcomes,
 and history needed for the next turn. `Chat.receive` reads that stream with
 `XREAD`; the CLI uses a separate consumer group on the same stream.
 
+`Chat` uses `ConversationStream` and `DispatchStream` for stream reads and
+writes. Its consumer group is represented by `ReadGroup`, which handles new
+entries, pending entries, and acknowledgements. `Chat.send` keeps the
+transaction across the conversation and dispatch streams; each stream queues
+its own `XADD` on the shared pipeline.
+
 | Stream                                      | `type`                 | Other fields                                      |
 |---------------------------------------------|------------------------|---------------------------------------------------|
 | Conversation, `fw:conversation:<id>:events` | `conversation.created` | `agent`, `model`                                  |
@@ -81,9 +87,10 @@ unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
 
 ## AD6 — Worker lifecycle
 
-Each proxy reads one dispatch entry at a time through a `ReadGroup`. A
-`DispatchStream` creates the consumer group and returns the `ReadGroup`, which
-handles `XREADGROUP` and `XACK`. `Proxy` validates and processes each poke,
+Each proxy reads one dispatch entry at a time through a `ReadGroup`. The stream
+creates the consumer group and returns the `ReadGroup`, which handles
+`XREADGROUP` and `XACK`. Dispatch streams use `MKSTREAM` when creating the
+worker group. `Proxy` validates and processes each poke,
 reconstructs the agent and latest completed message history, and writes a
 result event. On SIGINT or SIGTERM, `Worker` signals its proxies to stop; a
 proxy finishes any turn it has taken before exiting. A later worker can

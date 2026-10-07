@@ -61,45 +61,20 @@ class RedisStream:
             return None
         return first[0][1]
 
-    def add(self, item: dict):
-        self.redis.xadd(self.name, item)
+    def add(self, item: dict, *, pipeline=None) -> None:
+        client = self.redis if pipeline is None else pipeline
+        client.xadd(self.name, item)
 
+    def read_after(self, cursor: str, *, block: int) -> list[StreamEntry]:
+        batches = self.redis.xread({self.name: cursor}, block=block)
+        return [entry for _, entries in batches for entry in entries]
 
-class ReadGroup:
-    def __init__(self, stream: RedisStream, name: str):
-        self.stream = stream
-        self.name = name
-
-    def read_new(
-        self, consumer: str, *, count: int, block: int
-    ) -> Iterator[StreamEntry]:
-        batches = self.stream.redis.xreadgroup(
-            self.name,
-            consumer,
-            {self.stream.name: ">"},
-            count=count,
-            block=block,
-        )
-        for _, entries in batches:
-            yield from entries
-
-    def acknowledge(self, entry_id: str) -> None:
-        self.stream.redis.xack(self.stream.name, self.name, entry_id)
-
-
-class DispatchStream(RedisStream):
-    def __init__(self, redis, namespace: str = "fw"):
-        name = f"{namespace}:dispatch"
-        super().__init__(redis, name)
-
-    def group(self, name: str) -> ReadGroup:
+    def group(self, name: str, *, mkstream: bool = False) -> "ReadGroup":
+        options = {"id": "0"}
+        if mkstream:
+            options["mkstream"] = True
         try:
-            self.redis.xgroup_create(
-                self.name,
-                name,
-                id="0",
-                mkstream=True,
-            )
+            self.redis.xgroup_create(self.name, name, **options)
         except ResponseError as error:
             if not str(error).startswith("BUSYGROUP"):
                 logger.exception(
@@ -112,7 +87,50 @@ class DispatchStream(RedisStream):
         return ReadGroup(self, name)
 
 
+class ReadGroup:
+    def __init__(self, stream: RedisStream, name: str):
+        self.stream = stream
+        self.name = name
+
+    def read_new(
+        self, consumer: str, *, count: int, block: int | None
+    ) -> list[StreamEntry]:
+        return self._read(consumer, ">", count=count, block=block)
+
+    def read_pending(
+        self, consumer: str, cursor: str, *, count: int
+    ) -> list[StreamEntry]:
+        return self._read(consumer, cursor, count=count, block=None)
+
+    def _read(
+        self,
+        consumer: str,
+        cursor: str,
+        *,
+        count: int,
+        block: int | None,
+    ) -> list[StreamEntry]:
+        batches = self.stream.redis.xreadgroup(
+            self.name,
+            consumer,
+            {self.stream.name: cursor},
+            count=count,
+            block=block,
+        )
+        return [entry for _, entries in batches for entry in entries]
+
+    def acknowledge(self, *entry_ids: str) -> None:
+        if entry_ids:
+            self.stream.redis.xack(self.stream.name, self.name, *entry_ids)
+
+
+class DispatchStream(RedisStream):
+    def __init__(self, redis, namespace: str = "fw"):
+        name = StreamNames(namespace).dispatch
+        super().__init__(redis, name)
+
+
 class ConversationStream(RedisStream):
     def __init__(self, redis, conversation_id: str, namespace: str = "fw"):
-        name = f"{namespace}:conversation:{conversation_id}:events"
+        name = StreamNames(namespace).conversation(conversation_id)
         super().__init__(redis, name)
