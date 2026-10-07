@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         "conversation", nargs="?", help="Conversation ID to start or resume."
     )
     chat_parser.add_argument(
+        "params",
+        nargs="*",
+        metavar="KEY=VALUE",
+        help="Dependencies for a new conversation, as key=value pairs.",
+    )
+    chat_parser.add_argument(
         "-a",
         "--agent",
         default=os.getenv("FW_AGENT", "pydantic_ai:Agent"),
@@ -101,8 +107,17 @@ def run_worker(args: argparse.Namespace) -> int:
 
 
 def run_chat(args: argparse.Namespace) -> int:
+    conversation_id = args.conversation
+    params = list(args.params)
+    if conversation_id is not None and "=" in conversation_id:
+        params.insert(0, conversation_id)
+        conversation_id = None
+    try:
+        deps = _parse_chat_params(params)
+    except ValueError as error:
+        raise SystemExit(f"fw chat: {error}") from None
+
     with Redis.from_url(args.redis_url, decode_responses=True) as redis:
-        conversation_id = args.conversation
         if conversation_id is None:
             names = StreamNames(args.namespace)
             for _ in range(100):
@@ -120,6 +135,7 @@ def run_chat(args: argparse.Namespace) -> int:
                 agent_path=args.agent,
                 model=args.model,
                 group=args.group,
+                deps=deps,
             )
         except ValueError as error:
             logger.debug(
@@ -133,6 +149,21 @@ def run_chat(args: argparse.Namespace) -> int:
                 print(f"Conversation: {chat.conversation_id}", file=sys.stderr)
             chat.run_once(args.msg)
     return 0
+
+
+def _parse_chat_params(params: Sequence[str]) -> dict[str, str]:
+    """Parse CLI dependency values supplied as ``key=value`` arguments."""
+    deps: dict[str, str] = {}
+    for param in params:
+        if "=" not in param:
+            raise ValueError(f"invalid dependency {param!r}; expected key=value")
+        key, value = param.split("=", 1)
+        if not key:
+            raise ValueError(f"invalid dependency {param!r}; key must be nonempty")
+        if key in deps:
+            raise ValueError(f"duplicate dependency key {key!r}")
+        deps[key] = value
+    return deps
 
 
 def run_web(args: argparse.Namespace) -> int:

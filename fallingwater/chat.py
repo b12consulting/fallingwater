@@ -1,6 +1,8 @@
 """Synchronous Redis-backed conversation client."""
 
+import json
 import sys
+from collections.abc import Mapping
 from uuid import uuid4
 
 from redis import Redis
@@ -29,6 +31,7 @@ class Chat:
         agent_path: str | None = None,
         model: str | None = None,
         group: str = "user",
+        deps: Mapping[str, str] | None = None,
     ) -> None:
         self.redis = redis
         if not group:
@@ -48,6 +51,10 @@ class Chat:
                 raise ValueError(
                     f"{self.events} is not a Fallingwater conversation"
                 )
+            if deps:
+                raise ValueError(
+                    "dependencies can only be set for a new conversation"
+                )
             existing_agent = record["agent"]
             existing_model = record.get("model", "")
             self.agent_path = existing_agent
@@ -66,6 +73,7 @@ class Chat:
                     "type": EventType.CONVERSATION_CREATED,
                     "agent": self.agent_path,
                     "model": self.model,
+                    "deps": json.dumps(dict(deps or {})),
                 }
             )
 
@@ -169,8 +177,8 @@ class Chat:
         while True:
             entries = group.read_pending(
                 self.consumer,
-                cursor,
-                count=100,
+                cursor,     # maybe we should let the group deal with the cursor itself
+                count=100,  # TODO this should be a default param
             )
             if not entries:
                 return
