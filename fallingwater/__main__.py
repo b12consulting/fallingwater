@@ -1,4 +1,6 @@
-"""Run the Fallingwater CLI with ``python -m fallingwater``."""
+"""
+Run the Fallingwater CLI with ``python -m fallingwater``.
+"""
 
 from .cli import main
 

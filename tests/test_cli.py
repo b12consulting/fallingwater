@@ -1,4 +1,6 @@
-"""Smoke checks for the installed CLI entry point."""
+"""
+Smoke checks for the installed CLI entry point.
+"""
 
 from importlib.metadata import version
 from unittest.mock import MagicMock

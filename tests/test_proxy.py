@@ -1,4 +1,6 @@
-"""Checks for loading and processing turns from conversation events."""
+"""
+Checks for loading and processing turns from conversation events.
+"""
 
 from unittest.mock import MagicMock
 
@@ -36,7 +38,9 @@ def test_completed_turn_stores_only_new_messages(
         ),
     ]
     result = MagicMock(output="reply")
-    result.new_messages_json.return_value = _messages_json("hello").encode()
+    result.new_messages.return_value = ModelMessagesTypeAdapter.validate_json(
+        _messages_json("hello")
+    )
     agent = MagicMock()
     agent.run_sync.return_value = result
     monkeypatch.setattr("fallingwater.proxy.reify_agent", lambda _path: agent)
@@ -54,7 +58,7 @@ def test_completed_turn_stores_only_new_messages(
     assert redis.xadd.call_count == 1
     completed = redis.xadd.call_args_list[-1].args[1]
     assert completed["type"] == EventType.TURN_COMPLETED
-    messages = ModelMessagesTypeAdapter.validate_json(completed["history"])
+    messages = ModelMessagesTypeAdapter.validate_python(completed["history"])
     assert messages[0].parts[0].content == "hello"
     assert completed["message"] == "reply"
     assert "history_format" not in completed

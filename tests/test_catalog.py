@@ -1,4 +1,6 @@
-"""Agent import paths are the integration point for client applications."""
+"""
+Agent import paths are the integration point for client applications.
+"""
 
 import sys
 from types import ModuleType

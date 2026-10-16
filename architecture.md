@@ -8,9 +8,10 @@ tests use `fw-test`. For example, a conversation stream might be named
 `fw:conversation:abc:events` in normal use and
 `fw-test:conversation:abc:events` in a test.
 
-The `fmt_dispatch_stream` and `fmt_conversation_stream` helpers validate and
-format these names from the configured namespace and conversation ID, so an
-application and its tests can share a Redis instance without mixing their data.
+Namespaces contain lowercase letters, digits, and hyphens. The
+`fmt_dispatch_stream` and `fmt_conversation_stream` helpers validate and format
+these names from the configured namespace and conversation ID, so an application
+and its tests can share a Redis instance without mixing their data.
 
 ## AD2 — Library first
 
@@ -70,9 +71,9 @@ entries can also remain after a worker crash.
 
 Each completed event stores only the new Pydantic AI messages for that turn,
 their display response, and the Pydantic AI `RunUsage` value. The `history`
-payload field contains the new messages' JSON representation; the proxy appends
-these deltas in stream order and passes the latest usage value into the next
-agent run.
+payload field contains the new messages as structured JSON objects; the proxy
+appends these deltas in stream order and passes the latest usage value into the
+next agent run.
 
 `Proxy.load_conversation` returns the queued `next_prompt`, fixed agent path and
 model, prior history, dependencies, current turn ID, and latest usage together
@@ -192,9 +193,10 @@ payload model:
   - Fields: `turn_id: str`, `message: str`
   - Turn ID and user prompt.
 - `turn.completed`
-  - Fields: `turn_id: str`, `message: str`, `history: str`, `usage: RunUsage`
-  - Turn ID, displayed response, JSON for the new Pydantic AI messages, and
-    accumulated usage.
+  - Fields: `turn_id: str`, `message: str`, `history: list[dict[str, Any]]`,
+    `usage: RunUsage`
+  - Turn ID, displayed response, structured JSON data for the new Pydantic AI
+    messages, and accumulated usage.
 - `turn.failed`
   - Fields: `turn_id: str`, `error: str`
   - Turn ID and failure description.
@@ -202,3 +204,13 @@ payload model:
 The dispatch stream is text based and does not use the conversation payload
 envelope. A `conversation.poke` entry contains `type`, `conversation_id: str`,
 and `turn_id: str`; it tells a worker which queued turn to load.
+
+## AD11 — CLI stream inspection
+
+`fw ls` scans the selected namespace for conversation event streams and prints
+their IDs as Redis returns them. `fw tail <conversation_id>` decodes the latest
+ten conversation events by default; `-n` changes the count. `fw dispatch` decodes
+the latest ten dispatch entries and accepts the same count option. Both event
+commands print each Redis entry ID, event type, and compact JSON payload in
+stream order, with compressed conversation payloads decoded through
+`ConversationStream`.

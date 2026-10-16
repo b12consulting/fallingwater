@@ -1,4 +1,6 @@
-"""Resolve application-defined Pydantic AI agents by Python import path."""
+"""
+Resolve application-defined Pydantic AI agents by Python import path.
+"""
 
 from functools import lru_cache
 from importlib import import_module
@@ -8,7 +10,9 @@ from pydantic_ai import Agent, AgentSpec
 
 @lru_cache(maxsize=128)
 def _resolve_import(path: str) -> object:
-    """Cache import-path resolution without caching factory results."""
+    """
+    Cache import-path resolution without caching factory results.
+    """
     if ":" in path:
         module_name, attribute_path = path.split(":", 1)
     else:

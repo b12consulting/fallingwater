@@ -1,4 +1,6 @@
-"""Example client-defined agents for trying Fallingwater integrations."""
+"""
+Example client-defined agents for trying Fallingwater integrations.
+"""
 
 from random import random
 
@@ -30,13 +32,17 @@ flaky_agent = Agent()
 
 @flaky_agent.instructions
 def sometimes_fail(ctx: RunContext[None]) -> None:
-    """Draw once per turn, before its first model request."""
+    """
+    Draw once per turn, before its first model request.
+    """
     if ctx.run_step == 1 and random() < 0.5:
         raise RuntimeError("Flaky demo agent failed this turn")
 
 
 class WeatherDeps(BaseModel):
-    """Runtime configuration for the weather agent."""
+    """
+    Runtime configuration for the weather agent.
+    """
     base_url: str
     default_city: str | None = None
 
@@ -65,7 +71,9 @@ weather_agent = Agent.from_spec(
 def get_weather(
     ctx: RunContext[WeatherDeps], city: str | None = None
 ) -> str:
-    """Weather lookup tool that accepts an optional city"""
+    """
+    Weather lookup tool that accepts an optional city
+    """
     if ctx.deps:
         city = city or ctx.deps.default_city
         url = ctx.deps.get_url(city)

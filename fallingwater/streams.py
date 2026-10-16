@@ -1,5 +1,8 @@
-"""Redis stream names, event payloads, and access helpers."""
+"""
+Redis stream names, event payloads, and access helpers.
+"""
 
+import re
 from collections.abc import Iterator, Mapping
 from enum import StrEnum
 from typing import Any, TypeAlias
@@ -41,7 +44,7 @@ class TurnQueuedPayload(ConversationPayloadModel):
 class TurnCompletedPayload(ConversationPayloadModel):
     turn_id: str
     message: str
-    history: str
+    history: list[dict[str, Any]]
     usage: RunUsage
 
 
@@ -73,15 +76,26 @@ class ConversationEvent(BaseModel):
 
 
 def decode_text(value: str | bytes) -> str:
-    """Normalize Redis text values when response decoding is disabled."""
+    """
+    Normalize Redis text values when response decoding is disabled.
+    """
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return value
 
 
-def _validate_namespace(namespace: str) -> None:
-    if not namespace or ":" in namespace:
-        raise ValueError("namespace must be nonempty and contain no colon")
+def validate_namespace(namespace: str) -> None:
+    """
+    Require a lowercase namespace containing letters, digits, or
+    hyphens.
+    """
+    if (
+        not isinstance(namespace, str)
+        or re.fullmatch(r"[a-z0-9-]+", namespace) is None
+    ):
+        raise ValueError(
+            "namespace must contain only lowercase letters, numbers, and hyphens"
+        )
 
 
 def validate_conversation_id(conversation_id: str) -> None:
@@ -92,14 +106,18 @@ def validate_conversation_id(conversation_id: str) -> None:
 
 
 def fmt_dispatch_stream(namespace: str) -> str:
-    """Format the dispatch stream name after validating its namespace."""
-    _validate_namespace(namespace)
+    """
+    Format the dispatch stream name after validating its namespace.
+    """
+    validate_namespace(namespace)
     return f"{namespace}:dispatch"
 
 
 def fmt_conversation_stream(namespace: str, conversation_id: str) -> str:
-    """Format a conversation stream name after validating its components."""
-    _validate_namespace(namespace)
+    """
+    Format a conversation stream name after validating its components.
+    """
+    validate_namespace(namespace)
     validate_conversation_id(conversation_id)
     return f"{namespace}:conversation:{conversation_id}:events"
 
@@ -111,7 +129,9 @@ class RedisStream:
 
     @staticmethod
     def decode_event(fields: Mapping[Any, Any]) -> dict[str, str]:
-        """Decode a text-only stream entry such as a dispatch event."""
+        """
+        Decode a text-only stream entry such as a dispatch event.
+        """
         return {
             decode_text(key): decode_text(value)
             for key, value in fields.items()
@@ -134,6 +154,13 @@ class RedisStream:
             if not entries:
                 break
             lower = f"({decode_text(entries[-1][0])}"
+
+    def last(self, count: int) -> Iterator[StreamEntry]:
+        """
+        Return up to ``count`` entries in chronological order.
+        """
+        entries = self.redis.xrevrange(self.name, count=count)
+        return self.decode_entries(list(reversed(entries)))
 
     def one(self) -> Any | None:
         first = self.redis.xrange(self.name, count=1)

@@ -46,14 +46,18 @@ from fallingwater.utils import configure_cli_logging, logger
 
 
 class EchoAgent:
-    """Return each message unchanged, without an AI model."""
+    """
+    Return each message unchanged, without an AI model.
+    """
 
     def receive(self, message: str) -> str:
         return message
 
 
 class Proxy:
-    """Read requests from a stream and append the agent's replies."""
+    """
+    Read requests from a stream and append the agent's replies.
+    """
 
     def __init__(self, agent: EchoAgent, redis: Redis, stream: str) -> None:
         self.agent = agent
@@ -92,7 +96,9 @@ class Proxy:
 
 
 class CLI:
-    """Submit messages and wait for their matching replies on a stream."""
+    """
+    Submit messages and wait for their matching replies on a stream.
+    """
 
     def __init__(self, stream: str, redis: Redis) -> None:
         self.stream = stream
@@ -128,7 +134,9 @@ class CLI:
 
 
 def show_info(redis: Redis, stream: str) -> None:
-    """Print stream and worker-group status without consuming entries."""
+    """
+    Print stream and worker-group status without consuming entries.
+    """
     if not redis.exists(stream):
         print(f"Stream {stream} does not exist.")
         return

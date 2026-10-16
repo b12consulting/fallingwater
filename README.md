@@ -57,6 +57,17 @@ When you resume a chat, it prints any answers or failures that arrived
 while the terminal was closed. This includes a response to a prompt sent
 just before exit.
 
+Use `fw ls` to list conversation IDs in the selected namespace. To inspect
+recent events, use `fw tail <id>`; it prints the latest ten events in stream
+order by default. Set `-n` to change the number of events. `fw dispatch` shows
+the latest ten dispatch entries, and accepts the same `-n` option.
+
+```shell
+fw ls
+fw tail relaxed_euler -n 20
+fw dispatch
+```
+
 For a single non-interactive turn, run `fw chat <id> --msg "Hello"`. The
 command waits for that turn's result, prints it to stdout, and exits. If
 you omit the ID, it starts a conversation and prints its new ID to stderr.

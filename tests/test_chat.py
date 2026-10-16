@@ -1,4 +1,6 @@
-"""Checks for submitting a turn to the conversation and dispatch streams."""
+"""
+Checks for submitting a turn to the conversation and dispatch streams.
+"""
 
 from unittest.mock import MagicMock, call
 

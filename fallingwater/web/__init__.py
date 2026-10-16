@@ -1,4 +1,6 @@
-"""Optional web routes and standalone app."""
+"""
+Optional web routes and standalone app.
+"""
 
 from .apirouter import create_app, router
 

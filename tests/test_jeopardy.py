@@ -1,4 +1,6 @@
-"""The host's tool submits contestant turns through Fallingwater."""
+"""
+The host's tool submits contestant turns through Fallingwater.
+"""
 
 import pytest
 from pydantic_ai import RunContext

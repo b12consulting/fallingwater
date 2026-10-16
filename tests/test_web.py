@@ -1,4 +1,6 @@
-"""Checks for the optional FastAPI conversation event feed."""
+"""
+Checks for the optional FastAPI conversation event feed.
+"""
 
 from unittest.mock import MagicMock
 

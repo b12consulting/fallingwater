@@ -1,4 +1,6 @@
-"""Run complete Pydantic AI turns from the Redis dispatch stream."""
+"""
+Run complete Pydantic AI turns from the Redis dispatch stream.
+"""
 
 from collections.abc import Sequence
 from threading import Event
@@ -54,13 +56,17 @@ class Proxy:
         self.dispatch_stream = DispatchStream(redis, namespace)
 
     def stop(self) -> None:
-        """Stop taking work after the active turn finishes."""
+        """
+        Stop taking work after the active turn finishes.
+        """
         self.stop_event.set()
 
     def load_conversation(
         self, conversation_stream: ConversationStream, current_turn_id: str
     ) -> Conversation:
-        """Load conversation settings, history, usage, and the queued prompt."""
+        """
+        Load conversation settings, history, usage, and the queued prompt.
+        """
 
         history: list[ModelMessage] = []
         agent_path: str | None = None
@@ -82,7 +88,7 @@ class Proxy:
                     break
             elif event.type == EventType.TURN_COMPLETED:
                 completed = cast(TurnCompletedPayload, event.payload)
-                messages = ModelMessagesTypeAdapter.validate_json(
+                messages = ModelMessagesTypeAdapter.validate_python(
                     completed.history
                 )
                 history.extend(messages)
@@ -173,7 +179,9 @@ class Proxy:
                 TurnCompletedPayload(
                     turn_id=current_turn_id,
                     message=str(result.output),
-                    history=result.new_messages_json().decode(),
+                    history=ModelMessagesTypeAdapter.dump_python(
+                        result.new_messages(), mode="json"
+                    ),
                     usage=result.usage,
                 ),
             )
@@ -184,7 +192,9 @@ class Proxy:
             )
 
     def run(self) -> None:
-        """Read new work until stopped, finishing any turn already claimed."""
+        """
+        Read new work until stopped, finishing any turn already claimed.
+        """
         group = self.dispatch_stream.group(self.group, mkstream=True)
         while not self.stop_event.is_set():
             entries = group.read_new(

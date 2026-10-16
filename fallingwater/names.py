@@ -1,4 +1,6 @@
-"""Words for friendly conversation names."""
+"""
+Words for friendly conversation names.
+"""
 
 from secrets import choice
 
@@ -355,7 +357,9 @@ scientists = [
 
 
 def generate_name() -> str:
-    """Return a Docker-style qualifier and scientist name."""
+    """
+    Return a Docker-style qualifier and scientist name.
+    """
     while True:
         name = f"{choice(qualifiers)}_{choice(scientists)}"
         if name != "boring_wozniak":

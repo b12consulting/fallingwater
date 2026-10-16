@@ -1,4 +1,6 @@
-"""Start a pool of Redis-backed Pydantic AI proxies and drain on shutdown."""
+"""
+Start a pool of Redis-backed Pydantic AI proxies and drain on shutdown.
+"""
 
 import signal
 from queue import Queue
@@ -11,7 +13,9 @@ from .utils import logger
 
 
 class Worker:
-    """Own several proxies and propagate process stop signals to each one."""
+    """
+    Own several proxies and propagate process stop signals to each one.
+    """
 
     def __init__(
         self, redis: Redis, *, namespace: str = "fw", proxy_count: int = 1

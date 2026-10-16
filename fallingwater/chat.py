@@ -1,4 +1,6 @@
-"""Synchronous Redis-backed conversation client."""
+"""
+Synchronous Redis-backed conversation client.
+"""
 
 import sys
 from collections.abc import Iterator, Mapping
@@ -24,7 +26,9 @@ from .utils import logger
 
 
 class Chat:
-    """Submit one turn at a time and observe its result through Redis."""
+    """
+    Submit one turn at a time and observe its result through Redis.
+    """
 
     consumer = "terminal"
 
@@ -84,7 +88,9 @@ class Chat:
             )
 
     def _check_agent(self) -> None:
-        """Validate the effective agent and model before using the chat."""
+        """
+        Validate the effective agent and model before using the chat.
+        """
         try:
             agent = reify_agent(self.agent_path)
         except Exception as error:
@@ -105,7 +111,9 @@ class Chat:
         )
 
     def send(self, prompt: str) -> tuple[str, str]:
-        """Record a queued turn and return its turn ID and event cursor."""
+        """
+        Record a queued turn and return its turn ID and event cursor.
+        """
         turn_id = str(uuid4())
         logger.debug(
             "SEND (stream: %s): %.20s",
@@ -130,7 +138,9 @@ class Chat:
         return turn_id, decode_text(queued_id)
 
     def receive(self, turn_id: str, cursor: str) -> str:
-        """Wait for this turn's result without joining the worker group."""
+        """
+        Wait for this turn's result without joining the worker group.
+        """
         while True:
             entries = self.conversation_stream.read_after(cursor, block=1000)
             for event_id, event in entries:
@@ -191,7 +201,9 @@ class Chat:
     def drain_pending(
         self, group: ReadGroup, *, to_stderr: bool = False
     ) -> None:
-        """Replay entries assigned to this stable consumer before reading new ones."""
+        """
+        Replay entries assigned to this stable consumer before reading new ones.
+        """
         cursor = "0"
         logger.debug("DRAIN %s", self.conversation_stream.name)
         while True:
@@ -220,7 +232,9 @@ class Chat:
         block: int | None = None,
         to_stderr: bool = False,
     ) -> Iterator[str]:
-        """Read new events and yield IDs of turns that complete."""
+        """
+        Read new events and yield IDs of turns that complete.
+        """
         logger.debug("READ NEW %s", self.conversation_stream.name)
 
         while True:
@@ -246,7 +260,9 @@ class Chat:
                 return
 
     def _resume_group(self, *, to_stderr: bool = False) -> ReadGroup:
-        """Catch up with unread events before accepting another turn."""
+        """
+        Catch up with unread events before accepting another turn.
+        """
         group = self.conversation_stream.group(self.group)
         self.drain_pending(group, to_stderr=to_stderr)
         for _ in self.read_new(group, to_stderr=to_stderr):
@@ -267,12 +283,16 @@ class Chat:
                 return
 
     def run_once(self, prompt: str) -> None:
-        """Print the result of one prompt and return without opening a terminal."""
+        """
+        Print the result of one prompt and return without opening a terminal.
+        """
         group = self._resume_group(to_stderr=True)
         self._send_and_wait(prompt, group)
 
     def run(self) -> None:
-        """Run a small terminal chat; Ctrl-C leaves the conversation intact."""
+        """
+        Run a small terminal chat; Ctrl-C leaves the conversation intact.
+        """
         print(f"Conversation: {self.conversation_id}")
         print(f"Model: {self.model}")
         print(f"Agent: {self.agent_path}")

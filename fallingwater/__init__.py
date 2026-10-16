@@ -1,1 +1,3 @@
-"""Fallingwater: Redis-backed conversations for Pydantic AI agents."""
+"""
+Fallingwater: Redis-backed conversations for Pydantic AI agents.
+"""

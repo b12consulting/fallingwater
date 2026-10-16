@@ -1,4 +1,6 @@
-"""FastAPI router and small standalone app for conversation events."""
+"""
+FastAPI router and small standalone app for conversation events.
+"""
 
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -30,18 +32,24 @@ RECENT_EVENT_LIMIT = 10
 
 
 def get_redis(request: Request) -> Redis:
-    """Get the Redis client configured by the hosting app."""
+    """
+    Get the Redis client configured by the hosting app.
+    """
     return request.app.state.fw_redis
 
 
 def get_namespace(request: Request) -> str:
-    """Get the Redis key namespace configured by the hosting app."""
+    """
+    Get the Redis key namespace configured by the hosting app.
+    """
     return request.app.state.fw_namespace
 
 
 @router.get("/monitor", response_class=HTMLResponse)
 def monitor(request: Request) -> HTMLResponse:
-    """Show recent conversation events in a small read-only page."""
+    """
+    Show recent conversation events in a small read-only page.
+    """
     return templates.TemplateResponse(
         request=request,
         name="monitor.html",
@@ -74,7 +82,9 @@ def get_conversation_stream(
 def _recent_streams(
     redis: Redis, namespace: str
 ) -> tuple[str, dict[str, str]]:
-    """Find the latest dispatch ID and recently poked conversations."""
+    """
+    Find the latest dispatch ID and recently poked conversations.
+    """
     dispatch_cursor = "0-0"
     before = "+"
     recent_ids: dict[str, None] = {}
@@ -107,7 +117,9 @@ def _recent_streams(
 def _recent_tail(
     redis: Redis, stream: str
 ) -> tuple[str, list[tuple[str, ConversationEvent]]]:
-    """Return up to ten retained events in stream order and their latest ID."""
+    """
+    Return up to ten retained events in stream order and their latest ID.
+    """
     entries = redis.xrevrange(
         stream, max="+", min="-", count=RECENT_EVENT_LIMIT
     )
@@ -143,7 +155,9 @@ def recent_events(
     redis: Annotated[Redis, Depends(get_redis)],
     namespace: Annotated[str, Depends(get_namespace)],
 ) -> Iterator[ServerSentEvent]:
-    """Follow streams for the ten most recently dispatched conversations."""
+    """
+    Follow streams for the ten most recently dispatched conversations.
+    """
     dispatch_name = fmt_dispatch_stream(namespace)
     dispatch_cursor, streams = _recent_streams(redis, namespace)
 
@@ -206,7 +220,9 @@ def events(
     stream: Annotated[str, Depends(get_conversation_stream)],
     redis: Annotated[Redis, Depends(get_redis)],
 ) -> Iterator[ServerSentEvent]:
-    """Replay all conversation events, then follow new entries."""
+    """
+    Replay all conversation events, then follow new entries.
+    """
     cursor = "0-0"
     while True:
         batches = redis.xread({stream: cursor}, count=100, block=1000)
@@ -227,7 +243,9 @@ def create_app(
     namespace: str = "fw",
     redis: Redis | None = None,
 ) -> FastAPI:
-    """Mount the router for the bundled web command."""
+    """
+    Mount the router for the bundled web command.
+    """
     owns_redis = redis is None
     client = (
         redis if redis is not None else Redis.from_url(redis_url)
