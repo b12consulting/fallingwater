@@ -20,7 +20,9 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- pydantic-ai-agent.md   Agent specs and conversation turns
 |   `-- redis-streams.md      Redis Streams concepts and examples
 |-- contrib/                  Small component experiments
-|   `-- echo.py               Redis Streams echo worker, chat, and status CLI
+|   |-- echo.py               Redis Streams echo worker, chat, and status CLI
+|   |-- test-compression.py   Compression benchmark for a serialized conversation turn
+|   `-- test-conversation.py  Standalone Pydantic AI conversation history example
 |-- fallingwater/             Importable library and fw CLI
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
@@ -29,7 +31,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- cli.py                argparse CLI for workers, chat, web, and reset
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- proxy.py              Pydantic AI turn processing
-|   |-- streams.py            Redis key and event names
+|   |-- streams.py            Typed streams and compressed conversation events
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page
 |   |   |-- __init__.py       Web exports

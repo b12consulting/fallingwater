@@ -11,7 +11,11 @@ from fastapi.testclient import TestClient
 from fastapi.sse import ServerSentEvent
 from redis import Redis
 
-from fallingwater.streams import EventType, StreamNames
+from fallingwater.streams import (
+    EventType,
+    fmt_conversation_stream,
+    fmt_dispatch_stream,
+)
 from fallingwater.web.apirouter import (
     _recent_streams,
     create_app,
@@ -146,7 +150,7 @@ def test_recent_conversation_discovery_skips_duplicate_dispatch_entries() -> Non
         ],
     ]
 
-    cursor, streams = _recent_streams(redis, StreamNames("fw-test"))
+    cursor, streams = _recent_streams(redis, "fw-test")
 
     assert cursor == "200-0"
     assert list(streams) == [
@@ -169,8 +173,8 @@ def test_recent_conversation_discovery_skips_duplicate_dispatch_entries() -> Non
 
 def test_recent_feed_replays_only_ten_events_then_follows_the_tail() -> None:
     redis = MagicMock(spec=Redis)
-    names = StreamNames("fw-test")
-    stream = names.conversation("abc")
+    namespace = "fw-test"
+    stream = fmt_conversation_stream(namespace, "abc")
     redis.xrevrange.side_effect = [
         [
             (
@@ -193,7 +197,7 @@ def test_recent_feed_replays_only_ten_events_then_follows_the_tail() -> None:
     redis.xread.return_value = [
         (stream, [("13-0", {"type": EventType.TURN_QUEUED})])
     ]
-    feed = recent_events(redis, names)
+    feed = recent_events(redis, namespace)
 
     received = [next(feed) for _ in range(11)]
     feed.close()
@@ -208,8 +212,13 @@ def test_recent_feed_replays_only_ten_events_then_follows_the_tail() -> None:
 
 def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
     redis = MagicMock(spec=Redis)
-    names = StreamNames("fw-test")
-    dispatch = names.dispatch
+    namespace = "fw-test"
+    dispatch = fmt_dispatch_stream(namespace)
+
+    def stream_for(conversation_id: str) -> str:
+        return fmt_conversation_stream(namespace, conversation_id)
+
+    c11_stream = fmt_conversation_stream(namespace, "c11")
 
     def xrevrange(
         stream: str, **_kwargs: object
@@ -225,7 +234,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
                 )
                 for number in range(10, 0, -1)
             ]
-        if stream == names.conversation("c11"):
+        if stream == c11_stream:
             return [
                 ("3-0", {"type": EventType.TURN_COMPLETED}),
                 ("2-0", {"type": EventType.TURN_QUEUED}),
@@ -237,7 +246,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
     redis.xread.side_effect = [
         [
             (
-                names.conversation("c10"),
+                stream_for("c10"),
                 [("20-0", {"type": EventType.TURN_COMPLETED, "message": "old"})],
             )
         ],
@@ -255,7 +264,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
                 ],
             ),
             (
-                names.conversation("c1"),
+                stream_for("c1"),
                 [
                     (
                         "21-0",
@@ -266,12 +275,12 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
         ],
         [
             (
-                names.conversation("c11"),
+                stream_for("c11"),
                 [("4-0", {"type": EventType.TURN_COMPLETED})],
             )
         ],
     ]
-    feed = recent_events(redis, names)
+    feed = recent_events(redis, namespace)
 
     received = [next(feed) for _ in range(5)]
     feed.close()
@@ -293,5 +302,5 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
     ]
     assert redis.xread.call_args_list[0].args[0][dispatch] == "10-0"
     followed = redis.xread.call_args_list[2].args[0]
-    assert names.conversation("c1") not in followed
+    assert stream_for("c1") not in followed
     assert followed[names.conversation("c11")] == "3-0"

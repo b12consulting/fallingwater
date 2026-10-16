@@ -8,9 +8,9 @@ tests use `fw-test`. For example, a conversation stream might be named
 `fw:conversation:abc:events` in normal use and
 `fw-test:conversation:abc:events` in a test.
 
-`StreamNames` builds these names in one place. Redis-facing components receive
-the configured namespace, so an application and its tests can share a Redis
-instance without mixing their data.
+The `fmt_dispatch_stream` and `fmt_conversation_stream` helpers validate and
+format these names from the configured namespace and conversation ID, so an
+application and its tests can share a Redis instance without mixing their data.
 
 ## AD2 — Library first
 
@@ -30,6 +30,9 @@ Workers invoke `Agent.run_sync` for one complete turn and store Pydantic AI's
 new messages for that turn in the conversation stream. The next turn rebuilds
 the full history from completed turns and passes it back to Pydantic AI.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
+Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
+stream's `turn_id` for application-level correlation and does not reuse it as
+Pydantic AI's run ID.
 
 ## AD4 — Redis-backed conversation turns
 
@@ -45,13 +48,16 @@ entries, pending entries, and acknowledgements. `Chat.send` keeps the
 transaction across the conversation and dispatch streams; each stream queues
 its own `XADD` on the shared pipeline.
 
-| Stream                                      | `type`                 | Other fields                                      |
-|---------------------------------------------|------------------------|---------------------------------------------------|
-| Conversation, `fw:conversation:<id>:events` | `conversation.created` | `agent`, `model`                                  |
-| Conversation                                | `turn.queued`          | `turn_id`, `message` (user prompt)                |
-| Conversation                                | `turn.completed`       | `turn_id`, `message` (response), `history`        |
-| Conversation                                | `turn.failed`          | `turn_id`, `error`                                |
-| Dispatch, `fw:dispatch`                     | `conversation.poke`    | `conversation_id`, `turn_id`                      |
+| Stream                                      | `type`              | Other fields                 |
+|---------------------------------------------|---------------------|------------------------------|
+| Conversation, `fw:conversation:<id>:events` | conversation event  | `payload`                    |
+| Dispatch, `fw:dispatch`                     | `conversation.poke` | `conversation_id`, `turn_id` |
+
+Each conversation event payload has a Pydantic model selected by its `type`.
+The stream entry stores only the text event type and a Brotli level 5 compressed
+JSON payload. `ConversationStream` compresses payloads on writes and decompresses
+and validates them on reads. The dispatch stream stays text based because its
+poke entries only carry routing identifiers.
 
 Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in one Redis transaction. The
@@ -62,13 +68,15 @@ failure events to that stream. A claimed dispatch entry stays pending in the
 `workers` group until the worker acknowledges it after processing; pending
 entries can also remain after a worker crash.
 
-Each completed event stores only the new Pydantic AI messages for that turn.
-The `history` field contains their JSON representation; the proxy appends
-these deltas in stream order when reconstructing history.
+Each completed event stores only the new Pydantic AI messages for that turn,
+their display response, and the Pydantic AI `RunUsage` value. The `history`
+payload field contains the new messages' JSON representation; the proxy appends
+these deltas in stream order and passes the latest usage value into the next
+agent run.
 
-`Proxy.load_turn` returns the queued prompt, fixed agent path and model, and
-prior history together in a frozen `Turn` dataclass. This gives turn processing
-one named value instead of a positional tuple.
+`Proxy.load_conversation` returns the queued `next_prompt`, fixed agent path and
+model, prior history, dependencies, current turn ID, and latest usage together
+in a frozen Pydantic `Conversation` model.
 
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
@@ -91,7 +99,7 @@ Each proxy reads one dispatch entry at a time through a `ReadGroup`. The stream
 creates the consumer group and returns the `ReadGroup`, which handles
 `XREADGROUP` and `XACK`. Dispatch streams use `MKSTREAM` when creating the
 worker group. `Proxy` validates and processes each poke,
-reconstructs the agent and latest completed message history, and writes a
+reconstructs the agent, latest completed message history, and usage, and writes a
 result event. On SIGINT or SIGTERM, `Worker` signals its proxies to stop; a
 proxy finishes any turn it has taken before exiting. A later worker can
 reconstruct the agent and handle the next turn from saved history. An
@@ -152,3 +160,45 @@ result to be printed again. Each group represents one logical terminal reader.
 In one-shot mode, `--msg` prints the new turn's result to stdout and any
 earlier unread results to stderr. The library's `Chat.receive` and the web
 feed still use independent `XREAD` calls.
+
+## AD9 — Compressed conversation payloads
+
+Conversation stream entries contain exactly `type` and `payload`. The payload
+is JSON serialized from a Pydantic event payload model and compressed with
+Brotli quality 5 through the shared `compress` and `decompress` helpers in
+`utils.py`. Redis clients use binary responses so compressed bytes remain
+intact; `ConversationStream` performs compression, decompression, and model
+validation at the stream boundary. Dispatch entries remain text fields because
+they carry only a conversation ID and turn ID. `PAYLOAD_MODELS` is the public
+mapping from event types to their Pydantic payload models.
+
+The web event feeds decode conversation payloads before sending SSE data. A
+completed payload carries the turn's new message history and `RunUsage`; the
+proxy restores the latest usage and passes it to `Agent.run_sync` on the next
+turn. This preserves usage across sequential turns. Existing stream data is
+reset when adopting the format; legacy event decoding is not supported.
+
+## AD10 — Event payload schemas
+
+Conversation stream entries contain a `type` and a compressed Pydantic JSON
+`payload`. `PAYLOAD_MODELS` maps each supported conversation event type to its
+payload model:
+
+- `conversation.created`
+  - Fields: `agent: str`, `model: str`, `deps: dict[str, Any]`
+  - Agent import path, selected model, and initial dependencies. `model`
+    defaults to an empty string; `deps` defaults to an empty object.
+- `turn.queued`
+  - Fields: `turn_id: str`, `message: str`
+  - Turn ID and user prompt.
+- `turn.completed`
+  - Fields: `turn_id: str`, `message: str`, `history: str`, `usage: RunUsage`
+  - Turn ID, displayed response, JSON for the new Pydantic AI messages, and
+    accumulated usage.
+- `turn.failed`
+  - Fields: `turn_id: str`, `error: str`
+  - Turn ID and failure description.
+
+The dispatch stream is text based and does not use the conversation payload
+envelope. A `conversation.poke` entry contains `type`, `conversation_id: str`,
+and `turn_id: str`; it tells a worker which queued turn to load.

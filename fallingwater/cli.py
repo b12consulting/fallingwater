@@ -10,7 +10,11 @@ from redis import Redis
 
 from .chat import Chat
 from .names import generate_name
-from .streams import StreamNames
+from .streams import (
+    fmt_conversation_stream,
+    decode_text,
+    fmt_dispatch_stream,
+)
 from .utils import logger
 from .worker import Worker
 
@@ -99,7 +103,7 @@ def show_version(_args: argparse.Namespace) -> int:
 
 
 def run_worker(args: argparse.Namespace) -> int:
-    with Redis.from_url(args.redis_url, decode_responses=True) as redis:
+    with Redis.from_url(args.redis_url) as redis:
         worker = Worker(redis, namespace=args.namespace, proxy_count=args.proxies)
         print(f"Worker running with {args.proxies} proxy(s). Press Ctrl-C to stop.")
         worker.run()
@@ -117,12 +121,12 @@ def run_chat(args: argparse.Namespace) -> int:
     except ValueError as error:
         raise SystemExit(f"fw chat: {error}") from None
 
-    with Redis.from_url(args.redis_url, decode_responses=True) as redis:
+    with Redis.from_url(args.redis_url) as redis:
         if conversation_id is None:
-            names = StreamNames(args.namespace)
             for _ in range(100):
                 candidate = generate_name()
-                if not redis.exists(names.conversation(candidate)):
+                stream = fmt_conversation_stream(args.namespace, candidate)
+                if not redis.exists(stream):
                     conversation_id = candidate
                     break
             else:
@@ -184,11 +188,12 @@ def run_web(args: argparse.Namespace) -> int:
 def run_reset(args: argparse.Namespace) -> int:
     """Delete keys belonging to the selected Fallingwater namespace."""
     namespace = args.namespace if args.reset_namespace is None else args.reset_namespace
-    prefix = f"{StreamNames(namespace).namespace}:"
+    prefix = fmt_dispatch_stream(namespace).removesuffix("dispatch")
     deleted = 0
-    with Redis.from_url(args.redis_url, decode_responses=True) as redis:
+    with Redis.from_url(args.redis_url) as redis:
         batch: list[str] = []
         for key in redis.scan_iter():
+            key = decode_text(key)
             if key.startswith(prefix):
                 batch.append(key)
             if len(batch) == 100:

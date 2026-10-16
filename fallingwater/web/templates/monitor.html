@@ -43,7 +43,7 @@
         heading.textContent = `${data.conversation_id ?? "unknown"} · ${event.type}`;
         const details = document.createElement("pre");
         const visible = { ...data };
-        delete visible.history;
+        if (visible.payload) delete visible.payload.history;
         details.textContent = JSON.stringify(visible, null, 2);
         item.append(heading, details);
         list.prepend(item);

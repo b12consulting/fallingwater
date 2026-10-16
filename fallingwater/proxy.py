@@ -1,34 +1,41 @@
 """Run complete Pydantic AI turns from the Redis dispatch stream."""
 
-import json
 from collections.abc import Sequence
-from dataclasses import dataclass
 from threading import Event
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
+from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import RedisError
 
 from .catalog import reify_agent
 from .streams import (
     ConversationStream,
+    ConversationCreatedPayload,
+    ConversationEvent,
     DispatchStream,
     EventType,
-    StreamNames,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+    TurnQueuedPayload,
+    validate_conversation_id,
 )
 from .utils import logger
 
 
-@dataclass(frozen=True, slots=True)
-class Turn:
+class Conversation(BaseModel):
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     agent_path: str
     model: str
-    prompt: str
+    next_prompt: str
+    current_turn_id: str
     history: Sequence[ModelMessage]
     deps: dict[str, Any]
+    usage: RunUsage | None
 
 
 class Proxy:
@@ -42,7 +49,6 @@ class Proxy:
     def __init__(self, redis: Redis, *, namespace: str = "fw") -> None:
         self.redis = redis
         self.namespace = namespace
-        self.names = StreamNames(namespace)
         self.consumer = str(uuid4())
         self.stop_event = Event()
         self.dispatch_stream = DispatchStream(redis, namespace)
@@ -51,52 +57,58 @@ class Proxy:
         """Stop taking work after the active turn finishes."""
         self.stop_event.set()
 
-    def load_turn(
-        self, conversation_stream: ConversationStream, turn_id: str
-    ) -> Turn:
-        """Load the queued prompt, fixed agent settings, and prior history."""
+    def load_conversation(
+        self, conversation_stream: ConversationStream, current_turn_id: str
+    ) -> Conversation:
+        """Load conversation settings, history, usage, and the queued prompt."""
 
         history: list[ModelMessage] = []
         agent_path: str | None = None
         model = ""
         deps: dict[str, Any] = {}
-        prompt: str | None = None
-        for _, fields in conversation_stream.all():
-            event_type = fields.get("type")
-            # Model and agent
-            if event_type == EventType.CONVERSATION_CREATED:
-                agent_path = fields["agent"]
-                model = fields.get("model", "")
-                raw_deps = fields.get("deps", "{}")
-                parsed_deps = json.loads(raw_deps)
-                if not isinstance(parsed_deps, dict):
-                    raise ValueError(
-                        "Conversation dependencies must be a JSON object"
-                    )
-                deps = parsed_deps
-            # Get prompt
-            elif event_type == EventType.TURN_QUEUED:
-                if fields.get("turn_id") == turn_id:
-                    prompt = fields["message"]
+        next_prompt: str | None = None
+        usage: RunUsage | None = None
+        for _, event in conversation_stream.all():
+            event = cast(ConversationEvent, event)
+            if event.type == EventType.CONVERSATION_CREATED:
+                created = cast(ConversationCreatedPayload, event.payload)
+                agent_path = created.agent
+                model = created.model
+                deps = created.deps
+            elif event.type == EventType.TURN_QUEUED:
+                queued = cast(TurnQueuedPayload, event.payload)
+                if queued.turn_id == current_turn_id:
+                    next_prompt = queued.message
                     break
-            # Accumulate history
-            elif event_type == EventType.TURN_COMPLETED:
+            elif event.type == EventType.TURN_COMPLETED:
+                completed = cast(TurnCompletedPayload, event.payload)
                 messages = ModelMessagesTypeAdapter.validate_json(
-                    fields["history"]
+                    completed.history
                 )
                 history.extend(messages)
+                usage = completed.usage
 
-        if prompt is None:
-            raise ValueError(f"No prompt found for turn: {turn_id}")
+        if next_prompt is None:
+            raise ValueError(
+                f"No prompt found for turn: {current_turn_id}"
+            )
         if agent_path is None:
             raise ValueError(
                 f"Conversation settings not found in {conversation_stream.name}"
             )
 
-        return Turn(agent_path, model, prompt, history, deps)
+        return Conversation(
+            agent_path=agent_path,
+            model=model,
+            next_prompt=next_prompt,
+            current_turn_id=current_turn_id,
+            history=history,
+            deps=deps,
+            usage=usage,
+        )
 
     def process(self, fields: dict[str, str]) -> None:
-        turn_id = fields["turn_id"]
+        current_turn_id = fields["turn_id"]
         conversation_id = fields["conversation_id"]
         conversation_stream = ConversationStream(
             self.redis, conversation_id, self.namespace
@@ -104,7 +116,9 @@ class Proxy:
 
         # Load turn info
         try:
-            turn = self.load_turn(conversation_stream, turn_id)
+            conversation = self.load_conversation(
+                conversation_stream, current_turn_id
+            )
         except RedisError:
             # A failed read may be transient, so leave the dispatch
             # entry pending.
@@ -112,59 +126,60 @@ class Proxy:
         except ValueError as error:
             logger.exception(
                 "Could not load turn %s in conversation %s",
-                turn_id,
+                current_turn_id,
                 fields["conversation_id"],
             )
             conversation_stream.add(
-                {
-                    "type": EventType.TURN_FAILED,
-                    "turn_id": turn_id,
-                    "error": str(error),
-                }
+                EventType.TURN_FAILED,
+                TurnFailedPayload(
+                    turn_id=current_turn_id,
+                    error=str(error),
+                ),
             )
             return
 
         # Reify agent and run it
         try:
-            agent = reify_agent(turn.agent_path)
+            agent = reify_agent(conversation.agent_path)
             deps = (
-                TypeAdapter(agent.deps_type).validate_python(turn.deps)
-                if turn.deps
+                TypeAdapter(agent.deps_type).validate_python(conversation.deps)
+                if conversation.deps
                 else None
             )
             result = agent.run_sync(
-                turn.prompt,
-                message_history=turn.history,
+                conversation.next_prompt,
+                message_history=conversation.history,
                 deps=deps,
                 conversation_id=fields["conversation_id"],
-                run_id=turn_id,
-                model=turn.model or None,
+                model=conversation.model or None,
+                usage=conversation.usage,
             )
         except Exception as error:
             logger.exception(
                 "Turn %s failed in conversation %s",
-                turn_id,
+                current_turn_id,
                 conversation_id,
             )
             conversation_stream.add(
-                {
-                    "type": EventType.TURN_FAILED,
-                    "turn_id": turn_id,
-                    "error": str(error),
-                }
+                EventType.TURN_FAILED,
+                TurnFailedPayload(
+                    turn_id=current_turn_id,
+                    error=str(error),
+                ),
             )
         else:
             conversation_stream.add(
-                {
-                    "type": EventType.TURN_COMPLETED,
-                    "turn_id": turn_id,
-                    "message": str(result.output),
-                    "history": result.new_messages_json().decode(),
-                }
+                EventType.TURN_COMPLETED,
+                TurnCompletedPayload(
+                    turn_id=current_turn_id,
+                    message=str(result.output),
+                    history=result.new_messages_json().decode(),
+                    usage=result.usage,
+                ),
             )
             logger.info(
                 "Sent response for turn %s in conversation %s",
-                turn_id,
+                current_turn_id,
                 conversation_id,
             )
 
@@ -180,13 +195,13 @@ class Proxy:
             for entry_id, fields in entries:
                 if fields.get("type") == EventType.CONVERSATION_POKE:
                     conversation_id = fields.get("conversation_id")
-                    turn_id = fields.get("turn_id")
+                    current_turn_id = fields.get("turn_id")
                     try:
-                        if not conversation_id or not turn_id:
+                        if not conversation_id or not current_turn_id:
                             raise ValueError(
                                 "poke requires conversation_id and turn_id"
                             )
-                        self.names.conversation(conversation_id)
+                        validate_conversation_id(conversation_id)
                     except ValueError as error:
                         logger.warning(
                             "Skipping malformed dispatch entry %s: %s",
@@ -196,7 +211,7 @@ class Proxy:
                     else:
                         logger.info(
                             "Received poke for turn %s in conversation %s",
-                            turn_id,
+                            current_turn_id,
                             conversation_id,
                         )
                         self.process(fields)

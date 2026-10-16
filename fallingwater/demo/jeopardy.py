@@ -71,7 +71,7 @@ def ask_contestants(ctx: RunContext[None], clues: list[str]) -> list[str]:
     redis_url = os.getenv("FW_REDIS_URL", "redis://localhost:6379/0")
     namespace = os.getenv("FW_NAMESPACE", "fw")
 
-    with Redis.from_url(redis_url, decode_responses=True) as redis:
+    with Redis.from_url(redis_url) as redis:
         futures = []
         with ThreadPoolExecutor() as executor:
             for pos, clue in enumerate(clues):

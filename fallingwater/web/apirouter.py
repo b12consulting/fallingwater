@@ -11,7 +11,15 @@ from fastapi.sse import ServerSentEvent
 from fastapi.templating import Jinja2Templates
 from redis import Redis
 
-from ..streams import EventType, StreamNames
+from ..streams import (
+    ConversationEvent,
+    ConversationStream,
+    DispatchStream,
+    EventType,
+    decode_text,
+    fmt_conversation_stream,
+    fmt_dispatch_stream,
+)
 from ..utils import logger
 
 
@@ -26,9 +34,9 @@ def get_redis(request: Request) -> Redis:
     return request.app.state.fw_redis
 
 
-def get_names(request: Request) -> StreamNames:
+def get_namespace(request: Request) -> str:
     """Get the Redis key namespace configured by the hosting app."""
-    return StreamNames(request.app.state.fw_namespace)
+    return request.app.state.fw_namespace
 
 
 @router.get("/monitor", response_class=HTMLResponse)
@@ -48,13 +56,13 @@ def monitor(request: Request) -> HTMLResponse:
     )
 
 
-def conversation_stream(
+def get_conversation_stream(
     conversation_id: str,
     redis: Annotated[Redis, Depends(get_redis)],
-    names: Annotated[StreamNames, Depends(get_names)],
+    namespace: Annotated[str, Depends(get_namespace)],
 ) -> str:
     try:
-        stream = names.conversation(conversation_id)
+        stream = fmt_conversation_stream(namespace, conversation_id)
     except ValueError as error:
         logger.debug("Invalid conversation ID %s", conversation_id, exc_info=True)
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -64,19 +72,23 @@ def conversation_stream(
 
 
 def _recent_streams(
-    redis: Redis, names: StreamNames
+    redis: Redis, namespace: str
 ) -> tuple[str, dict[str, str]]:
-    """Find the latest dispatch ID and ten distinct recently poked conversations."""
+    """Find the latest dispatch ID and recently poked conversations."""
     dispatch_cursor = "0-0"
     before = "+"
     recent_ids: dict[str, None] = {}
+    dispatch_name = fmt_dispatch_stream(namespace)
     while len(recent_ids) < RECENT_CONVERSATION_LIMIT:
-        entries = redis.xrevrange(names.dispatch, max=before, min="-", count=100)
+        entries = redis.xrevrange(
+            dispatch_name, max=before, min="-", count=100
+        )
         if not entries:
             break
         if dispatch_cursor == "0-0":
-            dispatch_cursor = entries[0][0]
+            dispatch_cursor = decode_text(entries[0][0])
         for _, fields in entries:
+            fields = DispatchStream.decode_event(fields)
             if fields.get("type") != EventType.CONVERSATION_POKE:
                 continue
             conversation_id = fields.get("conversation_id")
@@ -84,87 +96,106 @@ def _recent_streams(
                 recent_ids[conversation_id] = None
                 if len(recent_ids) == RECENT_CONVERSATION_LIMIT:
                     break
-        before = f"({entries[-1][0]}"
+        before = f"({decode_text(entries[-1][0])}"
 
-    streams = {
-        names.conversation(conversation_id): "0-0"
-        for conversation_id in reversed(recent_ids)
-    }
+    streams = {}
+    for conversation_id in reversed(recent_ids):
+        streams[fmt_conversation_stream(namespace, conversation_id)] = "0-0"
     return dispatch_cursor, streams
 
 
 def _recent_tail(
     redis: Redis, stream: str
-) -> tuple[str, list[tuple[str, dict[str, str]]]]:
+) -> tuple[str, list[tuple[str, ConversationEvent]]]:
     """Return up to ten retained events in stream order and their latest ID."""
-    entries = redis.xrevrange(stream, max="+", min="-", count=RECENT_EVENT_LIMIT)
-    return (entries[0][0] if entries else "0-0"), list(reversed(entries))
+    entries = redis.xrevrange(
+        stream, max="+", min="-", count=RECENT_EVENT_LIMIT
+    )
+    decoded = [ConversationStream.decode_entry(entry) for entry in entries]
+    return (decoded[0][0] if decoded else "0-0"), list(reversed(decoded))
+
+
+def _event_data(event: ConversationEvent) -> dict:
+    return {
+        "type": event.type.value,
+        "payload": event.payload.model_dump(mode="json"),
+    }
 
 
 def _recent_sse(
-    names: StreamNames, stream: str, entry_id: str, fields: dict[str, str]
+    namespace: str,
+    stream: str,
+    entry_id: str,
+    event: ConversationEvent,
 ) -> ServerSentEvent:
     conversation_id = stream.removeprefix(
-        f"{names.namespace}:conversation:"
+        f"{namespace}:conversation:"
     ).removesuffix(":events")
     return ServerSentEvent(
         id=f"{conversation_id}:{entry_id}",
-        event=fields.get("type"),
-        data={**fields, "conversation_id": conversation_id},
+        event=event.type.value,
+        data={**_event_data(event), "conversation_id": conversation_id},
     )
 
 
 @router.get("/conversations/recent/events", response_class=EventSourceResponse)
 def recent_events(
     redis: Annotated[Redis, Depends(get_redis)],
-    names: Annotated[StreamNames, Depends(get_names)],
+    namespace: Annotated[str, Depends(get_namespace)],
 ) -> Iterator[ServerSentEvent]:
     """Follow streams for the ten most recently dispatched conversations."""
-    dispatch_cursor, streams = _recent_streams(redis, names)
+    dispatch_name = fmt_dispatch_stream(namespace)
+    dispatch_cursor, streams = _recent_streams(redis, namespace)
 
     for stream in streams:
         streams[stream], entries = _recent_tail(redis, stream)
         for entry_id, fields in entries:
-            yield _recent_sse(names, stream, entry_id, fields)
+            yield _recent_sse(namespace, stream, entry_id, fields)
 
     while True:
         new_streams: dict[str, None] = {}
         batches = redis.xread(
-            {names.dispatch: dispatch_cursor, **streams}, count=100, block=1000
+            {dispatch_name: dispatch_cursor, **streams}, count=100, block=1000
         )
-        for stream, entries in batches:
-            if stream != names.dispatch:
+        for raw_stream, entries in batches:
+            stream = decode_text(raw_stream)
+            if stream != dispatch_name:
                 continue
             for entry_id, fields in entries:
-                dispatch_cursor = entry_id
+                dispatch_cursor = decode_text(entry_id)
+                fields = DispatchStream.decode_event(fields)
                 if fields.get("type") != EventType.CONVERSATION_POKE:
                     continue
                 conversation_id = fields.get("conversation_id")
                 if not conversation_id:
                     continue
-                conversation_stream = names.conversation(conversation_id)
-                if conversation_stream in streams:
-                    cursor = streams.pop(conversation_stream)
+                conversation_name = fmt_conversation_stream(
+                    namespace, conversation_id
+                )
+                if conversation_name in streams:
+                    cursor = streams.pop(conversation_name)
                 else:
                     cursor = "0-0"
                     if len(streams) == RECENT_CONVERSATION_LIMIT:
                         streams.pop(next(iter(streams)))
-                    new_streams[conversation_stream] = None
-                streams[conversation_stream] = cursor
+                    new_streams[conversation_name] = None
+                streams[conversation_name] = cursor
 
-        for stream, entries in batches:
-            if stream == names.dispatch or stream not in streams:
+        for raw_stream, entries in batches:
+            stream = decode_text(raw_stream)
+            if stream == dispatch_name or stream not in streams:
                 continue
-            for entry_id, fields in entries:
+            for raw_entry in entries:
+                entry_id, event = ConversationStream.decode_entry(raw_entry)
                 streams[stream] = entry_id
-                yield _recent_sse(names, stream, entry_id, fields)
+                yield _recent_sse(namespace, stream, entry_id, event)
 
         for stream in new_streams:
             if stream not in streams or streams[stream] != "0-0":
                 continue
             streams[stream], entries = _recent_tail(redis, stream)
-            for entry_id, fields in entries:
-                yield _recent_sse(names, stream, entry_id, fields)
+            for entry_id, event in entries:
+                yield _recent_sse(namespace, stream, entry_id, event)
 
 
 @router.get(
@@ -172,7 +203,7 @@ def recent_events(
     response_class=EventSourceResponse,
 )
 def events(
-    stream: Annotated[str, Depends(conversation_stream)],
+    stream: Annotated[str, Depends(get_conversation_stream)],
     redis: Annotated[Redis, Depends(get_redis)],
 ) -> Iterator[ServerSentEvent]:
     """Replay all conversation events, then follow new entries."""
@@ -180,10 +211,13 @@ def events(
     while True:
         batches = redis.xread({stream: cursor}, count=100, block=1000)
         for _, entries in batches:
-            for entry_id, fields in entries:
+            for raw_entry in entries:
+                entry_id, event = ConversationStream.decode_entry(raw_entry)
                 cursor = entry_id
                 yield ServerSentEvent(
-                    id=entry_id, event=fields.get("type"), data=fields
+                    id=entry_id,
+                    event=event.type.value,
+                    data=_event_data(event),
                 )
 
 
@@ -196,7 +230,7 @@ def create_app(
     """Mount the router for the bundled web command."""
     owns_redis = redis is None
     client = (
-        redis if redis is not None else Redis.from_url(redis_url, decode_responses=True)
+        redis if redis is not None else Redis.from_url(redis_url)
     )
 
     @asynccontextmanager

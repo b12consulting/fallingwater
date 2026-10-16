@@ -1,8 +1,8 @@
 """Synchronous Redis-backed conversation client."""
 
-import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from typing import cast
 from uuid import uuid4
 
 from redis import Redis
@@ -10,9 +10,15 @@ from redis import Redis
 from .catalog import reify_agent
 from .streams import (
     ConversationStream,
+    ConversationCreatedPayload,
+    ConversationEvent,
     DispatchStream,
     EventType,
     ReadGroup,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+    TurnQueuedPayload,
+    decode_text,
 )
 from .utils import logger
 
@@ -31,7 +37,7 @@ class Chat:
         agent_path: str | None = None,
         model: str | None = None,
         group: str = "user",
-        deps: Mapping[str, str] | None = None,
+        deps: Mapping[str, str] | None = None,  # FIXME use deps class from py-ai
     ) -> None:
         self.redis = redis
         if not group:
@@ -47,7 +53,7 @@ class Chat:
 
         record = self.conversation_stream.one()
         if record:
-            if record.get("type") != EventType.CONVERSATION_CREATED:
+            if record.type != EventType.CONVERSATION_CREATED:
                 raise ValueError(
                     f"{self.events} is not a Fallingwater conversation"
                 )
@@ -55,8 +61,9 @@ class Chat:
                 raise ValueError(
                     "dependencies can only be set for a new conversation"
                 )
-            existing_agent = record["agent"]
-            existing_model = record.get("model", "")
+            created = cast(ConversationCreatedPayload, record.payload)
+            existing_agent = created.agent
+            existing_model = created.model
             self.agent_path = existing_agent
             self.model = existing_model
         else:
@@ -67,14 +74,13 @@ class Chat:
 
         self._check_agent()
         if not record:
-            # FIXME we have a `if record .. else` just above
             self.conversation_stream.add(
-                {
-                    "type": EventType.CONVERSATION_CREATED,
-                    "agent": self.agent_path,
-                    "model": self.model,
-                    "deps": json.dumps(dict(deps or {})),
-                }
+                EventType.CONVERSATION_CREATED,
+                ConversationCreatedPayload(
+                    agent=self.agent_path,
+                    model=self.model,
+                    deps=dict(deps or {}),
+                ),
             )
 
     def _check_agent(self) -> None:
@@ -101,13 +107,15 @@ class Chat:
     def send(self, prompt: str) -> tuple[str, str]:
         """Record a queued turn and return its turn ID and event cursor."""
         turn_id = str(uuid4())
+        logger.debug(
+            "SEND (stream: %s): %.20s",
+            self.conversation_stream.name,
+            prompt,
+        )
         with self.redis.pipeline(transaction=True) as pipeline:
             self.conversation_stream.add(
-                {
-                    "type": EventType.TURN_QUEUED,
-                    "turn_id": turn_id,
-                    "message": prompt,
-                },
+                EventType.TURN_QUEUED,
+                TurnQueuedPayload(turn_id=turn_id, message=prompt),
                 pipeline=pipeline,
             )
             self.dispatch_stream.add(
@@ -119,20 +127,27 @@ class Chat:
                 pipeline=pipeline,
             )
             queued_id, _dispatch_id = pipeline.execute()
-        return turn_id, queued_id
+        return turn_id, decode_text(queued_id)
 
     def receive(self, turn_id: str, cursor: str) -> str:
         """Wait for this turn's result without joining the worker group."""
         while True:
             entries = self.conversation_stream.read_after(cursor, block=1000)
-            for event_id, fields in entries:
+            for event_id, event in entries:
                 cursor = event_id
-                if fields.get("turn_id") != turn_id:
+                if not isinstance(
+                    event.payload,
+                    (TurnQueuedPayload, TurnCompletedPayload, TurnFailedPayload),
+                ):
                     continue
-                if fields.get("type") == EventType.TURN_COMPLETED:
-                    return fields["message"]
-                if fields.get("type") == EventType.TURN_FAILED:
-                    raise RuntimeError(fields["error"])
+                if event.payload.turn_id != turn_id:
+                    continue
+                if event.type == EventType.TURN_COMPLETED:
+                    completed = cast(TurnCompletedPayload, event.payload)
+                    return completed.message
+                if event.type == EventType.TURN_FAILED:
+                    failed = cast(TurnFailedPayload, event.payload)
+                    raise RuntimeError(failed.error)
 
     def ask(self, prompt: str) -> str:
         return self.receive(*self.send(prompt))
@@ -141,12 +156,13 @@ class Chat:
         self,
         group: ReadGroup,
         entry_id: str,
-        fields: dict[str, str],
+        event: ConversationEvent,
         *,
         to_stderr: bool = False,
     ) -> str | None:
-        event_type = fields.get("type")
-        turn_id = fields.get("turn_id")
+        event_type = event.type
+        payload = event.payload
+        turn_id = getattr(payload, "turn_id", None)
         if event_type == EventType.TURN_QUEUED and turn_id is not None:
             self._pending_turns[turn_id] = entry_id
             return None
@@ -154,10 +170,13 @@ class Chat:
         if event_type in (EventType.TURN_COMPLETED, EventType.TURN_FAILED):
             output = sys.stderr if to_stderr else sys.stdout
             if event_type == EventType.TURN_COMPLETED:
-                print(fields["message"], file=output, flush=True)
+                completed = cast(TurnCompletedPayload, payload)
+                print(completed.message, file=output, flush=True)
             else:
                 print(
-                    f"Turn failed: {fields['error']}", file=output, flush=True
+                    f"Turn failed: {cast(TurnFailedPayload, payload).error}",
+                    file=output,
+                    flush=True,
                 )
             queued_id = self._pending_turns.pop(turn_id, None)
             if queued_id is None:
@@ -169,63 +188,83 @@ class Chat:
         group.acknowledge(entry_id)
         return None
 
-    def _drain_pending(
+    def drain_pending(
         self, group: ReadGroup, *, to_stderr: bool = False
     ) -> None:
         """Replay entries assigned to this stable consumer before reading new ones."""
         cursor = "0"
+        logger.debug("DRAIN %s", self.conversation_stream.name)
         while True:
+            found_entry = False
             entries = group.read_pending(
                 self.consumer,
-                cursor,     # maybe we should let the group deal with the cursor itself
+                cursor,  # maybe we should let the group deal with the cursor itself
                 count=100,  # TODO this should be a default param
             )
-            if not entries:
-                return
             for entry_id, fields in entries:
+                found_entry = True
                 cursor = entry_id
                 self._handle_group_event(
-                    group, entry_id, fields, to_stderr=to_stderr
+                    group,
+                    entry_id,
+                    cast(ConversationEvent, fields),
+                    to_stderr=to_stderr,
                 )
+            if not found_entry:
+                return
 
-    def _read_new(
+    def read_new(
         self,
         group: ReadGroup,
         *,
         block: int | None = None,
         to_stderr: bool = False,
-    ) -> set[str]:
-        completed: set[str] = set()
+    ) -> Iterator[str]:
+        """Read new events and yield IDs of turns that complete."""
+        logger.debug("READ NEW %s", self.conversation_stream.name)
+
         while True:
+            found_entry = False
             entries = group.read_new(
                 self.consumer,
                 count=100,
                 block=block,
             )
-            if not entries:
-                return completed
-            for entry_id, fields in entries:
+            for entry_id, event in entries:
+                found_entry = True
                 turn_id = self._handle_group_event(
-                    group, entry_id, fields, to_stderr=to_stderr
+                    group,
+                    entry_id,
+                    cast(ConversationEvent, event),
+                    to_stderr=to_stderr,
                 )
                 if turn_id is not None:
-                    completed.add(turn_id)
+                    yield turn_id
+            if not found_entry:
+                return
             if block is not None:
-                return completed
+                return
 
     def _resume_group(self, *, to_stderr: bool = False) -> ReadGroup:
         """Catch up with unread events before accepting another turn."""
         group = self.conversation_stream.group(self.group)
-        self._drain_pending(group, to_stderr=to_stderr)
-        self._read_new(group, to_stderr=to_stderr)
+        self.drain_pending(group, to_stderr=to_stderr)
+        for _ in self.read_new(group, to_stderr=to_stderr):
+            pass
         while self._pending_turns:
-            self._read_new(group, block=1000, to_stderr=to_stderr)
+            for _ in self.read_new(group, block=1000, to_stderr=to_stderr):
+                pass
         return group
 
     def _send_and_wait(self, prompt: str, group: ReadGroup) -> None:
         turn_id, _ = self.send(prompt)
-        while turn_id not in self._read_new(group, block=1000):
-            pass
+        while True:
+            completed = False
+            for completed_turn_id in self.read_new(group, block=1000):
+                if completed_turn_id == turn_id:
+                    completed = True
+            if completed:
+                return
 
     def run_once(self, prompt: str) -> None:
         """Print the result of one prompt and return without opening a terminal."""
