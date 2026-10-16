@@ -81,7 +81,8 @@ Any earlier unread results are also printed to stderr before the new turn.
 Install the web dependencies with `python -m pip install -e '.[web]'`, then
 start the API with `fw web`. It listens on `http://localhost:8000` by default.
 Open `http://localhost:8000/fw-api/monitor` for a read-only page that follows
-the recent conversation feed.
+the recent conversation feed. Add `?full=1` to include completed-turn history
+and usage in the page.
 
 To follow an existing conversation, replace `boring_wozniak` with its ID:
 

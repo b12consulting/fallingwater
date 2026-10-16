@@ -141,8 +141,10 @@ different streams have no strict global order.
 The optional web package keeps the module-level router in `web/apirouter.py`
 and its packaged Jinja2 template in `web/templates`. The `/monitor` route
 renders a small read-only page whose `EventSource` subscribes to the recent
-feed. It listens for each current conversation event type and keeps at most
-200 rendered entries in the browser.
+feed. The monitor uses payload `fmt()` output, omitting completed-turn history
+and usage by default; `/monitor?full=1` includes them. It listens for each
+current conversation event type and keeps at most 200 rendered entries in the
+browser. The per-conversation SSE route always sends complete payloads.
 
 ## AD8 — CLI reader groups
 

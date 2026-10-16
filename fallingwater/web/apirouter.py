@@ -46,15 +46,18 @@ def get_namespace(request: Request) -> str:
 
 
 @router.get("/monitor", response_class=HTMLResponse)
-def monitor(request: Request) -> HTMLResponse:
+def monitor(request: Request, full: bool = False) -> HTMLResponse:
     """
     Show recent conversation events in a small read-only page.
     """
+    events_url = request.url_for("recent_events")
+    if full:
+        events_url = events_url.include_query_params(full="1")
     return templates.TemplateResponse(
         request=request,
         name="monitor.html",
         context={
-            "events_url": str(request.url_for("recent_events")),
+            "events_url": str(events_url),
             "event_types": [
                 event.value
                 for event in EventType
@@ -127,10 +130,10 @@ def _recent_tail(
     return (decoded[0][0] if decoded else "0-0"), list(reversed(decoded))
 
 
-def _event_data(event: ConversationEvent) -> dict:
+def _event_data(event: ConversationEvent, *, full: bool) -> dict:
     return {
         "type": event.type.value,
-        "payload": event.payload.model_dump(mode="json"),
+        "payload": event.payload.fmt(full=full),
     }
 
 
@@ -139,6 +142,8 @@ def _recent_sse(
     stream: str,
     entry_id: str,
     event: ConversationEvent,
+    *,
+    full: bool,
 ) -> ServerSentEvent:
     conversation_id = stream.removeprefix(
         f"{namespace}:conversation:"
@@ -146,7 +151,10 @@ def _recent_sse(
     return ServerSentEvent(
         id=f"{conversation_id}:{entry_id}",
         event=event.type.value,
-        data={**_event_data(event), "conversation_id": conversation_id},
+        data={
+            **_event_data(event, full=full),
+            "conversation_id": conversation_id,
+        },
     )
 
 
@@ -154,6 +162,7 @@ def _recent_sse(
 def recent_events(
     redis: Annotated[Redis, Depends(get_redis)],
     namespace: Annotated[str, Depends(get_namespace)],
+    full: bool = False,
 ) -> Iterator[ServerSentEvent]:
     """
     Follow streams for the ten most recently dispatched conversations.
@@ -164,7 +173,9 @@ def recent_events(
     for stream in streams:
         streams[stream], entries = _recent_tail(redis, stream)
         for entry_id, fields in entries:
-            yield _recent_sse(namespace, stream, entry_id, fields)
+            yield _recent_sse(
+                namespace, stream, entry_id, fields, full=full
+            )
 
     while True:
         new_streams: dict[str, None] = {}
@@ -202,14 +213,14 @@ def recent_events(
             for raw_entry in entries:
                 entry_id, event = ConversationStream.decode_entry(raw_entry)
                 streams[stream] = entry_id
-                yield _recent_sse(namespace, stream, entry_id, event)
+                yield _recent_sse(namespace, stream, entry_id, event, full=full)
 
         for stream in new_streams:
             if stream not in streams or streams[stream] != "0-0":
                 continue
             streams[stream], entries = _recent_tail(redis, stream)
             for entry_id, event in entries:
-                yield _recent_sse(namespace, stream, entry_id, event)
+                yield _recent_sse(namespace, stream, entry_id, event, full=full)
 
 
 @router.get(
@@ -233,7 +244,7 @@ def events(
                 yield ServerSentEvent(
                     id=entry_id,
                     event=event.type.value,
-                    data=_event_data(event),
+                    data=_event_data(event, full=True),
                 )
 
 
