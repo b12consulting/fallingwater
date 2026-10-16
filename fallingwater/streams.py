@@ -153,9 +153,10 @@ class RedisStream:
             for key, value in fields.items()
         }
 
-    def decode_entry(self, entry: RawStreamEntry) -> StreamEntry:
+    @classmethod
+    def decode_entry(cls, entry: RawStreamEntry) -> StreamEntry:
         entry_id, fields = entry
-        return decode_text(entry_id), self.decode_event(fields)
+        return decode_text(entry_id), cls.decode_event(fields)
 
     def decode_entries(
         self, entries: list[RawStreamEntry]
