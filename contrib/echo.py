@@ -1,4 +1,5 @@
-"""Small Redis Streams echo experiment.
+"""
+Small Redis Streams echo experiment.
 
 With a local Redis server, run these in separate terminals:
 

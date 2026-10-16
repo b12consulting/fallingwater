@@ -69,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Number of latest events to show (default: 10).",
     )
+    tail_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Include message history and usage in completed events.",
+    )
     tail_parser.set_defaults(handler=run_tail)
 
     dispatch_parser = subparsers.add_parser(
@@ -186,7 +191,7 @@ def run_tail(args: argparse.Namespace) -> int:
                 f"fw tail: conversation not found: {args.conversation}"
             )
         for entry_id, event in stream.last(args.count):
-            payload = event.payload.model_dump(mode="json")
+            payload = event.payload.fmt(full=args.full)
             print(
                 f"{entry_id} {event.type.value} "
                 f"{json.dumps(payload, ensure_ascii=False, indent=2)}"

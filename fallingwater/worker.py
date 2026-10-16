@@ -44,7 +44,8 @@ class Worker:
         self.stop()
 
     def run(self) -> None:
-        """Run until SIGINT or SIGTERM; active turns finish before exit.
+        """
+        Run until SIGINT or SIGTERM; active turns finish before exit.
 
         Signal handlers require this method to be called from the main thread.
         Embedded applications can call ``stop()`` from their own lifecycle code.

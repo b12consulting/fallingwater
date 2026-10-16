@@ -29,7 +29,8 @@ def _resolve_import(path: str) -> object:
 
 
 def reify_agent(path: str) -> Agent:
-    """Load ``module:object`` or ``module.object`` as an Agent.
+    """
+    Load ``module:object`` or ``module.object`` as an Agent.
 
     The object may be an Agent, an AgentSpec, or a zero-argument function that
     returns either. The function is called for each turn.

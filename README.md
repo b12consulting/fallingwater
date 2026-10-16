@@ -59,12 +59,14 @@ just before exit.
 
 Use `fw ls` to list conversation IDs in the selected namespace. To inspect
 recent events, use `fw tail <id>`; it prints the latest ten events in stream
-order by default. Set `-n` to change the number of events. `fw dispatch` shows
-the latest ten dispatch entries, and accepts the same `-n` option.
+order by default, without completed message history or usage. Set `-n` to
+change the number of events, or `--full` to include both. `fw dispatch` shows
+the latest ten dispatch entries and accepts the same `-n` option.
 
 ```shell
 fw ls
 fw tail relaxed_euler -n 20
+fw tail relaxed_euler --full
 fw dispatch
 ```
 

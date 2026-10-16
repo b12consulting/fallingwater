@@ -211,6 +211,7 @@ and `turn_id: str`; it tells a worker which queued turn to load.
 their IDs as Redis returns them. `fw tail <conversation_id>` decodes the latest
 ten conversation events by default; `-n` changes the count. `fw dispatch` decodes
 the latest ten dispatch entries and accepts the same count option. Both event
-commands print each Redis entry ID, event type, and compact JSON payload in
-stream order, with compressed conversation payloads decoded through
+commands print each Redis entry ID, event type, and indented JSON payload in
+stream order. The tail output omits completed-turn history and usage by default;
+`--full` includes both. Compressed conversation payloads are decoded through
 `ConversationStream`.

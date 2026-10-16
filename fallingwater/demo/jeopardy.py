@@ -1,4 +1,5 @@
-"""A Jeopardy host whose tool runs independent contestants through Fallingwater.
+"""
+A Jeopardy host whose tool runs independent contestants through Fallingwater.
 
 Start at least two proxies so one can process contestants while the host waits
 for its tool call::
@@ -57,7 +58,8 @@ jeopardy_host = Agent.from_spec(
 
 @jeopardy_host.tool
 def ask_contestants(ctx: RunContext[None], clues: list[str]) -> list[str]:
-    """Submit each clue to a separate contestant and collect the responses.
+    """
+    Submit each clue to a separate contestant and collect the responses.
 
     Args:
         ctx: Context for the host's current turn.

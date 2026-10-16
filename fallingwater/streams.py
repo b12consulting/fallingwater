@@ -26,41 +26,57 @@ class EventType(StrEnum):
     TURN_FAILED = "turn.failed"
 
 
-class ConversationPayloadModel(BaseModel):
+class ConversationPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    def fmt(self, full: bool = False) -> dict[str, Any]:
+        """
+        Return the payload as JSON-compatible data.
+        """
+        return self.model_dump(mode="json")
 
-class ConversationCreatedPayload(ConversationPayloadModel):
+
+class ConversationCreatedPayload(ConversationPayload):
     agent: str
     model: str = ""
     deps: dict[str, Any] = Field(default_factory=dict)
 
 
-class TurnQueuedPayload(ConversationPayloadModel):
+class TurnQueuedPayload(ConversationPayload):
     turn_id: str
     message: str
 
 
-class TurnCompletedPayload(ConversationPayloadModel):
+class TurnCompletedPayload(ConversationPayload):
     turn_id: str
     message: str
     history: list[dict[str, Any]]
     usage: RunUsage
 
+    def fmt(self, full: bool = False) -> dict[str, Any]:
+        """
+        Return the payload, including history and usage only when requested.
+        """
+        payload = super().fmt(full=full)
+        if not full:
+            payload.pop("history")
+            payload.pop("usage")
+        return payload
 
-class TurnFailedPayload(ConversationPayloadModel):
+
+class TurnFailedPayload(ConversationPayload):
     turn_id: str
     error: str
 
 
-ConversationPayload: TypeAlias = (
+ConversationPayloadType: TypeAlias = (
     ConversationCreatedPayload
     | TurnQueuedPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
 
-PAYLOAD_MODELS: dict[EventType, type[ConversationPayload]] = {
+PAYLOAD_MODELS: dict[EventType, type[ConversationPayloadType]] = {
     EventType.CONVERSATION_CREATED: ConversationCreatedPayload,
     EventType.TURN_QUEUED: TurnQueuedPayload,
     EventType.TURN_COMPLETED: TurnCompletedPayload,
@@ -72,7 +88,7 @@ class ConversationEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     type: EventType
-    payload: ConversationPayload
+    payload: ConversationPayloadType
 
 
 def decode_text(value: str | bytes) -> str:
