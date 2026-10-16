@@ -43,8 +43,14 @@ def test_web_command_passes_config_to_app_and_uvicorn(
     pytest.importorskip("jinja2")
     pytest.importorskip("uvicorn")
     app = object()
+    redis = MagicMock(spec=Redis)
+    redis_context = MagicMock()
+    redis_context.__enter__.return_value = redis
     create_app = MagicMock(return_value=app)
     serve = MagicMock()
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", MagicMock(return_value=redis_context)
+    )
     monkeypatch.setattr("fallingwater.web.apirouter.create_app", create_app)
     monkeypatch.setattr("uvicorn.run", serve)
 
@@ -65,10 +71,13 @@ def test_web_command_passes_config_to_app_and_uvicorn(
         == 0
     )
 
-    create_app.assert_called_once_with(
-        redis_url="redis://example:6379/1", namespace="fw-test"
+    create_app.assert_called_once_with(namespace="fw-test", redis=redis)
+    serve.assert_called_once_with(
+        app,
+        host="0.0.0.0",
+        port=9000,
+        timeout_graceful_shutdown=3,
     )
-    serve.assert_called_once_with(app, host="0.0.0.0", port=9000)
 
 
 def test_chat_positional_conversation_and_short_options() -> None:

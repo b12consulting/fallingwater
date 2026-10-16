@@ -116,10 +116,12 @@ Redis read errors propagate and leave the dispatch entry pending.
 The module-level `router` exposes a read-only SSE route at
 `/conversations/{conversation_id}/events`. The small `create_app` wrapper mounts
 it under `/fw-api`, and `fw web` serves it with Uvicorn. The route gets its
-synchronous Redis client and namespace from the hosting app's state. The SSE
-routes return synchronous iterators; FastAPI's `EventSourceResponse` advances
-them in a worker thread so blocking Redis reads do not block the event loop. The
-app closes the Redis client it creates when it shuts down.
+synchronous Redis client and namespace from the hosting app's state. The
+required Redis client is passed to `create_app`; the app does not create or
+close it. `fw web` owns the client and keeps it open until Uvicorn returns. The
+SSE routes return synchronous iterators; FastAPI's `EventSourceResponse`
+advances them in a worker thread so blocking Redis reads do not block the event
+loop.
 
 The route returns 404 for an unknown conversation. For an existing one, it reads
 the conversation stream from the beginning with `XREAD`, then follows new
@@ -145,6 +147,11 @@ feed. The monitor uses payload `fmt()` output, omitting completed-turn history
 and usage by default; `/monitor?full=1` includes them. It listens for each
 current conversation event type and keeps at most 200 rendered entries in the
 browser. The per-conversation SSE route always sends complete payloads.
+Idle feed polls emit an SSE comment every second so the synchronous reader
+returns control regularly. `fw web` gives active connections three seconds to
+close on shutdown, then cancels remaining streaming tasks. Its Redis client is
+closed after Uvicorn returns, so cancelled stream reads cannot race client
+cleanup.
 
 ## AD8 — CLI reader groups
 

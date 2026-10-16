@@ -2,8 +2,7 @@
 FastAPI router and small standalone app for conversation events.
 """
 
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 
@@ -178,6 +177,7 @@ def recent_events(
             )
 
     while True:
+        emitted_event = False
         new_streams: dict[str, None] = {}
         batches = redis.xread(
             {dispatch_name: dispatch_cursor, **streams}, count=100, block=1000
@@ -213,6 +213,7 @@ def recent_events(
             for raw_entry in entries:
                 entry_id, event = ConversationStream.decode_entry(raw_entry)
                 streams[stream] = entry_id
+                emitted_event = True
                 yield _recent_sse(namespace, stream, entry_id, event, full=full)
 
         for stream in new_streams:
@@ -220,7 +221,11 @@ def recent_events(
                 continue
             streams[stream], entries = _recent_tail(redis, stream)
             for entry_id, event in entries:
+                emitted_event = True
                 yield _recent_sse(namespace, stream, entry_id, event, full=full)
+
+        if not emitted_event:
+            yield ServerSentEvent(comment="keep-alive")
 
 
 @router.get(
@@ -236,42 +241,32 @@ def events(
     """
     cursor = "0-0"
     while True:
+        emitted_event = False
         batches = redis.xread({stream: cursor}, count=100, block=1000)
         for _, entries in batches:
             for raw_entry in entries:
                 entry_id, event = ConversationStream.decode_entry(raw_entry)
                 cursor = entry_id
+                emitted_event = True
                 yield ServerSentEvent(
                     id=entry_id,
                     event=event.type.value,
                     data=_event_data(event, full=True),
                 )
+        if not emitted_event:
+            yield ServerSentEvent(comment="keep-alive")
 
 
 def create_app(
     *,
-    redis_url: str = "redis://localhost:6379/0",
+    redis: Redis,
     namespace: str = "fw",
-    redis: Redis | None = None,
 ) -> FastAPI:
     """
-    Mount the router for the bundled web command.
+    Mount the router with its Redis client and namespace.
     """
-    owns_redis = redis is None
-    client = (
-        redis if redis is not None else Redis.from_url(redis_url)
-    )
-
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        try:
-            yield
-        finally:
-            if owns_redis:
-                client.close()
-
-    app = FastAPI(lifespan=lifespan)
-    app.state.fw_redis = client
+    app = FastAPI()
+    app.state.fw_redis = redis
     app.state.fw_namespace = namespace
     app.include_router(router, prefix="/fw-api")
     return app

@@ -302,8 +302,15 @@ def run_web(args: argparse.Namespace) -> None:
         logger.debug("Web dependency is missing", exc_info=True)
         raise SystemExit("fw web requires fallingwater[web]") from error
 
-    app = create_app(redis_url=args.redis_url, namespace=args.namespace)
-    uvicorn.run(app, host=args.host, port=args.port)
+    with Redis.from_url(args.redis_url) as redis:
+        app = create_app(namespace=args.namespace, redis=redis)
+        # SSE connections stay open, so give them a short window to finish on exit.
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            timeout_graceful_shutdown=3,
+        )
 
 
 def run_reset(args: argparse.Namespace) -> None:
