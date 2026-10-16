@@ -295,10 +295,6 @@ class ConversationStream(RedisStream):
             ) from error
         return ConversationEvent(type=event_type, payload=payload)
 
-    def decode_entry(self, entry: RawStreamEntry) -> StreamEntry:
-        entry_id, fields = entry
-        return decode_text(entry_id), self.decode_event(fields)
-
     def add(
         self,
         event_type: EventType,

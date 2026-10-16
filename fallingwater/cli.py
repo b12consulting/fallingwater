@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from importlib.metadata import version
 
 from redis import Redis
@@ -137,23 +137,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def show_version(_args: argparse.Namespace) -> int:
+def show_version(_args: argparse.Namespace) -> None:
     """
     Print the installed version.
     """
     print(version("fallingwater"))
-    return 0
 
 
-def run_worker(args: argparse.Namespace) -> int:
+def run_worker(args: argparse.Namespace) -> None:
     with Redis.from_url(args.redis_url) as redis:
         worker = Worker(redis, namespace=args.namespace, proxy_count=args.proxies)
         print(f"Worker running with {args.proxies} proxy(s). Press Ctrl-C to stop.")
         worker.run()
-    return 0
 
 
-def run_ls(args: argparse.Namespace) -> int:
+def run_ls(args: argparse.Namespace) -> None:
     """
     List conversation IDs found in the selected Redis namespace.
     """
@@ -172,10 +170,18 @@ def run_ls(args: argparse.Namespace) -> int:
             except ValueError:
                 continue
             print(conversation_id)
-    return 0
 
 
-def run_tail(args: argparse.Namespace) -> int:
+def _print_event(
+    entry_id: str, event_type: str, payload: Mapping[str, object]
+) -> None:
+    print(
+        f"{entry_id} {event_type} "
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def run_tail(args: argparse.Namespace) -> None:
     """
     Print the latest decoded events from one conversation stream.
     """
@@ -192,14 +198,10 @@ def run_tail(args: argparse.Namespace) -> int:
             )
         for entry_id, event in stream.last(args.count):
             payload = event.payload.fmt(full=args.full)
-            print(
-                f"{entry_id} {event.type.value} "
-                f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-            )
-    return 0
+            _print_event(entry_id, event.type.value, payload)
 
 
-def run_dispatch(args: argparse.Namespace) -> int:
+def run_dispatch(args: argparse.Namespace) -> None:
     """
     Print the latest decoded dispatch stream entries.
     """
@@ -211,14 +213,10 @@ def run_dispatch(args: argparse.Namespace) -> int:
         for entry_id, event in stream.last(args.count):
             event_type = event.get("type", "unknown")
             payload = {key: value for key, value in event.items() if key != "type"}
-            print(
-                f"{entry_id} {event_type} "
-                f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-            )
-    return 0
+            _print_event(entry_id, event_type, payload)
 
 
-def run_chat(args: argparse.Namespace) -> int:
+def run_chat(args: argparse.Namespace) -> None:
     conversation_id = args.conversation
     params = list(args.params)
     if conversation_id is not None and "=" in conversation_id:
@@ -260,7 +258,6 @@ def run_chat(args: argparse.Namespace) -> int:
             if args.conversation is None:
                 print(f"Conversation: {chat.conversation_id}", file=sys.stderr)
             chat.run_once(args.msg)
-    return 0
 
 
 def _parse_chat_params(params: Sequence[str]) -> dict[str, str]:
@@ -293,7 +290,7 @@ def _positive_int(value: str) -> int:
     return count
 
 
-def run_web(args: argparse.Namespace) -> int:
+def run_web(args: argparse.Namespace) -> None:
     """
     Run the optional FastAPI app with Uvicorn.
     """
@@ -307,10 +304,9 @@ def run_web(args: argparse.Namespace) -> int:
 
     app = create_app(redis_url=args.redis_url, namespace=args.namespace)
     uvicorn.run(app, host=args.host, port=args.port)
-    return 0
 
 
-def run_reset(args: argparse.Namespace) -> int:
+def run_reset(args: argparse.Namespace) -> None:
     """
     Delete keys belonging to the selected Fallingwater namespace.
     """
@@ -329,7 +325,6 @@ def run_reset(args: argparse.Namespace) -> int:
         if batch:
             deleted += redis.delete(*batch)
     print(f"Deleted {deleted} key(s) from namespace {namespace!r}.")
-    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -343,4 +338,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    return args.handler(args)
+    args.handler(args)
+    return 0
