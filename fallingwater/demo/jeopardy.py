@@ -13,7 +13,6 @@ FW_NAMESPACE in its environment so this tool submits to the same Redis keys.
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from uuid import uuid4
 
 from pydantic_ai import Agent, AgentSpec, RunContext
 from redis import Redis

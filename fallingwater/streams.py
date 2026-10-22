@@ -263,6 +263,7 @@ class ConversationStream(RedisStream):
 
     @staticmethod
     def decode_event(fields: Mapping[Any, Any]) -> ConversationEvent:
+        # Decode keys
         text_fields = {
             decode_text(key): value for key, value in fields.items()
         }
