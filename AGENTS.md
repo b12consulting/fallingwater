@@ -22,7 +22,11 @@ This is the quick-start guide for agents working in this repository. See
 |-- contrib/                  Small component experiments
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- test-compression.py   Compression benchmark for a serialized conversation turn
-|   `-- test-conversation.py  Standalone Pydantic AI conversation history example
+|   |-- test-conversation.py  Standalone Pydantic AI conversation history example
+|   |-- test-recursive-runner.py Generic deferred tool and subagent runner example
+|   |-- test-subagent.py      Deferred Pydantic AI Harness subagent example
+|   |-- test-subagent-json.py  Deferred Pydantic AI subagent JSON round-trip example
+|   `-- test-tool-call.py     Automatic and deferred Pydantic AI tool call example
 |-- fallingwater/             Importable library and fw CLI
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point

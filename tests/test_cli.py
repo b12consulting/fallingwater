@@ -91,9 +91,14 @@ def test_chat_positional_conversation_and_short_options() -> None:
             "test",
             "--group",
             "web-user",
+            "-p",
+            "name=Alice",
+            "--param",
+            "message=hello=world",
         ]
     )
     assert args.conversation == "boring_wozniak"
+    assert args.params == ["name=Alice", "message=hello=world"]
     assert args.agent == "example:agent"
     assert args.model == "test"
     assert args.group == "web-user"
@@ -112,6 +117,7 @@ def test_chat_argument_defaults_come_from_environment(
     assert args.model == "openai:gpt-4o-mini"
     assert args.group == "user"
     assert args.msg is None
+    assert args.params == []
 
     explicit = build_parser().parse_args(
         [
@@ -160,6 +166,10 @@ def test_named_chat_passes_agent_and_model_to_chat(
                 "openai:gpt-4o-mini",
                 "--group",
                 "reader-one",
+                "-p",
+                "name=Alice",
+                "--param",
+                "region=eu-west",
             ]
         )
         == 0
@@ -172,6 +182,7 @@ def test_named_chat_passes_agent_and_model_to_chat(
         "agent_path": "fallingwater.demo:haiku_master",
         "model": "openai:gpt-4o-mini",
         "group": "reader-one",
+        "deps": {"name": "Alice", "region": "eu-west"},
     }
 
 
@@ -197,6 +208,7 @@ def test_chat_uses_agent_and_model_environment_defaults(
         "agent_path": "fallingwater.demo:haiku_master",
         "model": "openai:gpt-4o-mini",
         "group": "user",
+        "deps": {},
     }
 
 

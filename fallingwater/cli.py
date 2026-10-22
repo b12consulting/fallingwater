@@ -93,10 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
         "conversation", nargs="?", help="Conversation ID to start or resume."
     )
     chat_parser.add_argument(
-        "params",
-        nargs="*",
+        "-p",
+        "--param",
+        dest="params",
+        action="append",
+        default=[],
         metavar="KEY=VALUE",
-        help="Dependencies for a new conversation, as key=value pairs.",
+        help="Dependency for a new conversation (repeatable; KEY=VALUE).",
     )
     chat_parser.add_argument(
         "-a",
@@ -218,12 +221,8 @@ def run_dispatch(args: argparse.Namespace) -> None:
 
 def run_chat(args: argparse.Namespace) -> None:
     conversation_id = args.conversation
-    params = list(args.params)
-    if conversation_id is not None and "=" in conversation_id:
-        params.insert(0, conversation_id)
-        conversation_id = None
     try:
-        deps = _parse_chat_params(params)
+        deps = _parse_chat_params(args.params)
     except ValueError as error:
         raise SystemExit(f"fw chat: {error}") from None
 
@@ -266,13 +265,9 @@ def _parse_chat_params(params: Sequence[str]) -> dict[str, str]:
     """
     deps: dict[str, str] = {}
     for param in params:
-        if "=" not in param:
-            raise ValueError(f"invalid dependency {param!r}; expected key=value")
-        key, value = param.split("=", 1)
-        if not key:
-            raise ValueError(f"invalid dependency {param!r}; key must be nonempty")
-        if key in deps:
-            raise ValueError(f"duplicate dependency key {key!r}")
+        key, separator, value = param.partition("=")
+        if not separator or not key or not value:
+            raise ValueError(f"invalid param {param!r}")
         deps[key] = value
     return deps
 
