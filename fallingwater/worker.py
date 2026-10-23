@@ -18,11 +18,19 @@ class Worker:
     """
 
     def __init__(
-        self, redis: Redis, *, namespace: str = "fw", proxy_count: int = 1
+        self,
+        redis: Redis,
+        *,
+        namespace: str = "fw",
+        proxy_count: int = 1,
+        claim_idle_ms: int = 300_000,
     ) -> None:
         if proxy_count < 1:
             raise ValueError("proxy_count must be at least 1")
-        self.proxies = [Proxy(redis, namespace=namespace) for _ in range(proxy_count)]
+        self.proxies = [
+            Proxy(redis, namespace=namespace, claim_idle_ms=claim_idle_ms)
+            for _ in range(proxy_count)
+        ]
 
     def stop(self) -> None:
         for proxy in self.proxies:

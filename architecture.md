@@ -27,9 +27,11 @@ responses pass through Redis.
 with `Agent.from_spec`; import-path resolution is cached, while callable results
 are created for each turn. Agents can bring their own tools and capabilities.
 
-Workers invoke `Agent.run_sync` for one complete turn and store Pydantic AI's
-new messages for that turn in the conversation stream. The next turn rebuilds
-the full history from completed turns and passes it back to Pydantic AI.
+Workers run agents through `runner.run_until_complete`, which may call
+`Agent.run_sync` repeatedly while tools are handled. They store all Pydantic
+AI messages produced during that logical turn in the conversation stream. The
+next turn rebuilds the full history from completed turns and passes it back to
+Pydantic AI.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -43,11 +45,11 @@ per-conversation stream records the creation event, queued prompts, outcomes,
 and history needed for the next turn. `Chat.receive` reads that stream with
 `XREAD`; the CLI uses a separate consumer group on the same stream.
 
-`Chat` uses `ConversationStream` and `DispatchStream` for stream reads and
-writes. Its consumer group is represented by `ReadGroup`, which handles new
-entries, pending entries, and acknowledgements. `Chat.send` keeps the
-transaction across the conversation and dispatch streams; each stream queues
-its own `XADD` on the shared pipeline.
+`Chat`, `Proxy`, and the web routes issue Redis stream commands directly at the
+workflow that needs them. `streams.py` holds key formatters, event models, and
+the compressed conversation event codec. `Chat.send` coordinates the
+transaction across the conversation and dispatch streams with two `XADD`
+commands on one pipeline.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -56,9 +58,10 @@ its own `XADD` on the shared pipeline.
 
 Each conversation event payload has a Pydantic model selected by its `type`.
 The stream entry stores only the text event type and a Brotli level 5 compressed
-JSON payload. `ConversationStream` compresses payloads on writes and decompresses
-and validates them on reads. The dispatch stream stays text based because its
-poke entries only carry routing identifiers.
+JSON payload. `encode_conversation_event` compresses and validates payloads on
+writes; `decode_conversation_event` decompresses and validates them on reads.
+The dispatch stream stays text based because its poke entries only carry
+routing identifiers.
 
 Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in one Redis transaction. The
@@ -96,17 +99,16 @@ unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
 
 ## AD6 — Worker lifecycle
 
-Each proxy reads one dispatch entry at a time through a `ReadGroup`. The stream
-creates the consumer group and returns the `ReadGroup`, which handles
-`XREADGROUP` and `XACK`. Dispatch streams use `MKSTREAM` when creating the
-worker group. `Proxy` validates and processes each poke,
+Each proxy creates the `workers` consumer group with `MKSTREAM`, then uses
+`XAUTOCLAIM` to recover entries idle for the configured period before reading
+new entries with `XREADGROUP`. The default idle period is five minutes and
+`fw worker --claim-idle-ms` changes it. `Proxy` validates and processes each poke,
 reconstructs the agent, latest completed message history, and usage, and writes a
 result event. On SIGINT or SIGTERM, `Worker` signals its proxies to stop; a
 proxy finishes any turn it has taken before exiting. A later worker can
 reconstruct the agent and handle the next turn from saved history. An
 in-progress Pydantic AI run is not resumed midway through a turn. Acknowledged
-entries remain in the dispatch stream, and pending entries are not reclaimed
-after a worker crash. If a poke is malformed or has no matching queued event,
+entries remain in the dispatch stream. If a poke is malformed or has no matching queued event,
 the proxy logs and acknowledges it without writing a result. If stored turn data
 is malformed while loading a matching turn, the proxy writes `turn.failed`;
 Redis read errors propagate and leave the dispatch entry pending.
@@ -177,9 +179,9 @@ Conversation stream entries contain exactly `type` and `payload`. The payload
 is JSON serialized from a Pydantic event payload model and compressed with
 Brotli quality 5 through the shared `compress` and `decompress` helpers in
 `utils.py`. Redis clients use binary responses so compressed bytes remain
-intact; `ConversationStream` performs compression, decompression, and model
-validation at the stream boundary. Dispatch entries remain text fields because
-they carry only a conversation ID and turn ID. `PAYLOAD_MODELS` is the public
+intact; the event codec functions in `streams.py` perform compression,
+decompression, and model validation. Dispatch entries remain text fields
+because they carry only a conversation ID and turn ID. `PAYLOAD_MODELS` is the public
 mapping from event types to their Pydantic payload models.
 
 The web event feeds decode conversation payloads before sending SSE data. A
@@ -223,4 +225,16 @@ the latest ten dispatch entries and accepts the same count option. Both event
 commands print each Redis entry ID, event type, and indented JSON payload in
 stream order. The tail output omits completed-turn history and usage by default;
 `--full` includes both. Compressed conversation payloads are decoded through
-`ConversationStream`.
+the shared conversation event decoder.
+
+## AD12 — Deferred caller-side tool execution
+
+`Proxy` runs agents through `runner.run_until_complete`. A Pydantic AI hook
+defers each tool call; the runner serializes and restores deferred request and
+result objects as JSON, then dispatches handlers from the agent module's
+optional `tool_executors_by_agent` mapping. The mapping is keyed by `Agent.name`
+and tool name. A regular executor can delegate to another named agent by
+calling the runner recursively; depth and tool-round limits prevent runaway
+delegation. Executor handlers are context-free and their return values must be
+JSON serializable. Tool approval requests and context-dependent executor
+handlers are not supported yet.

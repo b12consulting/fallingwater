@@ -14,9 +14,9 @@ from redis import Redis
 
 from ..streams import (
     ConversationEvent,
-    ConversationStream,
-    DispatchStream,
     EventType,
+    decode_conversation_entry,
+    decode_dispatch_fields,
     decode_text,
     fmt_conversation_stream,
     fmt_dispatch_stream,
@@ -100,7 +100,7 @@ def _recent_streams(
         if dispatch_cursor == "0-0":
             dispatch_cursor = decode_text(entries[0][0])
         for _, fields in entries:
-            fields = DispatchStream.decode_event(fields)
+            fields = decode_dispatch_fields(fields)
             if fields.get("type") != EventType.CONVERSATION_POKE:
                 continue
             conversation_id = fields.get("conversation_id")
@@ -125,7 +125,7 @@ def _recent_tail(
     entries = redis.xrevrange(
         stream, max="+", min="-", count=RECENT_EVENT_LIMIT
     )
-    decoded = [ConversationStream.decode_entry(entry) for entry in entries]
+    decoded = [decode_conversation_entry(entry) for entry in entries]
     return (decoded[0][0] if decoded else "0-0"), list(reversed(decoded))
 
 
@@ -188,7 +188,7 @@ def recent_events(
                 continue
             for entry_id, fields in entries:
                 dispatch_cursor = decode_text(entry_id)
-                fields = DispatchStream.decode_event(fields)
+                fields = decode_dispatch_fields(fields)
                 if fields.get("type") != EventType.CONVERSATION_POKE:
                     continue
                 conversation_id = fields.get("conversation_id")
@@ -211,7 +211,7 @@ def recent_events(
             if stream == dispatch_name or stream not in streams:
                 continue
             for raw_entry in entries:
-                entry_id, event = ConversationStream.decode_entry(raw_entry)
+                entry_id, event = decode_conversation_entry(raw_entry)
                 streams[stream] = entry_id
                 emitted_event = True
                 yield _recent_sse(namespace, stream, entry_id, event, full=full)
@@ -245,7 +245,7 @@ def events(
         batches = redis.xread({stream: cursor}, count=100, block=1000)
         for _, entries in batches:
             for raw_entry in entries:
-                entry_id, event = ConversationStream.decode_entry(raw_entry)
+                entry_id, event = decode_conversation_entry(raw_entry)
                 cursor = entry_id
                 emitted_event = True
                 yield ServerSentEvent(

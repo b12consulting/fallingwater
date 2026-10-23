@@ -14,8 +14,8 @@ from redis import Redis
 from .chat import Chat
 from .names import generate_name
 from .streams import (
-    ConversationStream,
-    DispatchStream,
+    decode_conversation_entry,
+    decode_dispatch_fields,
     decode_text,
     fmt_conversation_stream,
     fmt_dispatch_stream,
@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
         "worker", help="Run Redis-backed agent workers."
     )
     worker_parser.add_argument("-p", "--proxies", type=int, default=1)
+    worker_parser.add_argument(
+        "--claim-idle-ms",
+        type=_nonnegative_int,
+        default=300_000,
+        help="Idle time before reclaiming pending dispatch entries (default: 300000).",
+    )
     worker_parser.set_defaults(handler=run_worker)
 
     ls_parser = subparsers.add_parser("ls", help="List conversations.")
@@ -149,7 +155,12 @@ def show_version(_args: argparse.Namespace) -> None:
 
 def run_worker(args: argparse.Namespace) -> None:
     with Redis.from_url(args.redis_url) as redis:
-        worker = Worker(redis, namespace=args.namespace, proxy_count=args.proxies)
+        worker = Worker(
+            redis,
+            namespace=args.namespace,
+            proxy_count=args.proxies,
+            claim_idle_ms=args.claim_idle_ms,
+        )
         print(f"Worker running with {args.proxies} proxy(s). Press Ctrl-C to stop.")
         worker.run()
 
@@ -190,16 +201,16 @@ def run_tail(args: argparse.Namespace) -> None:
     """
     with Redis.from_url(args.redis_url) as redis:
         try:
-            stream = ConversationStream(
-                redis, args.conversation, namespace=args.namespace
-            )
+            stream = fmt_conversation_stream(args.namespace, args.conversation)
         except ValueError as error:
             raise SystemExit(f"fw tail: {error}") from None
-        if not redis.exists(stream.name):
+        if not redis.exists(stream):
             raise SystemExit(
                 f"fw tail: conversation not found: {args.conversation}"
             )
-        for entry_id, event in stream.last(args.count):
+        entries = redis.xrevrange(stream, count=args.count)
+        for raw_entry in reversed(entries):
+            entry_id, event = decode_conversation_entry(raw_entry)
             payload = event.payload.fmt(full=args.full)
             _print_event(entry_id, event.type.value, payload)
 
@@ -210,10 +221,13 @@ def run_dispatch(args: argparse.Namespace) -> None:
     """
     with Redis.from_url(args.redis_url) as redis:
         try:
-            stream = DispatchStream(redis, namespace=args.namespace)
+            stream = fmt_dispatch_stream(args.namespace)
         except ValueError as error:
             raise SystemExit(f"fw dispatch: {error}") from None
-        for entry_id, event in stream.last(args.count):
+        entries = redis.xrevrange(stream, count=args.count)
+        for raw_entry_id, raw_fields in reversed(entries):
+            entry_id = decode_text(raw_entry_id)
+            event = decode_dispatch_fields(raw_fields)
             event_type = event.get("type", "unknown")
             payload = {key: value for key, value in event.items() if key != "type"}
             _print_event(entry_id, event_type, payload)
@@ -283,6 +297,17 @@ def _positive_int(value: str) -> int:
     if count < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return count
+
+
+def _nonnegative_int(value: str) -> int:
+    """Parse a nonnegative duration in milliseconds."""
+    try:
+        duration = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer") from error
+    if duration < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return duration
 
 
 def run_web(args: argparse.Namespace) -> None:

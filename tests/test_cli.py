@@ -28,12 +28,23 @@ def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_redis_options_are_global() -> None:
     args = build_parser().parse_args(
-        ["-r", "redis://example:6379/1", "-n", "fw-test", "worker", "-p", "2"]
+        [
+            "-r",
+            "redis://example:6379/1",
+            "-n",
+            "fw-test",
+            "worker",
+            "-p",
+            "2",
+            "--claim-idle-ms",
+            "1500",
+        ]
     )
     assert args.redis_url == "redis://example:6379/1"
     assert args.namespace == "fw-test"
     assert args.command == "worker"
     assert args.proxies == 2
+    assert args.claim_idle_ms == 1500
 
 
 def test_web_command_passes_config_to_app_and_uvicorn(

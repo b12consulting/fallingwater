@@ -1,6 +1,4 @@
-"""
-Checks for the optional FastAPI conversation event feed.
-"""
+"""Checks for the optional FastAPI conversation event feed."""
 
 from unittest.mock import MagicMock
 
@@ -11,10 +9,15 @@ pytest.importorskip("jinja2")
 
 from fastapi.testclient import TestClient
 from fastapi.sse import ServerSentEvent
+from pydantic_ai.usage import RunUsage
 from redis import Redis
 
 from fallingwater.streams import (
+    ConversationCreatedPayload,
     EventType,
+    TurnCompletedPayload,
+    TurnQueuedPayload,
+    encode_conversation_event,
     fmt_conversation_stream,
     fmt_dispatch_stream,
 )
@@ -26,6 +29,32 @@ from fallingwater.web.apirouter import (
     recent_events,
     router,
 )
+
+
+def _event(event_type: EventType, **values):
+    if event_type == EventType.CONVERSATION_CREATED:
+        payload = ConversationCreatedPayload(
+            agent=values.get("agent", "demo"), model=values.get("model", "test")
+        )
+    elif event_type == EventType.TURN_QUEUED:
+        payload = TurnQueuedPayload(
+            turn_id=values.get("turn_id", "turn-1"),
+            message=values.get("message", "hello"),
+        )
+    elif event_type == EventType.TURN_COMPLETED:
+        payload = TurnCompletedPayload(
+            turn_id=values.get("turn_id", "turn-1"),
+            message=values.get("message", "answer"),
+            history=[],
+            usage=RunUsage(),
+        )
+    else:
+        raise ValueError(event_type)
+    return encode_conversation_event(event_type, payload)
+
+
+def _poke(conversation_id: str):
+    return {"type": EventType.CONVERSATION_POKE, "conversation_id": conversation_id}
 
 
 def test_app_mounts_conversation_events_under_fw_api() -> None:
@@ -60,59 +89,36 @@ def test_monitor_page_subscribes_to_recent_events() -> None:
 
 def test_sse_replays_events_then_reads_the_tail() -> None:
     redis = MagicMock(spec=Redis)
+    stream = "fw-test:conversation:abc:events"
     redis.xread.side_effect = [
         [
             (
-                "fw-test:conversation:abc:events",
+                stream,
                 [
-                    (
-                        "1-0",
-                        {
-                            "type": EventType.CONVERSATION_CREATED,
-                            "agent": "demo",
-                        },
-                    ),
-                    ("2-0", {"type": EventType.TURN_QUEUED, "message": "hello"}),
+                    ("1-0", _event(EventType.CONVERSATION_CREATED, agent="demo")),
+                    ("2-0", _event(EventType.TURN_QUEUED, message="hello")),
                 ],
             )
         ],
-        [
-            (
-                "fw-test:conversation:abc:events",
-                [
-                    (
-                        "3-0",
-                        {
-                            "type": EventType.TURN_COMPLETED,
-                            "turn_id": "turn-1",
-                            "message": "answer",
-                        },
-                    )
-                ],
-            )
-        ],
+        [(stream, [("3-0", _event(EventType.TURN_COMPLETED, message="answer"))])],
     ]
-    stream = events("fw-test:conversation:abc:events", redis)
+    stream_events = events(stream, redis)
 
-    first = next(stream)
-    second = next(stream)
-    third = next(stream)
-    stream.close()
+    first = next(stream_events)
+    second = next(stream_events)
+    third = next(stream_events)
+    stream_events.close()
 
     assert isinstance(first, ServerSentEvent)
-    assert (first.id, first.event, first.data["agent"]) == (
+    assert (first.id, first.event, first.data["payload"]["agent"]) == (
         "1-0",
         EventType.CONVERSATION_CREATED,
         "demo",
     )
     assert (second.id, second.event) == ("2-0", EventType.TURN_QUEUED)
     assert (third.id, third.event) == ("3-0", EventType.TURN_COMPLETED)
-    assert redis.xread.call_args_list[0].args[0] == {
-        "fw-test:conversation:abc:events": "0-0"
-    }
-    assert redis.xread.call_args_list[1].args[0] == {
-        "fw-test:conversation:abc:events": "2-0"
-    }
+    assert redis.xread.call_args_list[0].args[0] == {stream: "0-0"}
+    assert redis.xread.call_args_list[1].args[0] == {stream: "2-0"}
 
 
 def test_unknown_conversation_returns_404_before_streaming() -> None:
@@ -133,10 +139,7 @@ def test_recent_conversation_discovery_skips_duplicate_dispatch_entries() -> Non
         [
             (
                 f"{number}-0",
-                {
-                    "type": EventType.CONVERSATION_POKE,
-                    "conversation_id": "same",
-                },
+                {"type": EventType.CONVERSATION_POKE, "conversation_id": "same"},
             )
             for number in range(200, 100, -1)
         ],
@@ -158,16 +161,7 @@ def test_recent_conversation_discovery_skips_duplicate_dispatch_entries() -> Non
     assert list(streams) == [
         f"fw-test:conversation:{conversation_id}:events"
         for conversation_id in [
-            "c9",
-            "c8",
-            "c7",
-            "c6",
-            "c5",
-            "c4",
-            "c3",
-            "c2",
-            "c1",
-            "same",
+            "c9", "c8", "c7", "c6", "c5", "c4", "c3", "c2", "c1", "same"
         ]
     ]
     assert redis.xrevrange.call_args_list[1].kwargs["max"] == "(101-0"
@@ -178,26 +172,18 @@ def test_recent_feed_replays_only_ten_events_then_follows_the_tail() -> None:
     namespace = "fw-test"
     stream = fmt_conversation_stream(namespace, "abc")
     redis.xrevrange.side_effect = [
-        [
-            (
-                "10-0",
-                {
-                    "type": EventType.CONVERSATION_POKE,
-                    "conversation_id": "abc",
-                },
-            )
-        ],
+        [("10-0", _poke("abc"))],
         [],
         [
             (
                 f"{number}-0",
-                {"type": EventType.TURN_COMPLETED, "message": str(number)},
+                _event(EventType.TURN_COMPLETED, message=str(number)),
             )
             for number in range(12, 2, -1)
         ],
     ]
     redis.xread.return_value = [
-        (stream, [("13-0", {"type": EventType.TURN_QUEUED})])
+        (stream, [("13-0", _event(EventType.TURN_QUEUED))])
     ]
     feed = recent_events(redis, namespace)
 
@@ -222,25 +208,17 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
 
     c11_stream = fmt_conversation_stream(namespace, "c11")
 
-    def xrevrange(
-        stream: str, **_kwargs: object
-    ) -> list[tuple[str, dict[str, str]]]:
+    def xrevrange(stream: str, **_kwargs: object):
         if stream == dispatch:
             return [
-                (
-                    f"{number}-0",
-                    {
-                        "type": EventType.CONVERSATION_POKE,
-                        "conversation_id": f"c{number}",
-                    },
-                )
+                (f"{number}-0", _poke(f"c{number}"))
                 for number in range(10, 0, -1)
             ]
         if stream == c11_stream:
             return [
-                ("3-0", {"type": EventType.TURN_COMPLETED}),
-                ("2-0", {"type": EventType.TURN_QUEUED}),
-                ("1-0", {"type": EventType.CONVERSATION_CREATED}),
+                ("3-0", _event(EventType.TURN_COMPLETED)),
+                ("2-0", _event(EventType.TURN_QUEUED)),
+                ("1-0", _event(EventType.CONVERSATION_CREATED)),
             ]
         return []
 
@@ -249,38 +227,20 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
         [
             (
                 stream_for("c10"),
-                [("20-0", {"type": EventType.TURN_COMPLETED, "message": "old"})],
+                [("20-0", _event(EventType.TURN_COMPLETED, message="old"))],
             )
         ],
         [
             (
                 dispatch,
-                [
-                    (
-                        "11-0",
-                        {
-                            "type": EventType.CONVERSATION_POKE,
-                            "conversation_id": "c11",
-                        },
-                    )
-                ],
+                [("11-0", _poke("c11"))],
             ),
             (
                 stream_for("c1"),
-                [
-                    (
-                        "21-0",
-                        {"type": EventType.TURN_COMPLETED, "message": "evicted"},
-                    )
-                ],
+                [("21-0", _event(EventType.TURN_COMPLETED, message="evicted"))],
             ),
         ],
-        [
-            (
-                stream_for("c11"),
-                [("4-0", {"type": EventType.TURN_COMPLETED})],
-            )
-        ],
+        [(stream_for("c11"), [("4-0", _event(EventType.TURN_COMPLETED))])],
     ]
     feed = recent_events(redis, namespace)
 
@@ -291,18 +251,11 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
         received[0].id,
         received[0].event,
         received[0].data["conversation_id"],
-    ) == (
-        "c10:20-0",
-        EventType.TURN_COMPLETED,
-        "c10",
-    )
+    ) == ("c10:20-0", EventType.TURN_COMPLETED, "c10")
     assert [event.id for event in received[1:]] == [
-        "c11:1-0",
-        "c11:2-0",
-        "c11:3-0",
-        "c11:4-0",
+        "c11:1-0", "c11:2-0", "c11:3-0", "c11:4-0"
     ]
     assert redis.xread.call_args_list[0].args[0][dispatch] == "10-0"
     followed = redis.xread.call_args_list[2].args[0]
     assert stream_for("c1") not in followed
-    assert followed[names.conversation("c11")] == "3-0"
+    assert followed[stream_for("c11")] == "3-0"
