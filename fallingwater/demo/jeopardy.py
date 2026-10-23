@@ -1,5 +1,5 @@
 """
-A Jeopardy host whose tool runs independent contestants through Fallingwater.
+A Jeopardy host that delegates each clue to a separate contestant agent.
 
 Start at least two proxies so one can process contestants while the host waits
 for its tool call::
@@ -12,7 +12,7 @@ FW_NAMESPACE in its environment so this tool submits to the same Redis keys.
 """
 
 import os
-from concurrent.futures import ThreadPoolExecutor
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic_ai import Agent, AgentSpec, RunContext
 from redis import Redis
@@ -43,12 +43,10 @@ jeopardy_host = Agent.from_spec(
                 "You host a Jeopardy game. When given a theme, generate three "
                 "distinct, factual clues related to it. Each clue should hint "
                 "at a specific person, place, thing, or term without naming it. "
-                "The clue should be formulated like an answer. "
-                "Submit all three clues in one call to ask_contestants. The tool "
-                "sends each clue to a different contestant and returns their "
-                "responses in the same order as the clues. Wait for the tool, "
-                "then present each clue and its contestant's response to the "
-                "user. Do not answer the clues yourself."
+                "Formulate each clue like an answer. Call ask_contestant once "
+                "for each clue, passing one clue per call. After receiving the "
+                "responses, present each clue with its contestant's response. "
+                "Do not answer the clues yourself."
             ),
         }
     )
@@ -56,32 +54,36 @@ jeopardy_host = Agent.from_spec(
 
 
 @jeopardy_host.tool
-def ask_contestants(ctx: RunContext[None], clues: list[str]) -> list[str]:
-    """
-    Submit each clue to a separate contestant and collect the responses.
+def ask_contestant(ctx: RunContext[None], clue: str) -> str:
+    """Submit one clue to a contestant and return their response.
 
     Args:
         ctx: Context for the host's current turn.
-        clues: The hints, one per contestant, to answer in question form.
+        clue: A hint for the contestant to answer in question form.
     """
-    if not clues or any(not clue.strip() for clue in clues):
-        raise ValueError("clues must be a nonempty list of nonempty strings")
-    model = (
-        os.getenv("FW_MODEL") or f"{ctx.model.system}:{ctx.model.model_name}"
-    )
+    if not clue.strip():
+        raise ValueError("clue must be a nonempty string")
+    model = os.getenv("FW_MODEL") or f"{ctx.model.system}:{ctx.model.model_name}"
     redis_url = os.getenv("FW_REDIS_URL", "redis://localhost:6379/0")
     namespace = os.getenv("FW_NAMESPACE", "fw")
 
+    parent_call_id = ctx.tool_call_id or "direct-call"
+    child_conversation_id = str(
+        uuid5(
+            NAMESPACE_URL,
+            f"fallingwater:{ctx.conversation_id}:{parent_call_id}",
+        )
+    )
+    child_turn_id = str(
+        uuid5(NAMESPACE_URL, f"{child_conversation_id}:contestant-turn")
+    )
+
     with Redis.from_url(redis_url) as redis:
-        futures = []
-        with ThreadPoolExecutor() as executor:
-            for pos, clue in enumerate(clues):
-                chat = Chat(
-                    redis,
-                    namespace=namespace,
-                    agent_path="fallingwater.demo:jeopardy_contestant",
-                    model=model,
-                )
-                futures.append(executor.submit(chat.ask, clue))
-    results = [f.result() for f in futures]
-    return results
+        chat = Chat(
+            redis,
+            namespace=namespace,
+            conversation_id=child_conversation_id,
+            agent_path="fallingwater.demo:jeopardy_contestant",
+            model=model,
+        )
+        return chat.ask(clue, turn_id=child_turn_id)

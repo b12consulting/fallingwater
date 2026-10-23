@@ -46,14 +46,14 @@ class Worker:
 
     def _request_stop(self, signum: int, _frame: object) -> None:
         logger.info(
-            "Worker received %s; stopping after active turns",
+            "Worker received %s; stopping at the next saved step",
             signal.Signals(signum).name,
         )
         self.stop()
 
     def run(self) -> None:
         """
-        Run until SIGINT or SIGTERM; active turns finish before exit.
+        Run until SIGINT or SIGTERM; active calls finish and checkpoint before exit.
 
         Signal handlers require this method to be called from the main thread.
         Embedded applications can call ``stop()`` from their own lifecycle code.

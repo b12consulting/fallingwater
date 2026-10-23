@@ -20,6 +20,8 @@ class EventType(StrEnum):
     CONVERSATION_CREATED = "conversation.created"
     CONVERSATION_POKE = "conversation.poke"
     TURN_QUEUED = "turn.queued"
+    TURN_TOOL_REQUESTED = "turn.tool.requested"
+    TURN_TOOL_RESULT = "turn.tool.result"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
 
@@ -43,6 +45,21 @@ class ConversationCreatedPayload(ConversationPayload):
 class TurnQueuedPayload(ConversationPayload):
     turn_id: str
     message: str
+
+
+class TurnToolRequestedPayload(ConversationPayload):
+    turn_id: str
+    step_id: str
+    requests: dict[str, Any]
+    history: list[dict[str, Any]]
+    usage: RunUsage
+
+
+class TurnToolResultPayload(ConversationPayload):
+    turn_id: str
+    step_id: str
+    tool_call_id: str
+    result: Any
 
 
 class TurnCompletedPayload(ConversationPayload):
@@ -70,6 +87,8 @@ class TurnFailedPayload(ConversationPayload):
 ConversationPayloadType: TypeAlias = (
     ConversationCreatedPayload
     | TurnQueuedPayload
+    | TurnToolRequestedPayload
+    | TurnToolResultPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
@@ -77,6 +96,8 @@ ConversationPayloadType: TypeAlias = (
 PAYLOAD_MODELS: dict[EventType, type[ConversationPayloadType]] = {
     EventType.CONVERSATION_CREATED: ConversationCreatedPayload,
     EventType.TURN_QUEUED: TurnQueuedPayload,
+    EventType.TURN_TOOL_REQUESTED: TurnToolRequestedPayload,
+    EventType.TURN_TOOL_RESULT: TurnToolResultPayload,
     EventType.TURN_COMPLETED: TurnCompletedPayload,
     EventType.TURN_FAILED: TurnFailedPayload,
 }
@@ -103,10 +124,7 @@ def validate_namespace(namespace: str) -> None:
     Require a lowercase namespace containing letters, digits, or
     hyphens.
     """
-    if (
-        not isinstance(namespace, str)
-        or re.fullmatch(r"[a-z0-9-]+", namespace) is None
-    ):
+    if not isinstance(namespace, str) or re.fullmatch(r"[a-z0-9-]+", namespace) is None:
         raise ValueError(
             "namespace must contain only lowercase letters, numbers, and hyphens"
         )
@@ -114,9 +132,7 @@ def validate_namespace(namespace: str) -> None:
 
 def validate_conversation_id(conversation_id: str) -> None:
     if not conversation_id or ":" in conversation_id:
-        raise ValueError(
-            "conversation ID must be nonempty and contain no colon"
-        )
+        raise ValueError("conversation ID must be nonempty and contain no colon")
 
 
 def fmt_dispatch_stream(namespace: str) -> str:
@@ -138,10 +154,7 @@ def fmt_conversation_stream(namespace: str, conversation_id: str) -> str:
 
 def decode_dispatch_fields(fields: Mapping[Any, Any]) -> dict[str, str]:
     """Decode a text-only dispatch entry returned by Redis."""
-    return {
-        decode_text(key): decode_text(value)
-        for key, value in fields.items()
-    }
+    return {decode_text(key): decode_text(value) for key, value in fields.items()}
 
 
 def encode_conversation_event(

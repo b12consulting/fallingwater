@@ -32,11 +32,12 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
 |   |-- catalog.py            Agent import-path loading
-|   |-- chat.py               Redis-backed conversation client
+|   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, web, and reset
+|   |-- conversation.py       Shared Redis stream client and event codecs
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- proxy.py              Pydantic AI turn processing
-|   |-- runner.py             Deferred tool execution and agent delegation
+|   |-- runner.py             Single-call Pydantic AI runner and tool helpers
 |   |-- streams.py            Stream names, event types, and payload codecs
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page
@@ -53,9 +54,10 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks
+    |-- test_conversation.py  Shared conversation client stream checks
     |-- test_jeopardy.py      Redis-backed Jeopardy tool checks
     |-- test_proxy.py         Conversation loading and turn processing checks
-    |-- test_runner.py        Deferred attached-tool and delegation checks
+    |-- test_runner.py        Single-call deferred runner checks
     |-- test_streams.py       Conversation event codec and naming checks
     `-- test_web.py           Web routes, page, and SSE feed checks
 ```

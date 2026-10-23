@@ -27,13 +27,12 @@ responses pass through Redis.
 with `Agent.from_spec`; import-path resolution is cached, while callable results
 are created for each turn. Agents can bring their own tools and capabilities.
 
-Workers run agents through `runner.run_until_complete`, which may call
-`Agent.run_sync` repeatedly while tools are handled. They store all Pydantic
-AI messages produced during that logical turn in the conversation stream. The
-runner executes deferred function tools directly from the agent's attached
-toolsets, retaining the originating `RunContext` in memory for context-taking
-tools. The next turn rebuilds the full history from completed turns and passes
-it back to Pydantic AI.
+`runner.run` invokes `Agent.run_sync` once and returns either final output or
+deferred tool requests. `Proxy` owns the loop, persisting each request and each
+tool result before the next model call. It rebuilds in-progress turns from the
+conversation stream after a worker restart. Context-taking tools use the live
+`RunContext` when available and a reconstructed basic context after recovery.
+The next turn rebuilds its history from completed turns.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -44,14 +43,22 @@ Pydantic AI's run ID.
 Redis Streams connect message submitters, workers, and readers. The shared
 `fw:dispatch` stream distributes turns through the `workers` consumer group. A
 per-conversation stream records the creation event, queued prompts, outcomes,
-and history needed for the next turn. `Chat.receive` reads that stream with
-`XREAD`; the CLI uses a separate consumer group on the same stream.
+and history needed for the next turn. `Chat.receive` reads that stream through
+`ConversationClient` with `XREAD`; the CLI uses a separate consumer group on
+the same stream.
 
-`Chat`, `Proxy`, and the web routes issue Redis stream commands directly at the
-workflow that needs them. `streams.py` holds key formatters, event models, and
-the compressed conversation event codec. `Chat.send` coordinates the
-transaction across the conversation and dispatch streams with two `XADD`
-commands on one pipeline.
+`ConversationClient` is the shared Redis boundary for `Chat` and `Proxy`. It
+formats stream names, encodes and decodes conversation events, normalizes
+dispatch fields, and performs stream reads, writes, acknowledgements, group
+creation, and dispatch claims. `streams.py` retains the event models, naming
+validation, and wire codecs. `Chat` and `Proxy` keep their workflow decisions:
+the CLI reader decides which conversation entries to acknowledge, and the
+worker decides when dispatch work is checkpointed and acknowledged.
+
+`Chat.send` asks the client to coordinate the queued event and dispatch poke
+with two `XADD` commands on one Redis transaction. Consumer-group and consumer
+names are explicit on client operations because terminal readers consume
+conversation streams while workers consume the dispatch stream.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -69,16 +76,18 @@ Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in one Redis transaction. The
 entries have different Redis stream IDs but share a turn ID. A worker uses the
 conversation ID and turn ID to load the queued prompt, fixed agent and model,
-and prior history from the conversation stream. Workers write completion or
-failure events to that stream. A claimed dispatch entry stays pending in the
-`workers` group until the worker acknowledges it after processing; pending
-entries can also remain after a worker crash.
+and prior history from the conversation stream. It writes `turn.tool.requested`
+after a run returns deferred calls and `turn.tool.result` after each tool call
+completes. It writes `turn.completed` or `turn.failed` when the turn ends. The
+dispatch entry remains pending until a terminal event is saved and can be
+recovered after a worker stops between checkpoints.
 
-Each completed event stores only the new Pydantic AI messages for that turn,
-their display response, and the Pydantic AI `RunUsage` value. The `history`
-payload field contains the new messages as structured JSON objects; the proxy
-appends these deltas in stream order and passes the latest usage value into the
-next agent run.
+Each tool-request event stores the message delta and `RunUsage` from that
+`Agent.run_sync` call, along with JSON-compatible deferred requests. Tool-result
+events are associated with that request and store one JSON-compatible result
+per call. Completed events store the accumulated new messages, display
+response, and `RunUsage`; their `history` field remains the canonical delta for
+later turns.
 
 `Proxy.load_conversation` returns the queued `next_prompt`, fixed agent path and
 model, prior history, dependencies, current turn ID, and latest usage together
@@ -103,17 +112,17 @@ unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
 
 Each proxy creates the `workers` consumer group with `MKSTREAM`, then uses
 `XAUTOCLAIM` to recover entries idle for the configured period before reading
-new entries with `XREADGROUP`. The default idle period is five minutes and
-`fw worker --claim-idle-ms` changes it. `Proxy` validates and processes each poke,
-reconstructs the agent, latest completed message history, and usage, and writes a
-result event. On SIGINT or SIGTERM, `Worker` signals its proxies to stop; a
-proxy finishes any turn it has taken before exiting. A later worker can
-reconstruct the agent and handle the next turn from saved history. An
-in-progress Pydantic AI run is not resumed midway through a turn. Acknowledged
-entries remain in the dispatch stream. If a poke is malformed or has no matching queued event,
-the proxy logs and acknowledges it without writing a result. If stored turn data
-is malformed while loading a matching turn, the proxy writes `turn.failed`;
-Redis read errors propagate and leave the dispatch entry pending.
+new entries with `XREADGROUP`, through `ConversationClient`. The default idle
+period is five minutes and `fw worker --claim-idle-ms` changes it. `Proxy`
+validates and processes each poke, reconstructs the agent and turn state, and
+writes a result event. On SIGINT or SIGTERM, an active model or tool call
+finishes and is checkpointed; the proxy then leaves unfinished work pending
+for another worker. An in-progress Pydantic AI call is not resumed midway
+through that call. Acknowledged entries remain in the dispatch stream. If a
+poke is malformed or has no matching queued event, the proxy logs and
+acknowledges it without writing a result. If stored turn data is malformed
+while loading a matching turn, the proxy writes `turn.failed`; Redis read
+errors propagate and leave the dispatch entry pending.
 
 ## AD7 — Web conversation feed
 
@@ -181,10 +190,10 @@ Conversation stream entries contain exactly `type` and `payload`. The payload
 is JSON serialized from a Pydantic event payload model and compressed with
 Brotli quality 5 through the shared `compress` and `decompress` helpers in
 `utils.py`. Redis clients use binary responses so compressed bytes remain
-intact; the event codec functions in `streams.py` perform compression,
-decompression, and model validation. Dispatch entries remain text fields
-because they carry only a conversation ID and turn ID. `PAYLOAD_MODELS` is the public
-mapping from event types to their Pydantic payload models.
+intact; `ConversationClient` uses the event codec functions in `streams.py` for
+compression, decompression, and model validation. Dispatch entries remain text
+fields because they carry only a conversation ID and turn ID. `PAYLOAD_MODELS`
+is the public mapping from event types to their Pydantic payload models.
 
 The web event feeds decode conversation payloads before sending SSE data. A
 completed payload carries the turn's new message history and `RunUsage`; the
@@ -205,6 +214,13 @@ payload model:
 - `turn.queued`
   - Fields: `turn_id: str`, `message: str`
   - Turn ID and user prompt.
+- `turn.tool.requested`
+  - Fields: `turn_id: str`, `step_id: str`, `requests: dict[str, Any]`,
+    `history: list[dict[str, Any]]`, `usage: RunUsage`
+  - Deferred requests from one model call, its message delta, and usage.
+- `turn.tool.result`
+  - Fields: `turn_id: str`, `step_id: str`, `tool_call_id: str`, `result: Any`
+  - One JSON-compatible tool result associated with a deferred request.
 - `turn.completed`
   - Fields: `turn_id: str`, `message: str`, `history: list[dict[str, Any]]`,
     `usage: RunUsage`
@@ -231,13 +247,44 @@ the shared conversation event decoder.
 
 ## AD12 — Deferred attached-tool execution
 
-`Proxy` runs agents through `runner.run_until_complete`. A Pydantic AI hook
-defers each tool call; the runner serializes and restores deferred request and
-result objects as JSON, then resolves each call against a function tool
-attached to the agent. The hook retains the call's `RunContext` in memory so
-context-taking tools receive the same dependencies, model, and conversation
-metadata as the original run. Synchronous and asynchronous function tools are
-supported, and tool results must be JSON serializable. A regular tool can
-delegate recursively by calling the runner; depth and tool-round limits prevent
-runaway delegation. Approval requests and toolsets without a directly attached
-function callable are not supported.
+`runner.run` calls `Agent.run_sync` once. A Pydantic AI hook defers attached
+function tools and returns their requests to `Proxy`. The proxy stores each
+request, executes calls sequentially, and stores each result before resuming
+the agent with `DeferredToolResults`. Synchronous and asynchronous function
+tools are supported; deferred requests and results must be JSON serializable.
+The originating `RunContext` is used in the live process; after recovery the
+proxy rebuilds its basic fields from the conversation and request. Tool calls
+that delegate to another agent use a separate `Chat` conversation and stable
+conversation and turn IDs, so the child stream can complete independently and
+be reused if the parent tool is retried. Approval requests and toolsets without
+a directly attached function callable are not supported.
+
+## AD13 — Checkpointed agent steps
+
+The proxy leaves a dispatch entry pending until it writes a terminal turn
+event. Each completed model call that requests tools is checkpointed before
+tool execution; each tool result is checkpointed before the next call. On
+restart, the proxy reconstructs the turn from these events and skips saved tool
+results. A crash after a tool side effect but before its result event can still
+repeat that tool call. A stop request takes effect after the current model or
+tool call is saved, leaving unfinished work for `XAUTOCLAIM` recovery.
+
+Nested agent work uses its own conversation stream. The parent tool waits for
+the child turn's `turn.completed` event before saving the child response as a
+parent tool result. Child conversations and turns use stable IDs derived from
+the parent conversation and tool-call ID. Worker deployments need an available
+proxy slot to process child turns while parent tools wait.
+
+## AD14 — Shared conversation client
+
+`fallingwater.conversation.ConversationClient` provides the shared Redis stream
+operations used by `Chat` and `Proxy`. It centralizes stream naming, typed
+conversation event serialization, dispatch text decoding, range and blocking
+reads, writes, consumer-group reads, acknowledgements, and dispatch
+`XAUTOCLAIM` cursor handling. Group and consumer names remain parameters so the
+client can read both terminal conversation groups and worker dispatch groups.
+
+The client does not decide when an event is complete, when a dispatch entry is
+safe to acknowledge, or how an agent turn is resumed. `Chat` and `Proxy` retain
+those policies. The CLI inspection commands and web SSE feeds keep their
+read-only query patterns, which include scans and multi-stream reads.

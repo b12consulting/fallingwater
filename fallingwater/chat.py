@@ -1,4 +1,4 @@
-"""Synchronous Redis-backed conversation client."""
+"""Terminal and library workflows for Redis-backed conversations."""
 
 import sys
 from collections.abc import Iterator, Mapping
@@ -9,6 +9,7 @@ from redis import Redis
 from redis.exceptions import ResponseError
 
 from .catalog import reify_agent
+from .conversation import ConversationClient
 from .streams import (
     ConversationCreatedPayload,
     ConversationEvent,
@@ -16,11 +17,6 @@ from .streams import (
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
-    decode_conversation_event,
-    decode_text,
-    encode_conversation_event,
-    fmt_conversation_stream,
-    fmt_dispatch_stream,
 )
 from .utils import logger
 
@@ -41,26 +37,22 @@ class Chat:
         group: str = "user",
         deps: Mapping[str, str] | None = None,  # FIXME use deps class from py-ai
     ) -> None:
-        self.redis = redis
+        self.client = ConversationClient(redis, namespace=namespace)
         if not group:
             raise ValueError("chat group must be nonempty")
         self.group = group
         self._pending_turns: dict[str, str] = {}
         self.conversation_id = conversation_id or str(uuid4())
-        self.events = fmt_conversation_stream(namespace, self.conversation_id)
-        self.dispatch_stream = fmt_dispatch_stream(namespace)
+        self.events = self.client.conversation_stream(self.conversation_id)
+        self.dispatch_stream = self.client.dispatch_stream
 
-        records = redis.xrange(self.events, count=1)
-        record = decode_conversation_event(records[0][1]) if records else None
+        records = self.client.read_conversation_range(self.events, count=1)
+        record = records[0][1] if records else None
         if record:
             if record.type != EventType.CONVERSATION_CREATED:
-                raise ValueError(
-                    f"{self.events} is not a Fallingwater conversation"
-                )
+                raise ValueError(f"{self.events} is not a Fallingwater conversation")
             if deps:
-                raise ValueError(
-                    "dependencies can only be set for a new conversation"
-                )
+                raise ValueError("dependencies can only be set for a new conversation")
             created = cast(ConversationCreatedPayload, record.payload)
             self.agent_path = created.agent
             self.model = created.model
@@ -72,15 +64,13 @@ class Chat:
 
         self._check_agent()
         if not record:
-            self.redis.xadd(
+            self.client.append_event(
                 self.events,
-                encode_conversation_event(
-                    EventType.CONVERSATION_CREATED,
-                    ConversationCreatedPayload(
-                        agent=self.agent_path,
-                        model=self.model,
-                        deps=dict(deps or {}),
-                    ),
+                EventType.CONVERSATION_CREATED,
+                ConversationCreatedPayload(
+                    agent=self.agent_path,
+                    model=self.model,
+                    deps=dict(deps or {}),
                 ),
             )
 
@@ -104,53 +94,64 @@ class Chat:
             "pass --model or configure one on the agent"
         )
 
-    def send(self, prompt: str) -> tuple[str, str]:
-        """Record a queued turn and return its turn ID and event cursor."""
-        turn_id = str(uuid4())
+    def _queued_cursor(self, turn_id: str, prompt: str) -> str | None:
+        """Find an existing queued turn for an idempotent delegated request."""
+        cursor = "-"
+        while True:
+            entries = self.client.read_conversation_range(
+                self.events, min=cursor, count=100
+            )
+            if not entries:
+                return None
+            for entry_id, event in entries:
+                if event.type != EventType.TURN_QUEUED:
+                    continue
+                queued = cast(TurnQueuedPayload, event.payload)
+                if queued.turn_id != turn_id:
+                    continue
+                if queued.message != prompt:
+                    raise ValueError(
+                        f"turn ID {turn_id!r} is already queued with another prompt"
+                    )
+                return entry_id
+            cursor = f"({entries[-1][0]}"
+
+    def send(self, prompt: str, *, turn_id: str | None = None) -> tuple[str, str]:
+        """Queue a prompt, optionally reusing an existing turn ID."""
+        reuse_turn_id = turn_id is not None
+        if reuse_turn_id and not turn_id:
+            raise ValueError("turn ID must be nonempty")
+        turn_id = turn_id or str(uuid4())
+        if reuse_turn_id:
+            queued_cursor = self._queued_cursor(turn_id, prompt)
+            if queued_cursor is not None:
+                return turn_id, queued_cursor
         logger.debug("SEND (stream: %s): %.20s", self.events, prompt)
-        with self.redis.pipeline(transaction=True) as pipeline:
-            pipeline.xadd(
-                self.events,
-                encode_conversation_event(
-                    EventType.TURN_QUEUED,
-                    TurnQueuedPayload(turn_id=turn_id, message=prompt),
-                ),
-            )
-            pipeline.xadd(
-                self.dispatch_stream,
-                {
-                    "type": EventType.CONVERSATION_POKE,
-                    "turn_id": turn_id,
-                    "conversation_id": self.conversation_id,
-                },
-            )
-            queued_id, _dispatch_id = pipeline.execute()
-        return turn_id, decode_text(queued_id)
+        queued_id = self.client.queue_turn(self.conversation_id, turn_id, prompt)
+        return turn_id, queued_id
 
     def receive(self, turn_id: str, cursor: str) -> str:
         """Wait for this turn's result without joining the worker group."""
         while True:
-            batches = self.redis.xread({self.events: cursor}, block=1000)
-            for _stream_name, entries in batches:
-                for raw_entry_id, fields in entries:
-                    cursor = decode_text(raw_entry_id)
-                    event = decode_conversation_event(fields)
-                    if not isinstance(
-                        event.payload,
-                        (TurnQueuedPayload, TurnCompletedPayload, TurnFailedPayload),
-                    ):
-                        continue
-                    if event.payload.turn_id != turn_id:
-                        continue
-                    if event.type == EventType.TURN_COMPLETED:
-                        completed = cast(TurnCompletedPayload, event.payload)
-                        return completed.message
-                    if event.type == EventType.TURN_FAILED:
-                        failed = cast(TurnFailedPayload, event.payload)
-                        raise RuntimeError(failed.error)
+            entries = self.client.read_conversation(self.events, cursor, block=1000)
+            for cursor, event in entries:
+                if not isinstance(
+                    event.payload,
+                    (TurnQueuedPayload, TurnCompletedPayload, TurnFailedPayload),
+                ):
+                    continue
+                if event.payload.turn_id != turn_id:
+                    continue
+                if event.type == EventType.TURN_COMPLETED:
+                    completed = cast(TurnCompletedPayload, event.payload)
+                    return completed.message
+                if event.type == EventType.TURN_FAILED:
+                    failed = cast(TurnFailedPayload, event.payload)
+                    raise RuntimeError(failed.error)
 
-    def ask(self, prompt: str) -> str:
-        return self.receive(*self.send(prompt))
+    def ask(self, prompt: str, *, turn_id: str | None = None) -> str:
+        """Submit or resume one turn and wait for its result."""
+        return self.receive(*self.send(prompt, turn_id=turn_id))
 
     def _handle_group_event(
         self,
@@ -176,12 +177,12 @@ class Chat:
                 print(f"Turn failed: {failed.error}", file=output, flush=True)
             queued_id = self._pending_turns.pop(turn_id, None)
             if queued_id is None:
-                self.redis.xack(self.events, self.group, entry_id)
+                self.client.acknowledge(self.events, self.group, entry_id)
             else:
-                self.redis.xack(self.events, self.group, queued_id, entry_id)
+                self.client.acknowledge(self.events, self.group, queued_id, entry_id)
             return turn_id
 
-        self.redis.xack(self.events, self.group, entry_id)
+        self.client.acknowledge(self.events, self.group, entry_id)
         return None
 
     def drain_pending(self, *, to_stderr: bool = False) -> None:
@@ -189,18 +190,20 @@ class Chat:
         cursor = "0"
         logger.debug("DRAIN %s", self.events)
         while True:
-            batches = self.redis.xreadgroup(
-                self.group, self.consumer, {self.events: cursor}, count=100
+            entries = self.client.read_group(
+                self.events,
+                self.group,
+                self.consumer,
+                cursor,
+                count=100,
             )
-            entries = [entry for _, batch in batches for entry in batch]
             if not entries:
                 return
-            for raw_entry_id, fields in entries:
-                entry_id = decode_text(raw_entry_id)
+            for entry_id, event in entries:
                 cursor = entry_id
                 self._handle_group_event(
                     entry_id,
-                    decode_conversation_event(fields),
+                    event,
                     to_stderr=to_stderr,
                 )
 
@@ -213,20 +216,20 @@ class Chat:
         """Read new events and yield IDs of turns that complete."""
         logger.debug("READ NEW %s", self.events)
         while True:
-            batches = self.redis.xreadgroup(
+            entries = self.client.read_group(
+                self.events,
                 self.group,
                 self.consumer,
-                {self.events: ">"},
+                ">",
                 count=100,
                 block=block,
             )
-            entries = [entry for _, batch in batches for entry in batch]
             if not entries:
                 return
-            for raw_entry_id, fields in entries:
+            for entry_id, event in entries:
                 turn_id = self._handle_group_event(
-                    decode_text(raw_entry_id),
-                    decode_conversation_event(fields),
+                    entry_id,
+                    event,
                     to_stderr=to_stderr,
                 )
                 if turn_id is not None:
@@ -237,7 +240,7 @@ class Chat:
     def _resume_group(self, *, to_stderr: bool = False) -> None:
         """Catch up with unread events before accepting another turn."""
         try:
-            self.redis.xgroup_create(self.events, self.group, id="0")
+            self.client.create_group(self.events, self.group, id="0")
         except ResponseError as error:
             if not str(error).startswith("BUSYGROUP"):
                 raise

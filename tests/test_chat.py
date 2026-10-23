@@ -87,6 +87,23 @@ def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
     redis.pipeline.assert_called_once_with(transaction=True)
 
 
+def test_send_reuses_an_existing_stable_turn_id() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xrange.side_effect = [
+        [("1-0", _created())],
+        [("1-0", _created()), ("2-0", _queued("stable-turn"))],
+    ]
+    chat = Chat(
+        redis,
+        conversation_id="abc",
+        agent_path="pydantic_ai:Agent",
+        model="test",
+    )
+
+    assert chat.send("hello", turn_id="stable-turn") == ("stable-turn", "2-0")
+    redis.pipeline.assert_not_called()
+
+
 def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     redis = MagicMock(spec=Redis)
     redis.xrange.return_value = []
@@ -163,10 +180,12 @@ def test_resume_uses_saved_agent_and_model_and_validates_them() -> None:
 
 def test_resume_rejects_unavailable_saved_agent() -> None:
     redis = MagicMock(spec=Redis)
-    redis.xrange.return_value = [(
-        "1-0",
-        _created(agent="fallingwater.demo:missing_agent"),
-    )]
+    redis.xrange.return_value = [
+        (
+            "1-0",
+            _created(agent="fallingwater.demo:missing_agent"),
+        )
+    ]
 
     with pytest.raises(ValueError, match="cannot instantiate agent"):
         Chat(
