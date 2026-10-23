@@ -1,6 +1,7 @@
 """Redis access and event encoding for Fallingwater conversations."""
 
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import Any, TypeVar
 
 from redis import Redis
 
@@ -20,6 +21,7 @@ from .streams import (
 
 ConversationEntry = tuple[str, ConversationEvent]
 DispatchEntry = tuple[str, dict[str, str]]
+GroupEntry = TypeVar("GroupEntry")
 
 
 class ConversationClient:
@@ -119,12 +121,37 @@ class ConversationClient:
         block: int | None = None,
     ) -> list[ConversationEntry]:
         """Read and decode conversation events through a consumer group."""
-        options: dict[str, Any] = {"count": count}
-        if block is not None:
-            options["block"] = block
-        batches = self.redis.xreadgroup(group, consumer, {stream: cursor}, **options)
+        return self._read_group(
+            stream,
+            group,
+            consumer,
+            cursor,
+            count=count,
+            block=block,
+            decode_fields=decode_conversation_event,
+        )
+
+    def _read_group(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        cursor: str,
+        *,
+        count: int,
+        block: int | None,
+        decode_fields: Callable[[Mapping[Any, Any]], GroupEntry],
+    ) -> list[tuple[str, GroupEntry]]:
+        """Read and decode entries from a Redis consumer group."""
+        batches = self.redis.xreadgroup(
+            group,
+            consumer,
+            {stream: cursor},
+            count=count,
+            block=block,
+        )
         return [
-            (decode_text(entry_id), decode_conversation_event(fields))
+            (decode_text(entry_id), decode_fields(fields))
             for _stream_name, entries in batches
             for entry_id, fields in entries
         ]
@@ -139,18 +166,15 @@ class ConversationClient:
         block: int | None = None,
     ) -> list[DispatchEntry]:
         """Read dispatch entries and normalize their IDs and text fields."""
-        batches = self.redis.xreadgroup(
+        return self._read_group(
+            self.dispatch_stream,
             group,
             consumer,
-            {self.dispatch_stream: cursor},
+            cursor,
             count=count,
             block=block,
+            decode_fields=decode_dispatch_fields,
         )
-        return [
-            (decode_text(entry_id), decode_dispatch_fields(fields))
-            for _stream_name, entries in batches
-            for entry_id, fields in entries
-        ]
 
     def claim_dispatch(
         self,
