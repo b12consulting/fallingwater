@@ -220,7 +220,8 @@ def test_cli_group_replays_unread_completed_turn(monkeypatch, capsys) -> None:
 
     assert "answer" in capsys.readouterr().out
     redis.xgroup_create.assert_called_once_with(stream, "reader-one", id="0")
-    redis.xack.assert_any_call(stream, "reader-one", "2-0", "3-0")
+    redis.xack.assert_any_call(stream, "reader-one", "2-0")
+    redis.xack.assert_any_call(stream, "reader-one", "3-0")
     assert redis.xreadgroup.call_args_list[0].args == (
         "reader-one",
         "terminal",
@@ -233,7 +234,7 @@ def test_cli_group_replays_unread_completed_turn(monkeypatch, capsys) -> None:
     )
 
 
-def test_cli_group_recovers_pending_turn_and_waits_for_its_answer(
+def test_cli_group_does_not_wait_for_pending_turn_without_an_answer(
     monkeypatch, capsys
 ) -> None:
     redis = MagicMock(spec=Redis)
@@ -242,16 +243,42 @@ def test_cli_group_recovers_pending_turn_and_waits_for_its_answer(
         [(stream, [("2-0", _queued("turn-1"))])],
         [(stream, [])],
         [(stream, [])],
+        [(stream, [])],
         [(stream, [("3-0", _completed("turn-1", "late answer"))])],
+        [(stream, [])],
+        [
+            (
+                stream,
+                [
+                    ("4-0", _queued("turn-2", "new prompt")),
+                    ("5-0", _completed("turn-2", "new answer")),
+                ],
+            )
+        ],
     ]
-    monkeypatch.setattr("builtins.input", _end_input)
+    prompts = iter(["new prompt"])
+
+    def next_prompt(_prompt: str) -> str:
+        try:
+            return next(prompts)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("builtins.input", next_prompt)
     chat = _empty_chat(redis)
+    send = MagicMock(return_value=("turn-2", "4-0"))
+    monkeypatch.setattr(chat, "send", send)
 
     chat.run()
 
-    assert "late answer" in capsys.readouterr().out
-    redis.xack.assert_called_once_with(stream, "user", "2-0", "3-0")
-    assert redis.xreadgroup.call_args_list[-1].kwargs["block"] == 1000
+    output = capsys.readouterr().out
+    assert "late answer" in output
+    assert "new answer" in output
+    send.assert_called_once_with("new prompt")
+    redis.xack.assert_any_call(stream, "user", "2-0")
+    redis.xack.assert_any_call(stream, "user", "3-0")
+    redis.xack.assert_any_call(stream, "user", "4-0")
+    redis.xack.assert_any_call(stream, "user", "5-0")
 
 
 def test_cli_group_replays_pending_failure(monkeypatch, capsys) -> None:
@@ -276,13 +303,15 @@ def test_cli_group_replays_pending_failure(monkeypatch, capsys) -> None:
     chat.run()
 
     assert "Turn failed: boom" in capsys.readouterr().out
-    redis.xack.assert_called_once_with(stream, "user", "2-0", "3-0")
+    redis.xack.assert_any_call(stream, "user", "2-0")
+    redis.xack.assert_any_call(stream, "user", "3-0")
 
 
 def test_run_once_prints_its_response_and_acknowledges_it(monkeypatch, capsys) -> None:
     redis = MagicMock(spec=Redis)
     stream = "fw:conversation:abc:events"
     redis.xreadgroup.side_effect = [
+        [(stream, [])],
         [(stream, [])],
         [(stream, [])],
         [
@@ -303,7 +332,8 @@ def test_run_once_prints_its_response_and_acknowledges_it(monkeypatch, capsys) -
 
     send.assert_called_once_with("Hello")
     assert capsys.readouterr().out == "answer\n"
-    redis.xack.assert_called_once_with(stream, "user", "2-0", "3-0")
+    redis.xack.assert_any_call(stream, "user", "2-0")
+    redis.xack.assert_any_call(stream, "user", "3-0")
 
 
 def test_run_once_keeps_prior_answers_out_of_stdout(monkeypatch, capsys) -> None:
@@ -320,6 +350,7 @@ def test_run_once_keeps_prior_answers_out_of_stdout(monkeypatch, capsys) -> None
                 ],
             )
         ],
+        [(stream, [])],
         [(stream, [])],
         [
             (
@@ -339,5 +370,7 @@ def test_run_once_keeps_prior_answers_out_of_stdout(monkeypatch, capsys) -> None
     output = capsys.readouterr()
     assert output.out == "new answer\n"
     assert output.err == "earlier answer\n"
-    redis.xack.assert_any_call(stream, "user", "2-0", "3-0")
-    redis.xack.assert_any_call(stream, "user", "4-0", "5-0")
+    redis.xack.assert_any_call(stream, "user", "2-0")
+    redis.xack.assert_any_call(stream, "user", "3-0")
+    redis.xack.assert_any_call(stream, "user", "4-0")
+    redis.xack.assert_any_call(stream, "user", "5-0")

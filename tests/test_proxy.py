@@ -111,7 +111,14 @@ def test_proxy_persists_each_tool_result_and_completes_turn(monkeypatch) -> None
         return left * right
 
     request = _tool_request(
-        [ToolCallPart("multiply", {"left": 6, "right": 7}, tool_call_id="call-1")]
+        [
+            ToolCallPart(
+                "multiply", {"left": 6, "right": 7}, tool_call_id="call-1"
+            ),
+            ToolCallPart(
+                "multiply", {"left": 2, "right": 3}, tool_call_id="call-2"
+            ),
+        ]
     )
     request_result = AgentRunResult(
         output=TypeAdapter(DeferredToolRequests).validate_python(request.requests),
@@ -129,23 +136,46 @@ def test_proxy_persists_each_tool_result_and_completes_turn(monkeypatch) -> None
     monkeypatch.setattr("fallingwater.proxy.reify_agent", lambda _path: agent)
     monkeypatch.setattr("fallingwater.proxy.run", run_agent)
     redis, memory = _redis_with(_base_entries())
+    proxy = Proxy(redis)
+    fields = {"turn_id": "turn-1", "conversation_id": "abc"}
 
-    assert Proxy(redis).process({"turn_id": "turn-1", "conversation_id": "abc"})
+    assert not proxy.process(fields)
+    events = [decode_conversation_event(fields) for _, fields in memory.entries]
+    assert events[-1].type == EventType.TURN_TOOL_REQUESTED
+    assert calls == []
+    assert run_agent.call_count == 1
+
+    assert not proxy.process(fields)
+    events = [decode_conversation_event(fields) for _, fields in memory.entries]
+    assert events[-1].type == EventType.TURN_TOOL_RESULT
+    assert calls == [(6, 7)]
+    assert run_agent.call_count == 1
+
+    assert not proxy.process(fields)
+    events = [decode_conversation_event(fields) for _, fields in memory.entries]
+    assert events[-1].type == EventType.TURN_TOOL_RESULT
+    assert calls == [(6, 7), (2, 3)]
+    assert run_agent.call_count == 1
+
+    assert proxy.process(fields)
 
     events = [decode_conversation_event(fields) for _, fields in memory.entries]
-    assert [event.type for event in events[-3:]] == [
+    assert [event.type for event in events[-4:]] == [
         EventType.TURN_TOOL_REQUESTED,
+        EventType.TURN_TOOL_RESULT,
         EventType.TURN_TOOL_RESULT,
         EventType.TURN_COMPLETED,
     ]
-    result_payload = events[-2].payload
-    assert isinstance(result_payload, TurnToolResultPayload)
-    assert result_payload.result == 42
+    result_payloads = [event.payload for event in events[-3:-1]]
+    assert all(
+        isinstance(payload, TurnToolResultPayload)
+        for payload in result_payloads
+    )
+    assert [payload.result for payload in result_payloads] == [42, 6]
     completed = events[-1].payload
     assert isinstance(completed, TurnCompletedPayload)
     assert completed.message == "42"
     assert len(completed.history) == 2
-    assert calls == [(6, 7)]
     assert run_agent.call_count == 2
     assert run_agent.call_args_list[1].kwargs["deferred_tool_results"]
 
@@ -197,7 +227,10 @@ def test_proxy_resumes_missing_tool_call_with_rebuilt_context(monkeypatch) -> No
         "fallingwater.proxy.run", lambda *_args, **_kwargs: final_result
     )
 
-    assert Proxy(redis).process({"turn_id": "turn-1", "conversation_id": "abc"})
+    proxy = Proxy(redis)
+    fields = {"turn_id": "turn-1", "conversation_id": "abc"}
+    assert not proxy.process(fields)
+    assert proxy.process(fields)
 
     assert contexts == [({"answer": "dependency"}, "abc", "call-2", "contextual")]
     events = [decode_conversation_event(fields) for _, fields in memory.entries]
@@ -230,9 +263,9 @@ def test_stopping_after_request_leaves_turn_recoverable(monkeypatch) -> None:
     )
     redis, memory = _redis_with(_base_entries())
     proxy = Proxy(redis)
+    fields = {"turn_id": "turn-1", "conversation_id": "abc"}
+    assert not proxy.process(fields)
     proxy.stop()
-
-    assert not proxy.process({"turn_id": "turn-1", "conversation_id": "abc"})
     assert calls == []
     assert (
         decode_conversation_event(memory.entries[-1][1]).type
@@ -248,7 +281,9 @@ def test_stopping_after_request_leaves_turn_recoverable(monkeypatch) -> None:
     monkeypatch.setattr(
         "fallingwater.proxy.run", lambda *_args, **_kwargs: final_result
     )
-    assert Proxy(redis).process({"turn_id": "turn-1", "conversation_id": "abc"})
+    restarted_proxy = Proxy(redis)
+    assert not restarted_proxy.process(fields)
+    assert restarted_proxy.process(fields)
     assert calls == [3]
 
 
@@ -291,3 +326,36 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     failed = decode_conversation_event(memory.entries[-1][1]).payload
     assert isinstance(failed, TurnFailedPayload)
     assert failed.error == "agent failed"
+
+
+def test_proxy_run_repeats_steps_for_the_same_dispatch(monkeypatch) -> None:
+    redis = MagicMock(spec=Redis)
+    proxy = Proxy(redis)
+    fields = {
+        "type": EventType.CONVERSATION_POKE,
+        "turn_id": "turn-1",
+        "conversation_id": "abc",
+    }
+    proxy.client.create_group = Mock()
+    proxy.client.claim_dispatch = Mock(return_value=("0-0", [], []))
+    proxy.client.read_dispatch_group = Mock(return_value=[("1-0", fields)])
+    proxy.client.acknowledge = Mock()
+
+    outcomes = iter([False, False, True])
+
+    def process_step(_fields):
+        complete = next(outcomes)
+        if complete:
+            proxy.stop()
+        return complete
+
+    monkeypatch.setattr(proxy, "process", process_step)
+    proxy.run()
+
+    assert proxy.client.read_dispatch_group.call_count == 1
+    assert proxy.client.acknowledge.call_count == 1
+    assert proxy.client.acknowledge.call_args.args == (
+        proxy.dispatch_stream,
+        proxy.group,
+        "1-0",
+    )

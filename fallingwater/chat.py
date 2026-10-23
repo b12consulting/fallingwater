@@ -3,7 +3,7 @@
 import sys
 from collections.abc import Iterator, Mapping
 from typing import cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -22,7 +22,7 @@ from .utils import logger
 
 
 class Chat:
-    """Submit one turn at a time and observe its result through Redis."""
+    """Submit turns and observe their results through Redis."""
 
     consumer = "terminal"
 
@@ -41,7 +41,6 @@ class Chat:
         if not group:
             raise ValueError("chat group must be nonempty")
         self.group = group
-        self._pending_turns: dict[str, str] = {}
         self.conversation_id = conversation_id or str(uuid4())
         self.events = self.client.conversation_stream(self.conversation_id)
         self.dispatch_stream = self.client.dispatch_stream
@@ -116,12 +115,10 @@ class Chat:
                 return entry_id
             cursor = f"({entries[-1][0]}"
 
-    def send(self, prompt: str, *, turn_id: str | None = None) -> tuple[str, str]:
-        """Queue a prompt, optionally reusing an existing turn ID."""
-        reuse_turn_id = turn_id is not None
-        if reuse_turn_id and not turn_id:
-            raise ValueError("turn ID must be nonempty")
-        turn_id = turn_id or str(uuid4())
+    def _queue(
+        self, prompt: str, turn_id: str, *, reuse_turn_id: bool
+    ) -> tuple[str, str]:
+        """Queue a prompt using a generated or stable turn ID."""
         if reuse_turn_id:
             queued_cursor = self._queued_cursor(turn_id, prompt)
             if queued_cursor is not None:
@@ -129,6 +126,14 @@ class Chat:
         logger.debug("SEND (stream: %s): %.20s", self.events, prompt)
         queued_id = self.client.queue_turn(self.conversation_id, turn_id, prompt)
         return turn_id, queued_id
+
+    def send(self, prompt: str, *, turn_id: str | None = None) -> tuple[str, str]:
+        """Queue a prompt, optionally reusing an existing turn ID."""
+        reuse_turn_id = turn_id is not None
+        if reuse_turn_id and not turn_id:
+            raise ValueError("turn ID must be nonempty")
+        turn_id = turn_id or str(uuid4())
+        return self._queue(prompt, turn_id, reuse_turn_id=reuse_turn_id)
 
     def receive(self, turn_id: str, cursor: str) -> str:
         """Wait for this turn's result without joining the worker group."""
@@ -149,9 +154,24 @@ class Chat:
                     failed = cast(TurnFailedPayload, event.payload)
                     raise RuntimeError(failed.error)
 
-    def ask(self, prompt: str, *, turn_id: str | None = None) -> str:
-        """Submit or resume one turn and wait for its result."""
-        return self.receive(*self.send(prompt, turn_id=turn_id))
+    def ask(self, prompt: str, *, idempotency_key: str | None = None) -> str:
+        """Submit or resume one turn, optionally using a stable idempotency key."""
+        if idempotency_key is None:
+            turn_id = str(uuid4())
+            reuse_turn_id = False
+        else:
+            if not idempotency_key:
+                raise ValueError("idempotency key must be nonempty")
+            turn_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"fallingwater:{self.conversation_id}:ask:{idempotency_key}",
+                )
+            )
+            reuse_turn_id = True
+        return self.receive(
+            *self._queue(prompt, turn_id, reuse_turn_id=reuse_turn_id)
+        )
 
     def _handle_group_event(
         self,
@@ -164,7 +184,7 @@ class Chat:
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)
         if event_type == EventType.TURN_QUEUED and turn_id is not None:
-            self._pending_turns[turn_id] = entry_id
+            self.client.acknowledge(self.events, self.group, entry_id)
             return None
 
         if event_type in (EventType.TURN_COMPLETED, EventType.TURN_FAILED):
@@ -175,20 +195,22 @@ class Chat:
             else:
                 failed = cast(TurnFailedPayload, payload)
                 print(f"Turn failed: {failed.error}", file=output, flush=True)
-            queued_id = self._pending_turns.pop(turn_id, None)
-            if queued_id is None:
-                self.client.acknowledge(self.events, self.group, entry_id)
-            else:
-                self.client.acknowledge(self.events, self.group, queued_id, entry_id)
+            self.client.acknowledge(self.events, self.group, entry_id)
             return turn_id
 
         self.client.acknowledge(self.events, self.group, entry_id)
         return None
 
-    def drain_pending(self, *, to_stderr: bool = False) -> None:
-        """Replay entries assigned to this stable consumer before reading new ones."""
+    def read(
+        self,
+        *,
+        block: int | None = None,
+        to_stderr: bool = False,
+    ) -> Iterator[str]:
+        """Read pending entries, then new events, yielding completed turn IDs."""
+        logger.debug("READ %s", self.events)
         cursor = "0"
-        logger.debug("DRAIN %s", self.events)
+        completed_pending = False
         while True:
             entries = self.client.read_group(
                 self.events,
@@ -198,23 +220,19 @@ class Chat:
                 count=100,
             )
             if not entries:
-                return
+                break
             for entry_id, event in entries:
                 cursor = entry_id
-                self._handle_group_event(
-                    entry_id,
-                    event,
-                    to_stderr=to_stderr,
+                turn_id = self._handle_group_event(
+                    entry_id, event, to_stderr=to_stderr
                 )
+                if turn_id is not None:
+                    completed_pending = True
+                    yield turn_id
 
-    def read_new(
-        self,
-        *,
-        block: int | None = None,
-        to_stderr: bool = False,
-    ) -> Iterator[str]:
-        """Read new events and yield IDs of turns that complete."""
-        logger.debug("READ NEW %s", self.events)
+        if block is not None and completed_pending:
+            return
+
         while True:
             entries = self.client.read_group(
                 self.events,
@@ -228,9 +246,7 @@ class Chat:
                 return
             for entry_id, event in entries:
                 turn_id = self._handle_group_event(
-                    entry_id,
-                    event,
-                    to_stderr=to_stderr,
+                    entry_id, event, to_stderr=to_stderr
                 )
                 if turn_id is not None:
                     yield turn_id
@@ -238,7 +254,7 @@ class Chat:
                 return
 
     def _resume_group(self, *, to_stderr: bool = False) -> None:
-        """Catch up with unread events before accepting another turn."""
+        """Read available events before accepting another turn."""
         try:
             self.client.create_group(self.events, self.group, id="0")
         except ResponseError as error:
@@ -247,18 +263,14 @@ class Chat:
             logger.debug(
                 "Consumer group %s already exists on %s", self.group, self.events
             )
-        self.drain_pending(to_stderr=to_stderr)
-        for _ in self.read_new(to_stderr=to_stderr):
+        for _ in self.read(to_stderr=to_stderr):
             pass
-        while self._pending_turns:
-            for _ in self.read_new(block=1000, to_stderr=to_stderr):
-                pass
 
     def _send_and_wait(self, prompt: str) -> None:
         turn_id, _ = self.send(prompt)
         while True:
             completed = False
-            for completed_turn_id in self.read_new(block=1000):
+            for completed_turn_id in self.read(block=1000):
                 if completed_turn_id == turn_id:
                     completed = True
             if completed:

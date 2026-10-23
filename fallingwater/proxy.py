@@ -212,8 +212,129 @@ class Proxy:
             conversation_id=conversation_id,
         )
 
+    def _process_deferred_tools(
+        self,
+        *,
+        agent: Any,
+        conversation: Conversation,
+        conversation_stream: str,
+        conversation_id: str,
+        deps: Any,
+        requests: DeferredToolRequests,
+    ) -> DeferredToolResults | None:
+        """Save one missing tool result, or collect results ready for resume."""
+        if requests.approvals:
+            raise NotImplementedError(
+                "Fallingwater's deferred runner does not handle tool approvals"
+            )
+        step_id = conversation.tool_step_id
+        if step_id is None:
+            raise ValueError("Deferred tool request has no step ID")
+
+        tool_call = next(
+            (
+                call
+                for call in requests.calls
+                if call.tool_call_id not in conversation.tool_results
+            ),
+            None,
+        )
+        if tool_call is None:
+            return requests.build_results(
+                calls=conversation.tool_results,
+                metadata=requests.metadata,
+            )
+
+        tool = _find_attached_tool(agent, tool_call.tool_name)
+        args = self._tool_args(tool_call)
+        ctx = (
+            self._restore_tool_context(
+                agent=agent,
+                conversation=conversation,
+                deps=deps,
+                history=[*conversation.history, *conversation.turn_messages],
+                tool_call=tool_call,
+                usage=conversation.usage or RunUsage(),
+                conversation_id=conversation_id,
+            )
+            if tool.takes_ctx
+            else None
+        )
+        result = _execute_tool(tool, args, ctx)
+        result = _json_value_adapter.validate_json(_json_value_adapter.dump_json(result))
+        self.client.append_event(
+            conversation_stream,
+            EventType.TURN_TOOL_RESULT,
+            TurnToolResultPayload(
+                turn_id=conversation.current_turn_id,
+                step_id=step_id,
+                tool_call_id=tool_call.tool_call_id,
+                result=result,
+            ),
+        )
+        return None
+
+    def _run_agent_step(
+        self,
+        *,
+        agent: Any,
+        conversation: Conversation,
+        conversation_stream: str,
+        conversation_id: str,
+        deps: Any,
+        prompt: str | None,
+        deferred_results: DeferredToolResults | None,
+    ) -> bool:
+        """Run the agent once and persist its request or final response."""
+        result = run(
+            agent,
+            prompt,
+            message_history=[*conversation.history, *conversation.turn_messages],
+            deferred_tool_results=deferred_results,
+            deps=deps,
+            model=conversation.model or None,
+            usage=conversation.usage,
+            conversation_id=conversation_id,
+        )
+        turn_messages = [*conversation.turn_messages, *result.new_messages]
+
+        if isinstance(result.output, DeferredToolRequests):
+            self.client.append_event(
+                conversation_stream,
+                EventType.TURN_TOOL_REQUESTED,
+                TurnToolRequestedPayload(
+                    turn_id=conversation.current_turn_id,
+                    step_id=str(uuid4()),
+                    requests=_requests_adapter.dump_python(result.output, mode="json"),
+                    history=ModelMessagesTypeAdapter.dump_python(
+                        result.new_messages, mode="json"
+                    ),
+                    usage=result.usage,
+                ),
+            )
+            return False
+
+        self.client.append_event(
+            conversation_stream,
+            EventType.TURN_COMPLETED,
+            TurnCompletedPayload(
+                turn_id=conversation.current_turn_id,
+                message=str(result.output),
+                history=ModelMessagesTypeAdapter.dump_python(
+                    turn_messages, mode="json"
+                ),
+                usage=result.usage,
+            ),
+        )
+        logger.info(
+            "Sent response for turn %s in conversation %s",
+            conversation.current_turn_id,
+            conversation_id,
+        )
+        return True
+
     def process(self, fields: dict[str, str]) -> bool:
-        """Process one dispatch entry; return whether it can be acknowledged."""
+        """Process one step; return whether the turn is complete."""
         current_turn_id = fields["turn_id"]
         conversation_id = fields["conversation_id"]
         conversation_stream = self.client.conversation_stream(conversation_id)
@@ -240,144 +361,34 @@ class Proxy:
                 if conversation.deps
                 else None
             )
-            history = list(conversation.history)
-            turn_messages = list(conversation.turn_messages)
-            usage = conversation.usage
             requests = (
                 _requests_adapter.validate_python(conversation.tool_requests)
                 if conversation.tool_requests is not None
                 else None
             )
-            step_id = conversation.tool_step_id
-            tool_results = dict(conversation.tool_results)
-            prompt: str | None = (
-                None if requests is not None else conversation.next_prompt
-            )
-            deferred_results: DeferredToolResults | None = None
-            tool_contexts: dict[str, tuple[RunContext[Any], dict[str, Any]]] = {}
-
-            while True:
-                if requests is not None:
-                    if requests.approvals:
-                        raise NotImplementedError(
-                            "Fallingwater's deferred runner does not handle tool approvals"
-                        )
-                    if step_id is None:
-                        raise ValueError("Deferred tool request has no step ID")
-
-                    for tool_call in requests.calls:
-                        call_id = tool_call.tool_call_id
-                        if call_id in tool_results:
-                            continue
-                        if self.stop_event.is_set():
-                            return False
-
-                        tool = _find_attached_tool(agent, tool_call.tool_name)
-                        captured = tool_contexts.get(call_id)
-                        if captured is not None:
-                            captured_ctx, args = captured
-                            ctx = captured_ctx if tool.takes_ctx else None
-                        else:
-                            args = self._tool_args(tool_call)
-                            ctx = (
-                                self._restore_tool_context(
-                                    agent=agent,
-                                    conversation=conversation,
-                                    deps=deps,
-                                    history=[*history, *turn_messages],
-                                    tool_call=tool_call,
-                                    usage=usage or RunUsage(),
-                                    conversation_id=conversation_id,
-                                )
-                                if tool.takes_ctx
-                                else None
-                            )
-
-                        result = _execute_tool(tool, args, ctx)
-                        result = _json_value_adapter.validate_json(
-                            _json_value_adapter.dump_json(result)
-                        )
-                        self.client.append_event(
-                            conversation_stream,
-                            EventType.TURN_TOOL_RESULT,
-                            TurnToolResultPayload(
-                                turn_id=current_turn_id,
-                                step_id=step_id,
-                                tool_call_id=call_id,
-                                result=result,
-                            ),
-                        )
-                        tool_results[call_id] = result
-
-                    if self.stop_event.is_set():
-                        return False
-
-                    deferred_results = requests.build_results(
-                        calls=tool_results,
-                        metadata=requests.metadata,
-                    )
-                    requests = None
-                    step_id = None
-                    tool_results = {}
-                    tool_contexts = {}
-                    prompt = None
-
-                result = run(
-                    agent,
-                    prompt,
-                    message_history=[*history, *turn_messages],
-                    deferred_tool_results=deferred_results,
-                    deps=deps,
-                    model=conversation.model or None,
-                    usage=usage,
+            deferred_results = None
+            prompt = conversation.next_prompt if requests is None else None
+            if requests is not None:
+                deferred_results = self._process_deferred_tools(
+                    agent=agent,
+                    conversation=conversation,
+                    conversation_stream=conversation_stream,
                     conversation_id=conversation_id,
+                    deps=deps,
+                    requests=requests,
                 )
-                deferred_results = None
-                turn_messages.extend(result.new_messages)
-                usage = result.usage
-                tool_contexts = result.tool_contexts
+                if deferred_results is None:
+                    return False
 
-                if isinstance(result.output, DeferredToolRequests):
-                    step_id = str(uuid4())
-                    self.client.append_event(
-                        conversation_stream,
-                        EventType.TURN_TOOL_REQUESTED,
-                        TurnToolRequestedPayload(
-                            turn_id=current_turn_id,
-                            step_id=step_id,
-                            requests=_requests_adapter.dump_python(
-                                result.output, mode="json"
-                            ),
-                            history=ModelMessagesTypeAdapter.dump_python(
-                                result.new_messages, mode="json"
-                            ),
-                            usage=result.usage,
-                        ),
-                    )
-                    requests = result.output
-                    tool_results = {}
-                    if self.stop_event.is_set():
-                        return False
-                    continue
-
-                self.client.append_event(
-                    conversation_stream,
-                    EventType.TURN_COMPLETED,
-                    TurnCompletedPayload(
-                        turn_id=current_turn_id,
-                        message=str(result.output),
-                        history=ModelMessagesTypeAdapter.dump_python(
-                            turn_messages, mode="json"
-                        ),
-                        usage=result.usage,
-                    ),
-                )
-                logger.info(
-                    "Sent response for turn %s in conversation %s",
-                    current_turn_id,
-                    conversation_id,
-                )
-                return True
+            return self._run_agent_step(
+                agent=agent,
+                conversation=conversation,
+                conversation_stream=conversation_stream,
+                conversation_id=conversation_id,
+                deps=deps,
+                prompt=prompt,
+                deferred_results=deferred_results,
+            )
         except RedisError:
             # Redis failures must leave the dispatch pending for recovery.
             raise
@@ -391,7 +402,7 @@ class Proxy:
             return True
 
     def run(self) -> None:
-        """Read work until stopped, checkpointing active turns between calls."""
+        """Read work until stopped, checkpointing each turn step."""
         try:
             self.client.create_group(
                 self.dispatch_stream, self.group, id="0", mkstream=True
@@ -447,6 +458,10 @@ class Proxy:
                             current_turn_id,
                             conversation_id,
                         )
-                        should_ack = self.process(fields)
+                        should_ack = False
+                        while not self.stop_event.is_set():
+                            should_ack = self.process(fields)
+                            if should_ack:
+                                break
                 if should_ack:
                     self.client.acknowledge(self.dispatch_stream, self.group, entry_id)

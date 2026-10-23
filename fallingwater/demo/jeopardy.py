@@ -74,10 +74,6 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> str:
             f"fallingwater:{ctx.conversation_id}:{parent_call_id}",
         )
     )
-    child_turn_id = str(
-        uuid5(NAMESPACE_URL, f"{child_conversation_id}:contestant-turn")
-    )
-
     with Redis.from_url(redis_url) as redis:
         chat = Chat(
             redis,
@@ -86,4 +82,4 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> str:
             agent_path="fallingwater.demo:jeopardy_contestant",
             model=model,
         )
-        return chat.ask(clue, turn_id=child_turn_id)
+        return chat.ask(clue, idempotency_key="contestant-turn")

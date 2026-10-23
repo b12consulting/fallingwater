@@ -23,8 +23,8 @@ def test_contestant_tool_uses_a_separate_stable_conversation(monkeypatch) -> Non
             assert isinstance(redis, FakeRedis)
             chats.append(kwargs)
 
-        def ask(self, clue: str, *, turn_id: str) -> str:
-            submitted.append((clue, turn_id))
+        def ask(self, clue: str, *, idempotency_key: str) -> str:
+            submitted.append((clue, idempotency_key))
             return "What is Paris?"
 
     monkeypatch.setattr(jeopardy.Redis, "from_url", lambda *a, **kw: FakeRedis())
@@ -42,13 +42,13 @@ def test_contestant_tool_uses_a_separate_stable_conversation(monkeypatch) -> Non
 
     assert result == "What is Paris?"
     assert len(submitted) == 1
-    assert submitted[0][0] == "sport clue"
+    assert submitted[0] == ("sport clue", "contestant-turn")
     assert chats[0]["agent_path"] == "fallingwater.demo:jeopardy_contestant"
     assert chats[0]["model"] == "test:test"
     assert chats[0]["conversation_id"]
 
 
-def test_each_tool_call_uses_a_distinct_repeatable_child_turn(monkeypatch) -> None:
+def test_each_tool_call_uses_a_distinct_repeatable_child_request(monkeypatch) -> None:
     submitted: list[tuple[str, str]] = []
     conversations: list[str] = []
 
@@ -64,8 +64,8 @@ def test_each_tool_call_uses_a_distinct_repeatable_child_turn(monkeypatch) -> No
             assert isinstance(redis, FakeRedis)
             conversations.append(str(kwargs["conversation_id"]))
 
-        def ask(self, clue: str, *, turn_id: str) -> str:
-            submitted.append((clue, turn_id))
+        def ask(self, clue: str, *, idempotency_key: str) -> str:
+            submitted.append((clue, idempotency_key))
             return f"Response to {clue}"
 
     monkeypatch.setattr(jeopardy.Redis, "from_url", lambda *a, **kw: FakeRedis())

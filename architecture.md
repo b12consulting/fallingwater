@@ -28,11 +28,14 @@ with `Agent.from_spec`; import-path resolution is cached, while callable results
 are created for each turn. Agents can bring their own tools and capabilities.
 
 `runner.run` invokes `Agent.run_sync` once and returns either final output or
-deferred tool requests. `Proxy` owns the loop, persisting each request and each
-tool result before the next model call. It rebuilds in-progress turns from the
-conversation stream after a worker restart. Context-taking tools use the live
-`RunContext` when available and a reconstructed basic context after recovery.
-The next turn rebuilds its history from completed turns.
+deferred tool requests. `Proxy.process` performs one checkpointed step: one
+agent run or one unresolved tool call. The dispatch loop repeats that step in
+memory until the turn completes or shutdown is requested. Each request and tool
+result is persisted before the next step. A restarted proxy reconstructs the
+turn from the conversation stream and claims its pending dispatch through
+`XAUTOCLAIM`. Context-taking tools receive a reconstructed basic `RunContext`
+for each deferred call. The next turn rebuilds its history from completed
+turns.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -114,15 +117,16 @@ Each proxy creates the `workers` consumer group with `MKSTREAM`, then uses
 `XAUTOCLAIM` to recover entries idle for the configured period before reading
 new entries with `XREADGROUP`, through `ConversationClient`. The default idle
 period is five minutes and `fw worker --claim-idle-ms` changes it. `Proxy`
-validates and processes each poke, reconstructs the agent and turn state, and
-writes a result event. On SIGINT or SIGTERM, an active model or tool call
-finishes and is checkpointed; the proxy then leaves unfinished work pending
-for another worker. An in-progress Pydantic AI call is not resumed midway
-through that call. Acknowledged entries remain in the dispatch stream. If a
-poke is malformed or has no matching queued event, the proxy logs and
-acknowledges it without writing a result. If stored turn data is malformed
-while loading a matching turn, the proxy writes `turn.failed`; Redis read
-errors propagate and leave the dispatch entry pending.
+validates each poke, reconstructs the turn, and processes one checkpointed
+step at a time while retaining the dispatch fields in memory. On SIGINT or
+SIGTERM, an active model or tool call finishes and is checkpointed; the proxy
+then leaves unfinished work pending for another worker. A restarted proxy has
+a new consumer ID and recovers that dispatch with `XAUTOCLAIM`. An in-progress
+Pydantic AI call is not resumed midway through that call. Acknowledged entries
+remain in the dispatch stream. If a poke is malformed or has no matching
+queued event, the proxy logs and acknowledges it without writing a result. If
+stored turn data is malformed while loading a matching turn, the proxy writes
+`turn.failed`; Redis read errors propagate and leave the dispatch entry pending.
 
 ## AD7 — Web conversation feed
 
@@ -174,15 +178,17 @@ another. They use the stable consumer name `terminal` so a later CLI process
 can read entries left pending by an interrupted session. On startup it reads
 pending entries with `XREADGROUP` at `0`, then reads new entries with `>`.
 
-The CLI acknowledges `conversation.created` and unrecognized events as it reads
-them. It keeps a `turn.queued` entry pending until it prints that turn's
-`turn.completed` or `turn.failed` event, then acknowledges both entries
-together. This lets a resumed CLI wait for a turn that was still running when
-it closed. A terminal exit between printing and acknowledgement can cause the
-result to be printed again. Each group represents one logical terminal reader.
-In one-shot mode, `--msg` prints the new turn's result to stdout and any
-earlier unread results to stderr. The library's `Chat.receive` and the web
-feed still use independent `XREAD` calls.
+The CLI acknowledges `conversation.created`, `turn.queued`, and unrecognized
+events as it reads them. It prints each `turn.completed` or `turn.failed` event
+before acknowledging it, so a terminal exit between printing and acknowledgement
+can cause the result to be printed again. A single `Chat.read` method reads
+pending entries for the stable consumer, then new entries. On startup it handles
+events that are available and returns without waiting for queued turns whose
+results have not arrived; a new prompt can therefore overlap such a turn. Each
+group represents one logical terminal reader. In one-shot mode, `--msg` prints
+the new turn's result to stdout and earlier results read during startup catch-up
+to stderr. Results that arrive after the new prompt is queued use normal output.
+The library's `Chat.receive` and the web feed still use independent `XREAD` calls.
 
 ## AD9 — Compressed conversation payloads
 
@@ -271,9 +277,11 @@ tool call is saved, leaving unfinished work for `XAUTOCLAIM` recovery.
 
 Nested agent work uses its own conversation stream. The parent tool waits for
 the child turn's `turn.completed` event before saving the child response as a
-parent tool result. Child conversations and turns use stable IDs derived from
-the parent conversation and tool-call ID. Worker deployments need an available
-proxy slot to process child turns while parent tools wait.
+parent tool result. Child conversation IDs derive from the parent conversation
+and tool-call ID. `Chat.ask` generates turn IDs internally; callers that need
+retry idempotency can supply an `idempotency_key`, which derives a stable turn
+ID within that conversation. Worker deployments need an available proxy slot
+to process child turns while parent tools wait.
 
 ## AD14 — Shared conversation client
 
