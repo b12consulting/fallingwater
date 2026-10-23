@@ -13,7 +13,7 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import RedisError, ResponseError
 
-from .catalog import reify_agent, reify_tool_executors
+from .catalog import reify_agent
 from .streams import (
     ConversationCreatedPayload,
     EventType,
@@ -185,7 +185,6 @@ class Proxy:
             result = run_until_complete(
                 agent,
                 conversation.next_prompt,
-                tool_executors=reify_tool_executors(conversation.agent_path),
                 message_history=conversation.history,
                 deps=deps,
                 conversation_id=fields["conversation_id"],

@@ -15,7 +15,6 @@ from fallingwater.streams import (
     ConversationCreatedPayload,
     ConversationPayload,
     EventType,
-    TurnCompletedPayload,
     TurnQueuedPayload,
     decode_conversation_event,
     encode_conversation_event,
@@ -53,7 +52,6 @@ def test_completed_turn_stores_messages_from_agent_run(
     )
     agent = MagicMock()
     monkeypatch.setattr("fallingwater.proxy.reify_agent", lambda _path: agent)
-    monkeypatch.setattr("fallingwater.proxy.reify_tool_executors", lambda _path: {})
     run_agent = MagicMock(return_value=result)
     monkeypatch.setattr("fallingwater.proxy.run_until_complete", run_agent)
 
@@ -86,7 +84,6 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
         ),
     ]
     monkeypatch.setattr("fallingwater.proxy.reify_agent", lambda _path: object())
-    monkeypatch.setattr("fallingwater.proxy.reify_tool_executors", lambda _path: {})
 
     def fail_run(*_args, **_kwargs):
         raise RuntimeError("agent failed")

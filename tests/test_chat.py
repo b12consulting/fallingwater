@@ -89,6 +89,7 @@ def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
 
 def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     redis = MagicMock(spec=Redis)
+    redis.xrange.return_value = []
     chat = Chat(
         redis, conversation_id="test", agent_path="pydantic_ai:Agent", model="test"
     )

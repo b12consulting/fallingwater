@@ -17,15 +17,11 @@ from pydantic_ai import (
 from pydantic_ai.capabilities import Hooks
 
 
-ToolExecutors = Mapping[str, Mapping[str, Callable[..., Any]]]
 SPECIALIST_NAME = "multiplication_specialist"
 COORDINATOR_NAME = "calculation_coordinator"
 MAX_AGENT_DEPTH = 3
 MAX_TOOL_ROUNDS = 20
 _agent_depth_context: ContextVar[int] = ContextVar("agent_depth", default=1)
-_tool_executors_context: ContextVar[ToolExecutors | None] = ContextVar(
-    "tool_executors", default=None
-)
 
 requests_adapter = TypeAdapter(DeferredToolRequests)
 results_adapter = TypeAdapter(DeferredToolResults)
@@ -94,7 +90,6 @@ def make_delegate_tool(
                 subagent,
                 task,
                 agent_depth=agent_depth + 1,
-                tool_executors=_tool_executors_context.get(),
             )
         )
 
@@ -115,13 +110,23 @@ coordinator_agent = Agent(
 )
 coordinator_agent.tool_plain(delegate_task)
 
-# These maps describe caller-side dispatch for deferred calls. The Agent objects
-# themselves remain the source of truth for their prompts, tools, capabilities,
-# and output types.
-tool_executors_by_agent: Mapping[str, Mapping[str, Callable[..., Any]]] = {
-    COORDINATOR_NAME: {"delegate_task": delegate_task},
-    SPECIALIST_NAME: {"multiplier": multiplier},
-}
+
+def resolve_agent_tool(agent: Agent, tool_name: str) -> Callable[..., Any]:
+    """Find a directly attached, context-free function tool by its name."""
+    for toolset in agent.toolsets:
+        tools = getattr(toolset, "tools", {})
+        if tool_name in tools:
+            tool = tools[tool_name]
+            if tool.takes_ctx:
+                raise NotImplementedError(
+                    f"Cannot caller-execute context-taking tool {tool_name!r}"
+                )
+            breakpoint()
+            return tool.function
+    raise ValueError(
+        f"No directly attached function tool named {tool_name!r} "
+        f"on agent {agent.name!r}"
+    )
 
 
 def run_until_complete(
@@ -129,19 +134,15 @@ def run_until_complete(
     prompt: str,
     *,
     agent_depth: int = 1,
-    tool_executors: ToolExecutors | None = None,
 ) -> Any:
     """Run an agent, dispatch deferred tools or subagents, and resume it.
 
-    ``tool_executors`` is a caller-side dispatch registry, keyed first by the
-    configured agent name and then by tool name. A delegation tool can invoke
-    this runner recursively for its subagent.
+    Deferred calls are matched to function tools attached to the agent. This
+    example supports context-free tools; a tool requiring ``RunContext`` needs
+    an execution adapter.
     """
     if agent.name is None:
         raise ValueError("Agents handled by this runner must have a name")
-    current_agent_name = agent.name
-    if tool_executors is None:
-        tool_executors = tool_executors_by_agent
 
     deferred_output_type = [agent.output_type, DeferredToolRequests]
     rounds = 0
@@ -165,7 +166,7 @@ def run_until_complete(
         rounds += 1
         if rounds > MAX_TOOL_ROUNDS:
             raise RuntimeError(
-                f"{current_agent_name} exceeded {MAX_TOOL_ROUNDS} tool rounds"
+                f"{agent.name} exceeded {MAX_TOOL_ROUNDS} tool rounds"
             )
 
         requests = round_trip_requests(result.output)
@@ -177,18 +178,11 @@ def run_until_complete(
         call_results: dict[str, Any] = {}
         for tool_call in requests.calls:
             print(f"\tCaller received: {tool_call.tool_name}({tool_call.args})")
-            try:
-                tool = tool_executors[current_agent_name][tool_call.tool_name]
-            except KeyError as exc:
-                raise ValueError(
-                    f"No caller-side executor for tool: {tool_call.tool_name}"
-                ) from exc
+            tool = resolve_agent_tool(agent, tool_call.tool_name)
             depth_token = _agent_depth_context.set(agent_depth)
-            executor_token = _tool_executors_context.set(tool_executors)
             try:
                 value = tool(**tool_call.args_as_dict())
             finally:
-                _tool_executors_context.reset(executor_token)
                 _agent_depth_context.reset(depth_token)
 
             call_results[tool_call.tool_call_id] = value

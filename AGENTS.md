@@ -55,6 +55,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_cli.py           CLI smoke checks
     |-- test_jeopardy.py      Redis-backed Jeopardy tool checks
     |-- test_proxy.py         Conversation loading and turn processing checks
+    |-- test_runner.py        Deferred attached-tool and delegation checks
     |-- test_streams.py       Conversation event codec and naming checks
     `-- test_web.py           Web routes, page, and SSE feed checks
 ```

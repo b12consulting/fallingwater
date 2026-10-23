@@ -30,8 +30,10 @@ are created for each turn. Agents can bring their own tools and capabilities.
 Workers run agents through `runner.run_until_complete`, which may call
 `Agent.run_sync` repeatedly while tools are handled. They store all Pydantic
 AI messages produced during that logical turn in the conversation stream. The
-next turn rebuilds the full history from completed turns and passes it back to
-Pydantic AI.
+runner executes deferred function tools directly from the agent's attached
+toolsets, retaining the originating `RunContext` in memory for context-taking
+tools. The next turn rebuilds the full history from completed turns and passes
+it back to Pydantic AI.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -227,14 +229,15 @@ stream order. The tail output omits completed-turn history and usage by default;
 `--full` includes both. Compressed conversation payloads are decoded through
 the shared conversation event decoder.
 
-## AD12 — Deferred caller-side tool execution
+## AD12 — Deferred attached-tool execution
 
 `Proxy` runs agents through `runner.run_until_complete`. A Pydantic AI hook
 defers each tool call; the runner serializes and restores deferred request and
-result objects as JSON, then dispatches handlers from the agent module's
-optional `tool_executors_by_agent` mapping. The mapping is keyed by `Agent.name`
-and tool name. A regular executor can delegate to another named agent by
-calling the runner recursively; depth and tool-round limits prevent runaway
-delegation. Executor handlers are context-free and their return values must be
-JSON serializable. Tool approval requests and context-dependent executor
-handlers are not supported yet.
+result objects as JSON, then resolves each call against a function tool
+attached to the agent. The hook retains the call's `RunContext` in memory so
+context-taking tools receive the same dependencies, model, and conversation
+metadata as the original run. Synchronous and asynchronous function tools are
+supported, and tool results must be JSON serializable. A regular tool can
+delegate recursively by calling the runner; depth and tool-round limits prevent
+runaway delegation. Approval requests and toolsets without a directly attached
+function callable are not supported.
