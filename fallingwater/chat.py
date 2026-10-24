@@ -37,12 +37,14 @@ class Chat:
         group: str = "user",
         deps: Mapping[str, str] | None = None,  # FIXME use deps class from py-ai
     ) -> None:
-        self.client = ConversationClient(redis, namespace=namespace)
         if not group:
             raise ValueError("chat group must be nonempty")
         self.group = group
         self.conversation_id = conversation_id or str(uuid4())
-        self.events = self.client.conversation_stream(self.conversation_id)
+        self.client = ConversationClient(
+            redis, namespace=namespace, conversation_id=self.conversation_id
+        )
+        self.events = self.client.conversation_stream()
         self.dispatch_stream = self.client.dispatch_stream
 
         records = self.client.read_conversation_range(self.events, count=1)
@@ -124,7 +126,7 @@ class Chat:
             if queued_cursor is not None:
                 return turn_id, queued_cursor
         logger.debug("SEND (stream: %s): %.20s", self.events, prompt)
-        queued_id = self.client.queue_turn(self.conversation_id, turn_id, prompt)
+        queued_id = self.client.queue_turn(turn_id, prompt)
         return turn_id, queued_id
 
     def send(self, prompt: str, *, turn_id: str | None = None) -> tuple[str, str]:

@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import (
     Agent,
     CallDeferred,
@@ -38,6 +39,17 @@ def _defer_tool_execution(ctx: RunContext[Any], *, call, args, **_kwargs) -> Non
 
 _tool_hooks = Hooks()
 _tool_hooks.on.before_tool_execute()(_defer_tool_execution)
+
+
+class SubAgentRequest(BaseModel):
+    """Serializable request for a nonblocking child-agent turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_path: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    model: str | None = None
+    deps: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)

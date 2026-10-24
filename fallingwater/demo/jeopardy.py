@@ -1,8 +1,7 @@
 """
 A Jeopardy host that delegates each clue to a separate contestant agent.
 
-Start at least two proxies so one can process contestants while the host waits
-for its tool call::
+Start one or more proxies to process the host and contestant turns::
 
     fw worker -p 2
     fw chat --agent fallingwater.demo:jeopardy_host --model openai:gpt-6-luna
@@ -12,12 +11,10 @@ FW_NAMESPACE in its environment so this tool submits to the same Redis keys.
 """
 
 import os
-from uuid import NAMESPACE_URL, uuid5
 
 from pydantic_ai import Agent, AgentSpec, RunContext
-from redis import Redis
 
-from fallingwater.chat import Chat
+from fallingwater.runner import SubAgentRequest
 
 
 jeopardy_contestant = Agent.from_spec(
@@ -40,7 +37,7 @@ jeopardy_host = Agent.from_spec(
         {
             "name": "jeopardy-host",
             "instructions": (
-                "You host a Jeopardy game. When given a theme, generate three "
+                "You host a Jeopardy game. When given a theme, generate ten (10) "
                 "distinct, factual clues related to it. Each clue should hint "
                 "at a specific person, place, thing, or term without naming it. "
                 "Formulate each clue like an answer. Call ask_contestant once "
@@ -54,8 +51,8 @@ jeopardy_host = Agent.from_spec(
 
 
 @jeopardy_host.tool
-def ask_contestant(ctx: RunContext[None], clue: str) -> str:
-    """Submit one clue to a contestant and return their response.
+def ask_contestant(ctx: RunContext[None], clue: str) -> SubAgentRequest:
+    """Request a separate contestant turn for one clue.
 
     Args:
         ctx: Context for the host's current turn.
@@ -64,22 +61,8 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> str:
     if not clue.strip():
         raise ValueError("clue must be a nonempty string")
     model = os.getenv("FW_MODEL") or f"{ctx.model.system}:{ctx.model.model_name}"
-    redis_url = os.getenv("FW_REDIS_URL", "redis://localhost:6379/0")
-    namespace = os.getenv("FW_NAMESPACE", "fw")
-
-    parent_call_id = ctx.tool_call_id or "direct-call"
-    child_conversation_id = str(
-        uuid5(
-            NAMESPACE_URL,
-            f"fallingwater:{ctx.conversation_id}:{parent_call_id}",
-        )
+    return SubAgentRequest(
+        agent_path="fallingwater.demo:jeopardy_contestant",
+        prompt=clue,
+        model=model,
     )
-    with Redis.from_url(redis_url) as redis:
-        chat = Chat(
-            redis,
-            namespace=namespace,
-            conversation_id=child_conversation_id,
-            agent_path="fallingwater.demo:jeopardy_contestant",
-            model=model,
-        )
-        return chat.ask(clue, idempotency_key="contestant-turn")

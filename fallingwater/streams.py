@@ -22,8 +22,18 @@ class EventType(StrEnum):
     TURN_QUEUED = "turn.queued"
     TURN_TOOL_REQUESTED = "turn.tool.requested"
     TURN_TOOL_RESULT = "turn.tool.result"
+    TURN_SUBAGENT_REQUESTED = "turn.subagent.requested"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
+
+
+class DispatchType(StrEnum):
+    """Kinds of independently recoverable worker actions."""
+
+    CONVERSATION_POKE = EventType.CONVERSATION_POKE.value
+    TOOL_CALL = "turn.tool.call"
+    AGENT_RESUME = "turn.agent.resume"
+    SUBAGENT_RESULT = "turn.subagent.result"
 
 
 class ConversationPayload(BaseModel):
@@ -36,10 +46,18 @@ class ConversationPayload(BaseModel):
         return self.model_dump(mode="json")
 
 
+class ParentToolReference(ConversationPayload):
+    conversation_id: str
+    turn_id: str
+    step_id: str
+    tool_call_id: str
+
+
 class ConversationCreatedPayload(ConversationPayload):
     agent: str
     model: str = ""
     deps: dict[str, Any] = Field(default_factory=dict)
+    parent: ParentToolReference | None = None
 
 
 class TurnQueuedPayload(ConversationPayload):
@@ -47,7 +65,7 @@ class TurnQueuedPayload(ConversationPayload):
     message: str
 
 
-class TurnToolRequestedPayload(ConversationPayload):
+class ToolRequestedPayload(ConversationPayload):
     turn_id: str
     step_id: str
     requests: dict[str, Any]
@@ -55,11 +73,19 @@ class TurnToolRequestedPayload(ConversationPayload):
     usage: RunUsage
 
 
-class TurnToolResultPayload(ConversationPayload):
+class ToolResultPayload(ConversationPayload):
     turn_id: str
     step_id: str
     tool_call_id: str
     result: Any
+
+
+class SubAgentRequestedPayload(ConversationPayload):
+    turn_id: str
+    step_id: str
+    tool_call_id: str
+    conversation_id: str
+    child_turn_id: str
 
 
 class TurnCompletedPayload(ConversationPayload):
@@ -87,8 +113,9 @@ class TurnFailedPayload(ConversationPayload):
 ConversationPayloadType: TypeAlias = (
     ConversationCreatedPayload
     | TurnQueuedPayload
-    | TurnToolRequestedPayload
-    | TurnToolResultPayload
+    | ToolRequestedPayload
+    | ToolResultPayload
+    | SubAgentRequestedPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
@@ -96,8 +123,9 @@ ConversationPayloadType: TypeAlias = (
 PAYLOAD_MODELS: dict[EventType, type[ConversationPayloadType]] = {
     EventType.CONVERSATION_CREATED: ConversationCreatedPayload,
     EventType.TURN_QUEUED: TurnQueuedPayload,
-    EventType.TURN_TOOL_REQUESTED: TurnToolRequestedPayload,
-    EventType.TURN_TOOL_RESULT: TurnToolResultPayload,
+    EventType.TURN_TOOL_REQUESTED: ToolRequestedPayload,
+    EventType.TURN_TOOL_RESULT: ToolResultPayload,
+    EventType.TURN_SUBAGENT_REQUESTED: SubAgentRequestedPayload,
     EventType.TURN_COMPLETED: TurnCompletedPayload,
     EventType.TURN_FAILED: TurnFailedPayload,
 }

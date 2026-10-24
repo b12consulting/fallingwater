@@ -28,14 +28,13 @@ with `Agent.from_spec`; import-path resolution is cached, while callable results
 are created for each turn. Agents can bring their own tools and capabilities.
 
 `runner.run` invokes `Agent.run_sync` once and returns either final output or
-deferred tool requests. `Proxy.process` performs one checkpointed step: one
-agent run or one unresolved tool call. The dispatch loop repeats that step in
-memory until the turn completes or shutdown is requested. Each request and tool
-result is persisted before the next step. A restarted proxy reconstructs the
-turn from the conversation stream and claims its pending dispatch through
-`XAUTOCLAIM`. Context-taking tools receive a reconstructed basic `RunContext`
-for each deferred call. The next turn rebuilds its history from completed
-turns.
+deferred tool requests. `Proxy.process` handles one dispatch action: an agent
+run, one tool call, or a child result. The full request set and per-call jobs
+are written atomically; each result is saved by call ID, and the last unique
+result queues one agent resume. A restarted proxy reconstructs the turn from
+the conversation stream and recovers pending actions through `XAUTOCLAIM`.
+Context-taking tools receive a reconstructed basic `RunContext` for each
+deferred call. The next turn rebuilds its history from completed turns.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -58,6 +57,10 @@ validation, and wire codecs. `Chat` and `Proxy` keep their workflow decisions:
 the CLI reader decides which conversation entries to acknowledge, and the
 worker decides when dispatch work is checkpointed and acknowledged.
 
+`Chat` binds its `ConversationClient` to one conversation ID, so conversation
+operations use that ID by default. `Proxy` keeps an unbound client because it
+routes actions for many conversations and supplies the routed ID explicitly.
+
 `Chat.send` asks the client to coordinate the queued event and dispatch poke
 with two `XADD` commands on one Redis transaction. Consumer-group and consumer
 names are explicit on client operations because terminal readers consume
@@ -66,13 +69,13 @@ conversation streams while workers consume the dispatch stream.
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
 | Conversation, `fw:conversation:<id>:events` | conversation event  | `payload`                    |
-| Dispatch, `fw:dispatch`                     | `conversation.poke` | `conversation_id`, `turn_id` |
+| Dispatch, `fw:dispatch`                     | action type         | conversation, turn, step, call, or child IDs |
 
 Each conversation event payload has a Pydantic model selected by its `type`.
 The stream entry stores only the text event type and a Brotli level 5 compressed
 JSON payload. `encode_conversation_event` compresses and validates payloads on
 writes; `decode_conversation_event` decompresses and validates them on reads.
-The dispatch stream stays text based because its poke entries only carry
+The dispatch stream stays text based because its action entries only carry
 routing identifiers.
 
 Submitting a prompt writes `turn.queued` to the conversation stream and a
@@ -81,16 +84,18 @@ entries have different Redis stream IDs but share a turn ID. A worker uses the
 conversation ID and turn ID to load the queued prompt, fixed agent and model,
 and prior history from the conversation stream. It writes `turn.tool.requested`
 after a run returns deferred calls and `turn.tool.result` after each tool call
-completes. It writes `turn.completed` or `turn.failed` when the turn ends. The
-dispatch entry remains pending until a terminal event is saved and can be
-recovered after a worker stops between checkpoints.
+completes. It writes `turn.completed` or `turn.failed` when the turn ends. Each
+dispatch action is acknowledged after its own event checkpoint; a logical turn
+can span several independently recovered actions.
 
 Each tool-request event stores the message delta and `RunUsage` from that
-`Agent.run_sync` call, along with JSON-compatible deferred requests. Tool-result
-events are associated with that request and store one JSON-compatible result
-per call. Completed events store the accumulated new messages, display
-response, and `RunUsage`; their `history` field remains the canonical delta for
-later turns.
+`Agent.run_sync` call, along with JSON-compatible deferred requests. The same
+Redis transaction writes one dispatch entry per tool call. Tool-result events
+are associated with that request and store one JSON-compatible result per call.
+The result transaction compares unique call IDs and queues one resume when the
+whole request set has results. Completed events store the accumulated new
+messages, display response, and `RunUsage`; their `history` field remains the
+canonical delta for later turns.
 
 `Proxy.load_conversation` returns the queued `next_prompt`, fixed agent path and
 model, prior history, dependencies, current turn ID, and latest usage together
@@ -116,17 +121,16 @@ unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
 Each proxy creates the `workers` consumer group with `MKSTREAM`, then uses
 `XAUTOCLAIM` to recover entries idle for the configured period before reading
 new entries with `XREADGROUP`, through `ConversationClient`. The default idle
-period is five minutes and `fw worker --claim-idle-ms` changes it. `Proxy`
-validates each poke, reconstructs the turn, and processes one checkpointed
-step at a time while retaining the dispatch fields in memory. On SIGINT or
-SIGTERM, an active model or tool call finishes and is checkpointed; the proxy
-then leaves unfinished work pending for another worker. A restarted proxy has
-a new consumer ID and recovers that dispatch with `XAUTOCLAIM`. An in-progress
-Pydantic AI call is not resumed midway through that call. Acknowledged entries
-remain in the dispatch stream. If a poke is malformed or has no matching
-queued event, the proxy logs and acknowledges it without writing a result. If
-stored turn data is malformed while loading a matching turn, the proxy writes
-`turn.failed`; Redis read errors propagate and leave the dispatch entry pending.
+period is five minutes and `fw worker --claim-idle-ms` changes it. Dispatch
+entries identify one initial/resume run, one tool call, or one child result.
+Each action checkpoints its event before acknowledgement, so independent calls
+can run on different proxies and out of order. Agent runs use a renewable
+per-step Redis lease to avoid concurrent duplicate `run_sync` calls. On SIGINT
+or SIGTERM, an active model or tool call finishes and is checkpointed; the
+proxy then leaves unfinished work pending for another worker. A restarted
+proxy has a new consumer ID and recovers eligible dispatch entries with
+`XAUTOCLAIM`. Acknowledged entries remain in the dispatch stream. Malformed or
+stale actions are logged and acknowledged; Redis failures leave actions pending.
 
 ## AD7 — Web conversation feed
 
@@ -214,9 +218,11 @@ Conversation stream entries contain a `type` and a compressed Pydantic JSON
 payload model:
 
 - `conversation.created`
-  - Fields: `agent: str`, `model: str`, `deps: dict[str, Any]`
-  - Agent import path, selected model, and initial dependencies. `model`
-    defaults to an empty string; `deps` defaults to an empty object.
+  - Fields: `agent: str`, `model: str`, `deps: dict[str, Any]`,
+    `parent: ParentToolReference | null`
+  - Agent import path, selected model, initial dependencies, and optional
+    parent tool correlation for child conversations. `model` defaults to an
+    empty string; `deps` defaults to an empty object.
 - `turn.queued`
   - Fields: `turn_id: str`, `message: str`
   - Turn ID and user prompt.
@@ -227,6 +233,11 @@ payload model:
 - `turn.tool.result`
   - Fields: `turn_id: str`, `step_id: str`, `tool_call_id: str`, `result: Any`
   - One JSON-compatible tool result associated with a deferred request.
+- `turn.subagent.requested`
+  - Fields: `turn_id`, `step_id`, `tool_call_id`, `conversation_id`,
+    `child_turn_id`
+  - Correlation between a parent tool call and its separately queued child
+    conversation.
 - `turn.completed`
   - Fields: `turn_id: str`, `message: str`, `history: list[dict[str, Any]]`,
     `usage: RunUsage`
@@ -237,8 +248,10 @@ payload model:
   - Turn ID and failure description.
 
 The dispatch stream is text based and does not use the conversation payload
-envelope. A `conversation.poke` entry contains `type`, `conversation_id: str`,
-and `turn_id: str`; it tells a worker which queued turn to load.
+envelope. `conversation.poke` starts a turn; `turn.tool.call` identifies one
+deferred call; `turn.agent.resume` resumes a request step after fan-in; and
+`turn.subagent.result` routes a child terminal result to its parent. Entries
+carry the conversation and turn IDs plus the relevant step, call, or child IDs.
 
 ## AD11 — CLI stream inspection
 
@@ -255,33 +268,33 @@ the shared conversation event decoder.
 
 `runner.run` calls `Agent.run_sync` once. A Pydantic AI hook defers attached
 function tools and returns their requests to `Proxy`. The proxy stores each
-request, executes calls sequentially, and stores each result before resuming
-the agent with `DeferredToolResults`. Synchronous and asynchronous function
-tools are supported; deferred requests and results must be JSON serializable.
-The originating `RunContext` is used in the live process; after recovery the
-proxy rebuilds its basic fields from the conversation and request. Tool calls
-that delegate to another agent use a separate `Chat` conversation and stable
-conversation and turn IDs, so the child stream can complete independently and
-be reused if the parent tool is retried. Approval requests and toolsets without
-a directly attached function callable are not supported.
+request and dispatches each call independently. Results are stored by call ID;
+the last unique result schedules the next agent run with `DeferredToolResults`.
+Synchronous and asynchronous function tools are supported; deferred requests
+and results must be JSON serializable. The originating `RunContext` is used in
+the live process; after recovery the proxy rebuilds its basic fields from the
+conversation and request. Approval requests and toolsets without a directly
+attached function callable are not supported.
 
 ## AD13 — Checkpointed agent steps
 
-The proxy leaves a dispatch entry pending until it writes a terminal turn
-event. Each completed model call that requests tools is checkpointed before
-tool execution; each tool result is checkpointed before the next call. On
-restart, the proxy reconstructs the turn from these events and skips saved tool
-results. A crash after a tool side effect but before its result event can still
-repeat that tool call. A stop request takes effect after the current model or
-tool call is saved, leaving unfinished work for `XAUTOCLAIM` recovery.
+Each dispatch entry represents one action and is acknowledged after its
+checkpoint. A model request is checkpointed before its per-call tool jobs are
+enqueued; each tool result is checkpointed before the resume job is scheduled.
+On restart, the proxy reconstructs the turn from these events and skips saved
+tool results. A crash after a tool side effect but before its result event can
+still repeat that tool call. A stop request takes effect after the current
+model or tool call is saved, leaving unfinished actions for `XAUTOCLAIM`
+recovery.
 
-Nested agent work uses its own conversation stream. The parent tool waits for
-the child turn's `turn.completed` event before saving the child response as a
-parent tool result. Child conversation IDs derive from the parent conversation
-and tool-call ID. `Chat.ask` generates turn IDs internally; callers that need
-retry idempotency can supply an `idempotency_key`, which derives a stable turn
-ID within that conversation. Worker deployments need an available proxy slot
-to process child turns while parent tools wait.
+Nested agent work uses its own conversation stream. A tool may return the
+public `SubAgentRequest` model with an agent import path, prompt, optional
+model, and JSON dependencies. The proxy persists parent correlation and queues
+the child in one transaction; it does not wait for the child. Child completion
+or failure queues a parent-result action. Child IDs are deterministic for the
+parent tool call, so retries reuse the same child. A child failure fails its
+parent, and late sibling results are ignored after a terminal event. No proxy
+capacity is reserved while child work runs.
 
 ## AD14 — Shared conversation client
 
