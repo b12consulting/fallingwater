@@ -43,6 +43,7 @@ class WeatherDeps(BaseModel):
     """
     Runtime configuration for the weather agent.
     """
+
     base_url: str
     default_city: str | None = None
 
@@ -68,9 +69,7 @@ weather_agent = Agent.from_spec(
 
 
 @weather_agent.tool
-def get_weather(
-    ctx: RunContext[WeatherDeps], city: str | None = None
-) -> str:
+def get_weather(ctx: RunContext[WeatherDeps], city: str | None = None) -> str:
     """
     Weather lookup tool that accepts an optional city
     """

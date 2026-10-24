@@ -31,35 +31,36 @@ This is the quick-start guide for agents working in this repository. See
 |-- fallingwater/             Importable library and fw CLI
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
+|   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, web, and reset
-|   |-- conversation.py       Shared Redis stream client and event codecs
 |   |-- names.py              Words and generator for CLI conversation names
-|   |-- proxy.py              Parallel Pydantic AI action processing
-|   |-- runner.py             Single-call runner and serializable subagent requests
-|   |-- streams.py            Stream names, event types, and payload codecs
+|   |-- stream.py             Dispatch and conversation streams and run leases
+|   |-- stream_utils.py       Stream names, typed actions, events, IDs, and codecs
+|   |-- turn_state.py         Pure reconstruction of one turn from events
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page
 |   |   |-- __init__.py       Web exports
 |   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
 |   |   `-- templates/
 |   |       `-- monitor.html  Read-only recent conversation monitor
-|   |-- worker.py             Proxy pool and graceful shutdown
+|   |-- worker.py             Dispatch action processing
+|   |-- worker_pool.py        Worker threads and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
 |       `-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
 `-- tests/                    Pytest tests; conftest enables Typeguard
     |-- conftest.py           Typeguard import hook
+    |-- test_agent_proxy.py   Single-call deferred agent checks
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks
-    |-- test_conversation.py  Shared conversation client stream checks
+    |-- test_conversation.py  Dispatch and conversation stream checks
     |-- test_jeopardy.py      Jeopardy child-agent request checks
-    |-- test_proxy.py         Parallel tool and child-turn dispatch checks
-    |-- test_runner.py        Single-call deferred runner checks
     |-- test_streams.py       Conversation event codec and naming checks
-    `-- test_web.py           Web routes, page, and SSE feed checks
+    |-- test_web.py           Web routes, page, and SSE feed checks
+    `-- test_worker.py        Parallel tool and child-turn dispatch checks
 ```
 
 `roadmap.md` tracks high-level features and decisions visible to users or

@@ -4,10 +4,11 @@ Redis stream names, event payloads, and access helpers.
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_ai.usage import RunUsage
 
 from .utils import compress, decompress
@@ -34,6 +35,56 @@ class DispatchType(StrEnum):
     TOOL_CALL = "turn.tool.call"
     AGENT_RESUME = "turn.agent.resume"
     SUBAGENT_RESULT = "turn.subagent.result"
+
+
+class _DispatchAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    entry_id: str = Field(exclude=True, min_length=1)
+    conversation_id: str = Field(min_length=1)
+    turn_id: str = Field(min_length=1)
+
+
+class ConversationPokeAction(_DispatchAction):
+    type: Literal[DispatchType.CONVERSATION_POKE]
+
+
+class AgentResumeAction(_DispatchAction):
+    type: Literal[DispatchType.AGENT_RESUME]
+    step_id: str = Field(min_length=1)
+
+
+class ToolCallAction(_DispatchAction):
+    type: Literal[DispatchType.TOOL_CALL]
+    step_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+
+
+class SubAgentResultAction(_DispatchAction):
+    type: Literal[DispatchType.SUBAGENT_RESULT]
+    step_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    child_conversation_id: str = Field(min_length=1)
+    child_turn_id: str = Field(min_length=1)
+
+
+DispatchAction: TypeAlias = Annotated[
+    ConversationPokeAction
+    | AgentResumeAction
+    | ToolCallAction
+    | SubAgentResultAction,
+    Field(discriminator="type"),
+]
+_dispatch_action_adapter = TypeAdapter(DispatchAction)
+
+
+@dataclass(frozen=True)
+class InvalidDispatchAction:
+    """A dispatch entry that cannot be routed or safely associated with a turn."""
+
+    entry_id: str
+    fields: Mapping[Any, Any]
+    error: str
 
 
 class ConversationPayload(BaseModel):
@@ -138,6 +189,12 @@ class ConversationEvent(BaseModel):
     payload: ConversationPayloadType
 
 
+class ConversationStreamEvent(ConversationEvent):
+    """A decoded conversation event with its Redis stream entry ID."""
+
+    entry_id: str = Field(exclude=True, min_length=1)
+
+
 def decode_text(value: str | bytes) -> str:
     """
     Normalize Redis text values when response decoding is disabled.
@@ -152,7 +209,10 @@ def validate_namespace(namespace: str) -> None:
     Require a lowercase namespace containing letters, digits, or
     hyphens.
     """
-    if not isinstance(namespace, str) or re.fullmatch(r"[a-z0-9-]+", namespace) is None:
+    if (
+        not isinstance(namespace, str)
+        or re.fullmatch(r"[a-z0-9-]+", namespace) is None
+    ):
         raise ValueError(
             "namespace must contain only lowercase letters, numbers, and hyphens"
         )
@@ -160,7 +220,9 @@ def validate_namespace(namespace: str) -> None:
 
 def validate_conversation_id(conversation_id: str) -> None:
     if not conversation_id or ":" in conversation_id:
-        raise ValueError("conversation ID must be nonempty and contain no colon")
+        raise ValueError(
+            "conversation ID must be nonempty and contain no colon"
+        )
 
 
 def fmt_dispatch_stream(namespace: str) -> str:
@@ -182,7 +244,26 @@ def fmt_conversation_stream(namespace: str, conversation_id: str) -> str:
 
 def decode_dispatch_fields(fields: Mapping[Any, Any]) -> dict[str, str]:
     """Decode a text-only dispatch entry returned by Redis."""
-    return {decode_text(key): decode_text(value) for key, value in fields.items()}
+    return {
+        decode_text(key): decode_text(value) for key, value in fields.items()
+    }
+
+
+def decode_dispatch_action(
+    entry_id: str | bytes,
+    fields: Mapping[Any, Any],
+) -> DispatchAction | InvalidDispatchAction:
+    """Decode one dispatch entry, preserving malformed entries for acknowledgement."""
+    entry_id = decode_text(entry_id)
+    try:
+        values = decode_dispatch_fields(fields)
+        values.setdefault("type", DispatchType.CONVERSATION_POKE)
+        values["entry_id"] = entry_id
+        return _dispatch_action_adapter.validate_python(values)
+    except (ValueError, TypeError) as error:
+        return InvalidDispatchAction(
+            entry_id=entry_id, fields=fields, error=str(error)
+        )
 
 
 def encode_conversation_event(
@@ -203,7 +284,9 @@ def decode_conversation_event(fields: Mapping[Any, Any]) -> ConversationEvent:
         event_type = EventType(decode_text(text_fields["type"]))
         payload_data = text_fields["payload"]
     except (KeyError, ValueError, TypeError) as error:
-        raise ValueError("invalid conversation stream event envelope") from error
+        raise ValueError(
+            "invalid conversation stream event envelope"
+        ) from error
     if text_fields.keys() != {"type", "payload"}:
         raise ValueError(
             "conversation stream events must contain only type and payload"
@@ -218,8 +301,20 @@ def decode_conversation_event(fields: Mapping[Any, Any]) -> ConversationEvent:
         payload_json = decompress(payload_data)
         payload = payload_model.model_validate_json(payload_json)
     except Exception as error:
-        raise ValueError(f"invalid compressed payload for {event_type}") from error
+        raise ValueError(
+            f"invalid compressed payload for {event_type}"
+        ) from error
     return ConversationEvent(type=event_type, payload=payload)
+
+
+def decode_conversation_stream_event(
+    entry_id: str | bytes, fields: Mapping[Any, Any]
+) -> ConversationStreamEvent:
+    """Decode a Redis conversation entry with its ID as read metadata."""
+    event = decode_conversation_event(fields)
+    return ConversationStreamEvent(
+        entry_id=decode_text(entry_id), type=event.type, payload=event.payload
+    )
 
 
 def decode_conversation_entry(

@@ -1,9 +1,9 @@
 """
 A Jeopardy host that delegates each clue to a separate contestant agent.
 
-Start one or more proxies to process the host and contestant turns::
+Start one or more workers to process the host and contestant turns::
 
-    fw worker -p 2
+    fw worker -w 2
     fw chat --agent fallingwater.demo:jeopardy_host --model openai:gpt-6-luna
 
 If the worker uses a nondefault Redis URL or namespace, set FW_REDIS_URL and
@@ -14,7 +14,7 @@ import os
 
 from pydantic_ai import Agent, AgentSpec, RunContext
 
-from fallingwater.runner import SubAgentRequest
+from fallingwater.agent_proxy import SubAgentRequest
 
 
 jeopardy_contestant = Agent.from_spec(
@@ -60,7 +60,9 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> SubAgentRequest:
     """
     if not clue.strip():
         raise ValueError("clue must be a nonempty string")
-    model = os.getenv("FW_MODEL") or f"{ctx.model.system}:{ctx.model.model_name}"
+    model = (
+        os.getenv("FW_MODEL") or f"{ctx.model.system}:{ctx.model.model_name}"
+    )
     return SubAgentRequest(
         agent_path="fallingwater.demo:jeopardy_contestant",
         prompt=clue,

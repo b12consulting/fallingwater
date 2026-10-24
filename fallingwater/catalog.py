@@ -18,7 +18,9 @@ def _resolve_import(path: str) -> object:
     else:
         module_name, separator, attribute_path = path.rpartition(".")
         if not separator:
-            raise ValueError("agent path must be module:object or module.object")
+            raise ValueError(
+                "agent path must be module:object or module.object"
+            )
     if not module_name or not attribute_path:
         raise ValueError("agent path must be module:object or module.object")
 

@@ -7,7 +7,7 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 
 from fallingwater.chat import Chat
-from fallingwater.streams import (
+from fallingwater.stream_utils import (
     ConversationCreatedPayload,
     EventType,
     TurnCompletedPayload,
@@ -108,7 +108,10 @@ def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     redis = MagicMock(spec=Redis)
     redis.xrange.return_value = []
     chat = Chat(
-        redis, conversation_id="test", agent_path="pydantic_ai:Agent", model="test"
+        redis,
+        conversation_id="test",
+        agent_path="pydantic_ai:Agent",
+        model="test",
     )
 
     assert chat.conversation_id == "test"
@@ -158,7 +161,11 @@ def test_new_conversation_requires_model_when_agent_has_none() -> None:
     redis.xrange.return_value = []
 
     with pytest.raises(ValueError, match="pass --model"):
-        Chat(redis, conversation_id="test", agent_path="fallingwater.demo:haiku_master")
+        Chat(
+            redis,
+            conversation_id="test",
+            agent_path="fallingwater.demo:haiku_master",
+        )
 
     redis.xadd.assert_not_called()
 
@@ -307,7 +314,9 @@ def test_cli_group_replays_pending_failure(monkeypatch, capsys) -> None:
     redis.xack.assert_any_call(stream, "user", "3-0")
 
 
-def test_run_once_prints_its_response_and_acknowledges_it(monkeypatch, capsys) -> None:
+def test_run_once_prints_its_response_and_acknowledges_it(
+    monkeypatch, capsys
+) -> None:
     redis = MagicMock(spec=Redis)
     stream = "fw:conversation:abc:events"
     redis.xreadgroup.side_effect = [
@@ -336,7 +345,9 @@ def test_run_once_prints_its_response_and_acknowledges_it(monkeypatch, capsys) -
     redis.xack.assert_any_call(stream, "user", "3-0")
 
 
-def test_run_once_keeps_prior_answers_out_of_stdout(monkeypatch, capsys) -> None:
+def test_run_once_keeps_prior_answers_out_of_stdout(
+    monkeypatch, capsys
+) -> None:
     redis = MagicMock(spec=Redis)
     stream = "fw:conversation:abc:events"
     redis.xreadgroup.side_effect = [

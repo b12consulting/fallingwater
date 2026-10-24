@@ -9,10 +9,10 @@ from redis import Redis
 from redis.exceptions import ResponseError
 
 from .catalog import reify_agent
-from .conversation import ConversationClient
-from .streams import (
+from .stream import DispatchStream
+from .stream_utils import (
     ConversationCreatedPayload,
-    ConversationEvent,
+    ConversationStreamEvent,
     EventType,
     TurnCompletedPayload,
     TurnFailedPayload,
@@ -35,25 +35,29 @@ class Chat:
         agent_path: str | None = None,
         model: str | None = None,
         group: str = "user",
-        deps: Mapping[str, str] | None = None,  # FIXME use deps class from py-ai
+        deps: Mapping[str, str]
+        | None = None,  # FIXME use deps class from py-ai
     ) -> None:
         if not group:
             raise ValueError("chat group must be nonempty")
         self.group = group
         self.conversation_id = conversation_id or str(uuid4())
-        self.client = ConversationClient(
-            redis, namespace=namespace, conversation_id=self.conversation_id
-        )
-        self.events = self.client.conversation_stream()
-        self.dispatch_stream = self.client.dispatch_stream
+        self.stream = DispatchStream(
+            redis, namespace=namespace
+        ).conversation_stream(self.conversation_id)
+        self.events = self.stream.name
 
-        records = self.client.read_conversation_range(self.events, count=1)
-        record = records[0][1] if records else None
+        records = self.stream.read_conversation_range(count=1)
+        record = records[0] if records else None
         if record:
             if record.type != EventType.CONVERSATION_CREATED:
-                raise ValueError(f"{self.events} is not a Fallingwater conversation")
+                raise ValueError(
+                    f"{self.events} is not a Fallingwater conversation"
+                )
             if deps:
-                raise ValueError("dependencies can only be set for a new conversation")
+                raise ValueError(
+                    "dependencies can only be set for a new conversation"
+                )
             created = cast(ConversationCreatedPayload, record.payload)
             self.agent_path = created.agent
             self.model = created.model
@@ -65,8 +69,7 @@ class Chat:
 
         self._check_agent()
         if not record:
-            self.client.append_event(
-                self.events,
+            self.stream.append_event(
                 EventType.CONVERSATION_CREATED,
                 ConversationCreatedPayload(
                     agent=self.agent_path,
@@ -99,12 +102,10 @@ class Chat:
         """Find an existing queued turn for an idempotent delegated request."""
         cursor = "-"
         while True:
-            entries = self.client.read_conversation_range(
-                self.events, min=cursor, count=100
-            )
+            entries = self.stream.read_conversation_range(min=cursor, count=100)
             if not entries:
                 return None
-            for entry_id, event in entries:
+            for event in entries:
                 if event.type != EventType.TURN_QUEUED:
                     continue
                 queued = cast(TurnQueuedPayload, event.payload)
@@ -114,8 +115,8 @@ class Chat:
                     raise ValueError(
                         f"turn ID {turn_id!r} is already queued with another prompt"
                     )
-                return entry_id
-            cursor = f"({entries[-1][0]}"
+                return event.entry_id
+            cursor = f"({entries[-1].entry_id}"
 
     def _queue(
         self, prompt: str, turn_id: str, *, reuse_turn_id: bool
@@ -126,10 +127,12 @@ class Chat:
             if queued_cursor is not None:
                 return turn_id, queued_cursor
         logger.debug("SEND (stream: %s): %.20s", self.events, prompt)
-        queued_id = self.client.queue_turn(turn_id, prompt)
+        queued_id = self.stream.queue_turn(turn_id, prompt)
         return turn_id, queued_id
 
-    def send(self, prompt: str, *, turn_id: str | None = None) -> tuple[str, str]:
+    def send(
+        self, prompt: str, *, turn_id: str | None = None
+    ) -> tuple[str, str]:
         """Queue a prompt, optionally reusing an existing turn ID."""
         reuse_turn_id = turn_id is not None
         if reuse_turn_id and not turn_id:
@@ -140,11 +143,16 @@ class Chat:
     def receive(self, turn_id: str, cursor: str) -> str:
         """Wait for this turn's result without joining the worker group."""
         while True:
-            entries = self.client.read_conversation(self.events, cursor, block=1000)
-            for cursor, event in entries:
+            entries = self.stream.read_conversation(cursor, block=1000)
+            for event in entries:
+                cursor = event.entry_id
                 if not isinstance(
                     event.payload,
-                    (TurnQueuedPayload, TurnCompletedPayload, TurnFailedPayload),
+                    (
+                        TurnQueuedPayload,
+                        TurnCompletedPayload,
+                        TurnFailedPayload,
+                    ),
                 ):
                     continue
                 if event.payload.turn_id != turn_id:
@@ -177,8 +185,7 @@ class Chat:
 
     def _handle_group_event(
         self,
-        entry_id: str,
-        event: ConversationEvent,
+        event: ConversationStreamEvent,
         *,
         to_stderr: bool = False,
     ) -> str | None:
@@ -186,7 +193,7 @@ class Chat:
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)
         if event_type == EventType.TURN_QUEUED and turn_id is not None:
-            self.client.acknowledge(self.events, self.group, entry_id)
+            self.stream.acknowledge(self.group, event.entry_id)
             return None
 
         if event_type in (EventType.TURN_COMPLETED, EventType.TURN_FAILED):
@@ -197,10 +204,10 @@ class Chat:
             else:
                 failed = cast(TurnFailedPayload, payload)
                 print(f"Turn failed: {failed.error}", file=output, flush=True)
-            self.client.acknowledge(self.events, self.group, entry_id)
+            self.stream.acknowledge(self.group, event.entry_id)
             return turn_id
 
-        self.client.acknowledge(self.events, self.group, entry_id)
+        self.stream.acknowledge(self.group, event.entry_id)
         return None
 
     def read(
@@ -214,8 +221,7 @@ class Chat:
         cursor = "0"
         completed_pending = False
         while True:
-            entries = self.client.read_group(
-                self.events,
+            entries = self.stream.read_group(
                 self.group,
                 self.consumer,
                 cursor,
@@ -223,11 +229,9 @@ class Chat:
             )
             if not entries:
                 break
-            for entry_id, event in entries:
-                cursor = entry_id
-                turn_id = self._handle_group_event(
-                    entry_id, event, to_stderr=to_stderr
-                )
+            for event in entries:
+                cursor = event.entry_id
+                turn_id = self._handle_group_event(event, to_stderr=to_stderr)
                 if turn_id is not None:
                     completed_pending = True
                     yield turn_id
@@ -236,8 +240,7 @@ class Chat:
             return
 
         while True:
-            entries = self.client.read_group(
-                self.events,
+            entries = self.stream.read_group(
                 self.group,
                 self.consumer,
                 ">",
@@ -246,10 +249,8 @@ class Chat:
             )
             if not entries:
                 return
-            for entry_id, event in entries:
-                turn_id = self._handle_group_event(
-                    entry_id, event, to_stderr=to_stderr
-                )
+            for event in entries:
+                turn_id = self._handle_group_event(event, to_stderr=to_stderr)
                 if turn_id is not None:
                     yield turn_id
             if block is not None:
@@ -258,12 +259,14 @@ class Chat:
     def _resume_group(self, *, to_stderr: bool = False) -> None:
         """Read available events before accepting another turn."""
         try:
-            self.client.create_group(self.events, self.group, id="0")
+            self.stream.create_group(self.group, id="0")
         except ResponseError as error:
             if not str(error).startswith("BUSYGROUP"):
                 raise
             logger.debug(
-                "Consumer group %s already exists on %s", self.group, self.events
+                "Consumer group %s already exists on %s",
+                self.group,
+                self.events,
             )
         for _ in self.read(to_stderr=to_stderr):
             pass

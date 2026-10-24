@@ -5,7 +5,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
 from fallingwater.demo import jeopardy
-from fallingwater.runner import SubAgentRequest
+from fallingwater.agent_proxy import SubAgentRequest
 
 
 def _context() -> RunContext[None]:

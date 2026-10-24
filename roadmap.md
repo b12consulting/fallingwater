@@ -95,7 +95,7 @@ consuming its work.
 
 Synchronous `RedisStream`, `DispatchStream`, and `ConversationStream` classes
 provide shared stream operations and `ReadGroup` handles consumer-group reads
-and acknowledgements. `Chat` and `Proxy` use these classes, and `Chat.send`
+and acknowledgements. `Chat` and `Worker` use these classes, and `Chat.send`
 keeps the cross-stream transaction atomic.
 
 ### Remaining
@@ -105,11 +105,11 @@ Move the web SSE routes onto the stream classes. They still call `XREAD` and
 preserve its reverse-tail replay and follow behavior.
 
 Add consumer-group lifecycle management, including deleting worker
-consumers with no pending entries when the `Worker` starts.
+consumers with no pending entries when the `WorkerPool` starts.
 
 ### Done when
 
 Chat, worker, and web code use the stream classes for Redis stream operations,
-with existing event and transaction behavior preserved. Worker startup removes
+with existing event and transaction behavior preserved. Worker pool startup removes
 consumers with no pending entries and preserves consumers that still have
 pending work.

@@ -12,7 +12,7 @@ from fastapi.sse import ServerSentEvent
 from fastapi.templating import Jinja2Templates
 from redis import Redis
 
-from ..streams import (
+from ..stream_utils import (
     ConversationEvent,
     EventType,
     decode_conversation_entry,
@@ -74,16 +74,16 @@ def get_conversation_stream(
     try:
         stream = fmt_conversation_stream(namespace, conversation_id)
     except ValueError as error:
-        logger.debug("Invalid conversation ID %s", conversation_id, exc_info=True)
+        logger.debug(
+            "Invalid conversation ID %s", conversation_id, exc_info=True
+        )
         raise HTTPException(status_code=400, detail=str(error)) from error
     if not redis.exists(stream):
         raise HTTPException(status_code=404, detail="Conversation not found")
     return stream
 
 
-def _recent_streams(
-    redis: Redis, namespace: str
-) -> tuple[str, dict[str, str]]:
+def _recent_streams(redis: Redis, namespace: str) -> tuple[str, dict[str, str]]:
     """
     Find the latest dispatch ID and recently poked conversations.
     """
@@ -92,9 +92,7 @@ def _recent_streams(
     recent_ids: dict[str, None] = {}
     dispatch_name = fmt_dispatch_stream(namespace)
     while len(recent_ids) < RECENT_CONVERSATION_LIMIT:
-        entries = redis.xrevrange(
-            dispatch_name, max=before, min="-", count=100
-        )
+        entries = redis.xrevrange(dispatch_name, max=before, min="-", count=100)
         if not entries:
             break
         if dispatch_cursor == "0-0":
@@ -172,9 +170,7 @@ def recent_events(
     for stream in streams:
         streams[stream], entries = _recent_tail(redis, stream)
         for entry_id, fields in entries:
-            yield _recent_sse(
-                namespace, stream, entry_id, fields, full=full
-            )
+            yield _recent_sse(namespace, stream, entry_id, fields, full=full)
 
     while True:
         emitted_event = False

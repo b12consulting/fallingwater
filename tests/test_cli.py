@@ -34,7 +34,7 @@ def test_redis_options_are_global() -> None:
             "-n",
             "fw-test",
             "worker",
-            "-p",
+            "-w",
             "2",
             "--claim-idle-ms",
             "1500",
@@ -43,7 +43,7 @@ def test_redis_options_are_global() -> None:
     assert args.redis_url == "redis://example:6379/1"
     assert args.namespace == "fw-test"
     assert args.command == "worker"
-    assert args.proxies == 2
+    assert args.workers == 2
     assert args.claim_idle_ms == 1500
 
 
@@ -207,7 +207,9 @@ def test_chat_uses_agent_and_model_environment_defaults(
     monkeypatch.setattr(
         "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
     )
-    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "bright_turing")
+    monkeypatch.setattr(
+        "fallingwater.cli.generate_name", lambda: "bright_turing"
+    )
     chat_class = MagicMock()
     monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
 
@@ -278,7 +280,8 @@ def test_cli_passes_resume_options_to_chat(
     )
 
     assert (
-        chat_class.call_args.kwargs["agent_path"] == "fallingwater.demo:missing_agent"
+        chat_class.call_args.kwargs["agent_path"]
+        == "fallingwater.demo:missing_agent"
     )
     assert chat_class.call_args.kwargs["model"] == "openai:another-model"
     chat.run.assert_called_once_with()
@@ -292,7 +295,9 @@ def test_chat_msg_sends_one_prompt_without_starting_terminal(
     monkeypatch.setattr(
         "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
     )
-    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "bright_turing")
+    monkeypatch.setattr(
+        "fallingwater.cli.generate_name", lambda: "bright_turing"
+    )
     chat = MagicMock(conversation_id="bright_turing")
     monkeypatch.setattr("fallingwater.cli.Chat", MagicMock(return_value=chat))
 
@@ -327,4 +332,6 @@ def test_reset_deletes_only_selected_namespace(
     redis.delete.assert_called_once_with(
         "fw-test:dispatch", "fw-test:conversation:abc:events"
     )
-    assert "Deleted 2 key(s) from namespace 'fw-test'." in capsys.readouterr().out
+    assert (
+        "Deleted 2 key(s) from namespace 'fw-test'." in capsys.readouterr().out
+    )

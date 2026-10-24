@@ -13,7 +13,7 @@ from redis import Redis
 
 from .chat import Chat
 from .names import generate_name
-from .streams import (
+from .stream_utils import (
     decode_conversation_entry,
     decode_dispatch_fields,
     decode_text,
@@ -22,26 +22,34 @@ from .streams import (
     validate_conversation_id,
 )
 from .utils import logger
-from .worker import Worker
+from .worker_pool import WorkerPool
 
 
 def build_parser() -> argparse.ArgumentParser:
     """
     Build the CLI parser and its subcommands.
     """
-    parser = argparse.ArgumentParser(prog="fw", description="Fallingwater agent tools.")
+    parser = argparse.ArgumentParser(
+        prog="fw", description="Fallingwater agent tools."
+    )
     parser.add_argument(
         "-V", "--version", action="version", version=version("fallingwater")
     )
     parser.add_argument(
-        "-s", "--silent", action="store_true", default=False, help="Suppress logs."
+        "-s",
+        "--silent",
+        action="store_true",
+        default=False,
+        help="Suppress logs.",
     )
     parser.add_argument(
         "-r",
         "--redis-url",
         default=os.getenv("FW_REDIS_URL", "redis://localhost:6379/0"),
     )
-    parser.add_argument("-n", "--namespace", default=os.getenv("FW_NAMESPACE", "fw"))
+    parser.add_argument(
+        "-n", "--namespace", default=os.getenv("FW_NAMESPACE", "fw")
+    )
 
     subparsers = parser.add_subparsers(dest="command")
     version_parser = subparsers.add_parser(
@@ -52,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     worker_parser = subparsers.add_parser(
         "worker", help="Run Redis-backed agent workers."
     )
-    worker_parser.add_argument("-p", "--proxies", type=int, default=1)
+    worker_parser.add_argument("-w", "--workers", type=int, default=1)
     worker_parser.add_argument(
         "--claim-idle-ms",
         type=_nonnegative_int,
@@ -94,7 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dispatch_parser.set_defaults(handler=run_dispatch)
 
-    chat_parser = subparsers.add_parser("chat", help="Start or resume a conversation.")
+    chat_parser = subparsers.add_parser(
+        "chat", help="Start or resume a conversation."
+    )
     chat_parser.add_argument(
         "conversation", nargs="?", help="Conversation ID to start or resume."
     )
@@ -120,14 +130,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model for a new conversation (default: FW_MODEL).",
     )
     chat_parser.add_argument(
-        "--group", default="user", help="Conversation reader group (default: user)."
+        "--group",
+        default="user",
+        help="Conversation reader group (default: user).",
     )
     chat_parser.add_argument(
         "--msg", help="Send one message, print the response, and exit."
     )
     chat_parser.set_defaults(handler=run_chat)
 
-    web_parser = subparsers.add_parser("web", help="Serve the Fallingwater API.")
+    web_parser = subparsers.add_parser(
+        "web", help="Serve the Fallingwater API."
+    )
     web_parser.add_argument("--host", default="127.0.0.1")
     web_parser.add_argument("--port", type=int, default=8000)
     web_parser.set_defaults(handler=run_web)
@@ -155,14 +169,16 @@ def show_version(_args: argparse.Namespace) -> None:
 
 def run_worker(args: argparse.Namespace) -> None:
     with Redis.from_url(args.redis_url) as redis:
-        worker = Worker(
+        worker_pool = WorkerPool(
             redis,
             namespace=args.namespace,
-            proxy_count=args.proxies,
+            worker_count=args.workers,
             claim_idle_ms=args.claim_idle_ms,
         )
-        print(f"Worker running with {args.proxies} proxy(s). Press Ctrl-C to stop.")
-        worker.run()
+        print(
+            f"Worker pool running with {args.workers} worker(s). Press Ctrl-C to stop."
+        )
+        worker_pool.run()
 
 
 def run_ls(args: argparse.Namespace) -> None:
@@ -229,7 +245,9 @@ def run_dispatch(args: argparse.Namespace) -> None:
             entry_id = decode_text(raw_entry_id)
             event = decode_dispatch_fields(raw_fields)
             event_type = event.get("type", "unknown")
-            payload = {key: value for key, value in event.items() if key != "type"}
+            payload = {
+                key: value for key, value in event.items() if key != "type"
+            }
             _print_event(entry_id, event_type, payload)
 
 
@@ -249,7 +267,9 @@ def run_chat(args: argparse.Namespace) -> None:
                     conversation_id = candidate
                     break
             else:
-                raise SystemExit("fw chat: could not find an unused conversation name")
+                raise SystemExit(
+                    "fw chat: could not find an unused conversation name"
+                )
         try:
             chat = Chat(
                 redis,
@@ -293,7 +313,9 @@ def _positive_int(value: str) -> int:
     try:
         count = int(value)
     except ValueError as error:
-        raise argparse.ArgumentTypeError("must be a positive integer") from error
+        raise argparse.ArgumentTypeError(
+            "must be a positive integer"
+        ) from error
     if count < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return count
@@ -304,7 +326,9 @@ def _nonnegative_int(value: str) -> int:
     try:
         duration = int(value)
     except ValueError as error:
-        raise argparse.ArgumentTypeError("must be a nonnegative integer") from error
+        raise argparse.ArgumentTypeError(
+            "must be a nonnegative integer"
+        ) from error
     if duration < 0:
         raise argparse.ArgumentTypeError("must be a nonnegative integer")
     return duration
@@ -337,7 +361,9 @@ def run_reset(args: argparse.Namespace) -> None:
     """
     Delete keys belonging to the selected Fallingwater namespace.
     """
-    namespace = args.namespace if args.reset_namespace is None else args.reset_namespace
+    namespace = (
+        args.namespace if args.reset_namespace is None else args.reset_namespace
+    )
     prefix = fmt_dispatch_stream(namespace).removesuffix("dispatch")
     deleted = 0
     with Redis.from_url(args.redis_url) as redis:

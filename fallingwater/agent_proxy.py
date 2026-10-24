@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import json
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from pydantic_ai import (
     RunContext,
 )
 from pydantic_ai.capabilities import Hooks
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.tools import Tool
 from pydantic_ai.usage import RunUsage
 
@@ -26,7 +27,9 @@ _deferred_tool_calls: ContextVar[
 ] = ContextVar("fallingwater_deferred_tool_calls", default=None)
 
 
-def _defer_tool_execution(ctx: RunContext[Any], *, call, args, **_kwargs) -> None:
+def _defer_tool_execution(
+    ctx: RunContext[Any], *, call, args, **_kwargs
+) -> None:
     """Save each tool's runtime context, then return execution to the caller."""
     deferred_calls = _deferred_tool_calls.get()
     if deferred_calls is None:
@@ -93,6 +96,42 @@ def _execute_tool(
     if inspect.isawaitable(result):
         return asyncio.run(_await_result(result))
     return result
+
+
+def execute_tool(
+    agent: Agent,
+    call: ToolCallPart,
+    *,
+    deps: Any,
+    prompt: str,
+    messages: Sequence[ModelMessage],
+    model: Any,
+    usage: RunUsage,
+    conversation_id: str,
+) -> Any:
+    """Resolve a deferred attached tool and restore its runtime context."""
+    tool = _find_attached_tool(agent, call.tool_name)
+    args = call.args
+    if isinstance(args, str):
+        args = json.loads(args)
+    if not isinstance(args, dict):
+        raise ValueError(f"Invalid arguments for tool {call.tool_name!r}")
+    ctx = (
+        RunContext(
+            deps=deps,
+            model=agent._get_model_outside_run(model),
+            usage=usage,
+            agent=agent,
+            prompt=prompt,
+            messages=list(messages),
+            tool_call_id=call.tool_call_id,
+            tool_name=call.tool_name,
+            conversation_id=conversation_id,
+        )
+        if tool.takes_ctx
+        else None
+    )
+    return _execute_tool(tool, args, ctx)
 
 
 async def _await_result(result: Any) -> Any:
