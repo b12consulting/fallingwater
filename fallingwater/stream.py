@@ -202,6 +202,19 @@ class ConversationStream:
             for entry_id, fields in entries
         ]
 
+    def iter_events(
+        self, *, page_size: int = 100
+    ) -> Iterator[ConversationStreamEvent]:
+        """Yield all conversation events across successive Redis range pages."""
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+        cursor = "-"
+        while entries := self.read_conversation_range(
+            min=cursor, count=page_size
+        ):
+            yield from entries
+            cursor = f"({entries[-1].entry_id}"
+
     def read_conversation(
         self,
         cursor: str,

@@ -203,7 +203,7 @@ def _process(worker: Worker, fields: dict[str, str]) -> bool:
     assert not isinstance(action, InvalidDispatchAction)
     cnv_stream = worker.dsp_stream.conversation_stream(action.conversation_id)
     conversation = reconstruct_turn(
-        worker._conversation_events(cnv_stream),
+        cnv_stream.iter_events(),
         action.turn_id,
         conversation_stream=cnv_stream.name,
     )

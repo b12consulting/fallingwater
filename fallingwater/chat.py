@@ -100,23 +100,18 @@ class Chat:
 
     def _queued_cursor(self, turn_id: str, prompt: str) -> str | None:
         """Find an existing queued turn for an idempotent delegated request."""
-        cursor = "-"
-        while True:
-            entries = self.stream.read_conversation_range(min=cursor, count=100)
-            if not entries:
-                return None
-            for event in entries:
-                if event.type != EventType.TURN_QUEUED:
-                    continue
-                queued = cast(TurnQueuedPayload, event.payload)
-                if queued.turn_id != turn_id:
-                    continue
-                if queued.message != prompt:
-                    raise ValueError(
-                        f"turn ID {turn_id!r} is already queued with another prompt"
-                    )
-                return event.entry_id
-            cursor = f"({entries[-1].entry_id}"
+        for event in self.stream.iter_events():
+            if event.type != EventType.TURN_QUEUED:
+                continue
+            queued = cast(TurnQueuedPayload, event.payload)
+            if queued.turn_id != turn_id:
+                continue
+            if queued.message != prompt:
+                raise ValueError(
+                    f"turn ID {turn_id!r} is already queued with another prompt"
+                )
+            return event.entry_id
+        return None
 
     def _queue(
         self, prompt: str, turn_id: str, *, reuse_turn_id: bool

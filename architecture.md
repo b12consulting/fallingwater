@@ -100,10 +100,10 @@ whole request set has results. Completed events store the accumulated new
 messages, display response, and `RunUsage`; their `history` field remains the
 canonical delta for later turns.
 
-`Worker` pages through the event stream and passes the decoded events to
-`turn_state.reconstruct_turn`. That pure function returns the queued
-`next_prompt`, fixed agent path and model, prior history, dependencies, current
-turn ID, and latest usage together in a frozen Pydantic `Conversation` model.
+`ConversationStream.iter_events()` pages through the event stream and supplies
+decoded events to `turn_state.reconstruct_turn`. That pure function returns the
+queued `next_prompt`, fixed agent path and model, prior history, dependencies,
+current turn ID, and latest usage in a frozen Pydantic `Conversation` model.
 
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
@@ -307,15 +307,19 @@ capacity is reserved while child work runs.
 
 ## AD14 — Stream access by role
 
-`fallingwater.stream.DispatchStream` handles dispatch group creation,
-typed action decoding, reads, claims, and acknowledgements. Its `conversation_stream(id)` factory
-creates a `ConversationStream` bound to one conversation. That object handles
-typed event encoding and decoding, conversation reads and reader groups, and
-atomic transactions that append both conversation and dispatch entries. Its
-`lock_agent_run()` context manager owns Redis lease acquisition, renewal, loss
+`fallingwater.stream.DispatchStream` handles dispatch group creation, typed
+action decoding, reads, claims, and acknowledgements. Its
+`conversation_stream(id)` factory creates a `ConversationStream` bound to one
+conversation. That object handles typed event encoding and decoding,
+conversation reads and reader groups, and paginated event iteration for turn
+reconstruction, child-result lookup, and idempotent prompt lookup. It also
+handles atomic transactions that append both conversation and dispatch entries.
+Its `lock_agent_run()` context manager owns Redis lease acquisition, renewal, loss
 reporting, and release; `Worker` checks the lease before checkpointing a run.
 `stream_utils.py` contains stream key formatting, payload models, and codecs.
 
 `Chat` and `Worker` retain completion, acknowledgement, and turn-resumption
-policy. The CLI inspection commands and web SSE feeds keep their read-only
-query patterns, which include scans and multi-stream reads.
+policy. `Worker` routes child-result actions before loading an agent because
+those actions use only saved stream state. The CLI inspection commands and web
+SSE feeds keep their read-only query patterns, which include scans and
+multi-stream reads.

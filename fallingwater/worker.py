@@ -1,6 +1,5 @@
 """Run and checkpoint Pydantic AI actions from the Redis dispatch stream."""
 
-from collections.abc import Iterator
 from threading import Event as ThreadEvent
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -22,7 +21,6 @@ from .stream import ConversationStream, DispatchStream
 from .stream_utils import (
     AgentResumeAction,
     ConversationPokeAction,
-    ConversationEvent,
     DispatchAction,
     EventType,
     InvalidDispatchAction,
@@ -65,19 +63,6 @@ class Worker:
     def stop(self) -> None:
         """Stop reading more actions after the active action is checkpointed."""
         self.stop_event.set()
-
-    def _conversation_events(
-        self, cnv_stream: ConversationStream
-    ) -> Iterator[ConversationEvent]:
-        """Yield decoded events across all pages of a conversation stream."""
-        cursor = "-"
-        while True:
-            entries = cnv_stream.read_conversation_range(min=cursor, count=100)
-            if not entries:
-                return
-            for event in entries:
-                yield event
-            cursor = f"({entries[-1].entry_id}"
 
     def _append_failed(
         self,
@@ -123,7 +108,7 @@ class Worker:
                 return False
             # The action can be redelivered after a prior worker checkpointed it.
             refreshed = reconstruct_turn(
-                self._conversation_events(cnv_stream),
+                cnv_stream.iter_events(),
                 conversation.current_turn_id,
                 conversation_stream=cnv_stream.name,
             )
@@ -296,13 +281,15 @@ class Worker:
             child_conversation_id
         )
         child_terminal: TurnCompletedPayload | TurnFailedPayload | None = None
-        for event in child_stream.read_conversation_range():
+        for event in child_stream.iter_events():
             if getattr(event.payload, "turn_id", None) != child_turn_id:
                 continue
             if event.type == EventType.TURN_COMPLETED:
                 child_terminal = cast(TurnCompletedPayload, event.payload)
             elif event.type == EventType.TURN_FAILED:
                 child_terminal = cast(TurnFailedPayload, event.payload)
+            if child_terminal is not None:
+                break
         if child_terminal is None:
             return False
         if conversation.completed or conversation.failed is not None:
@@ -349,6 +336,10 @@ class Worker:
         """Process one loaded dispatch action and report whether it can be acknowledged."""
         if conversation.completed or conversation.failed is not None:
             return True
+        if isinstance(action, SubAgentResultAction):
+            return self._process_subagent_result(
+                cnv_stream, action, conversation
+            )
 
         agent = reify_agent(conversation.agent_path)
         deps = (
@@ -400,10 +391,6 @@ class Worker:
                     deps=deps,
                     step_id=action.step_id,
                     tool_call_id=action.tool_call_id,
-                )
-            case SubAgentResultAction():
-                return self._process_subagent_result(
-                    cnv_stream, action, conversation
                 )
 
     def run(self) -> None:
@@ -457,7 +444,7 @@ class Worker:
                     conversation_id
                 )
                 conversation = reconstruct_turn(
-                    self._conversation_events(cnv_stream),
+                    cnv_stream.iter_events(),
                     turn_id,
                     conversation_stream=cnv_stream.name,
                 )
