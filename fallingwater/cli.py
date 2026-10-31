@@ -23,6 +23,7 @@ from .stream_utils import (
 )
 from .utils import logger
 from .worker_pool import WorkerPool
+from fallingwater import archive
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,10 +73,30 @@ def build_parser() -> argparse.ArgumentParser:
     ls_parser = subparsers.add_parser("ls", help="List conversations.")
     ls_parser.set_defaults(handler=run_ls)
 
+    archive_parser = subparsers.add_parser("archive", help="Archive conversation")
+    archive_parser.add_argument("conversation", help="Conversation ID.")
+    archive_parser.add_argument(
+        "-s",
+        "--store",
+        help="Store URI.",
+        default=".fw-store"
+    )
+    archive_parser.set_defaults(handler=run_archive)
+
+    restore_parser = subparsers.add_parser("restore", help="Restore conversation")
+    restore_parser.add_argument("conversation", help="Conversation ID.")
+    restore_parser.add_argument(
+        "-s",
+        "--store",
+        help="Store URI.",
+        default=".fw-store"
+    )
+    restore_parser.set_defaults(handler=run_restore)
+
     tail_parser = subparsers.add_parser(
         "tail", help="Show the latest events for a conversation."
     )
-    tail_parser.add_argument("conversation", help="Conversation ID to inspect.")
+    tail_parser.add_argument("conversation", help="Conversation ID.")
     tail_parser.add_argument(
         "-n",
         "--count",
@@ -200,6 +221,34 @@ def run_ls(args: argparse.Namespace) -> None:
             except ValueError:
                 continue
             print(conversation_id)
+
+
+def run_archive(args: argparse.Namespace) -> None:
+    """
+    List conversation IDs found in the selected Redis namespace.
+    """
+    with Redis.from_url(args.redis_url) as redis:
+        file_len = archive.dump_conversation_stream(
+            redis,
+            args.namespace,
+            args.conversation,
+            store=args.store,
+        )
+    logger.info("%s bytes written to %s", file_len, args.store)
+
+
+def run_restore(args: argparse.Namespace) -> None:
+    """
+    Restore conversation ID
+    """
+    with Redis.from_url(args.redis_url) as redis:
+        nb_msg = archive.load_conversation_stream(
+            redis,
+            args.namespace,
+            args.conversation,
+            store=args.store,
+        )
+    logger.info("%s messages restored", nb_msg)
 
 
 def _print_event(
