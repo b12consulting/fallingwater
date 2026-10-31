@@ -48,7 +48,8 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- cli.py                argparse CLI for workers, chat, web, and reset
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- stream.py             Dispatch and conversation streams and run leases
-|   |-- stream_utils.py       Stream names, typed actions, events, IDs, and codecs
+|   |-- stream_models.py      Conversation event and dispatch action schemas
+|   |-- stream_utils.py       Stream names, validation, and wire codecs
 |   |-- turn_state.py         Pure reconstruction of one turn from events
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page

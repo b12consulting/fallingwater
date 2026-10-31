@@ -12,12 +12,14 @@ from fastapi.sse import ServerSentEvent
 from pydantic_ai.usage import RunUsage
 from redis import Redis
 
-from fallingwater.stream_utils import (
+from fallingwater.stream_models import (
     ConversationCreatedPayload,
     Action,
     Event,
     TurnCompletedPayload,
     TurnQueuedPayload,
+)
+from fallingwater.stream_utils import (
     encode_conversation_event,
     fmt_conversation_stream,
     fmt_dispatch_stream,

@@ -1,0 +1,65 @@
+# Sequence equivalents of the ASCII diagrams in basic-conversation-flow.md.
+# Render: d2 docs/basic-conversation-flow.d2 /tmp/basic-conversation-flow.svg
+grid-columns: 1
+
+creation: Creation and first turn {
+  shape: sequence_diagram
+  client: Client
+  conversation: Conversation events
+  dispatch: Shared dispatch
+  workers: Workers
+
+  client -> conversation: Create Chat
+  conversation.created: "conversation.created\nagent, model, deps"
+  submission: "send(prompt): atomic transaction" {
+    client -> conversation: Queue prompt
+    conversation.queued: "turn.queued\nnew turn_id and prompt"
+    client -> dispatch: Queue action
+    dispatch.poke: "conversation.poke\nconversation_id, turn_id"
+  }
+  client -> client: Return turn_id and queued event cursor
+  dispatch -> workers: "Claim conversation.poke"
+  conversation -> workers: "Load configuration, prompt,\nand earlier history"
+  workers -> workers: Run agent
+  client -> conversation: "receive(turn_id, cursor)\nXREAD after cursor; wait for outcome"
+  workers -> conversation: Save answer
+  conversation.completed: "turn.completed\nanswer, history, usage"
+  conversation -> client: Read matching outcome
+  client -> client: Return answer
+  workers -> dispatch: "Acknowledge conversation.poke\nXACK existing action"
+}
+
+history: Later turns and resumption {
+  shape: sequence_diagram
+  conversation: Conversation events
+  workers: Workers
+
+  conversation.created: "conversation.created\nagent, model, deps"
+  conversation.turn_1_queued: "turn.queued [turn 1]"
+  conversation.turn_1_completed: "turn.completed [turn 1]\nturn 1 message delta"
+  conversation.turn_2_queued: "turn.queued [turn 2]\nnext prompt"
+  conversation -> workers: Load turn 2 prompt and turn 1 history
+  workers -> workers: Run turn 2 with turn 1 history
+  workers -> conversation: Save turn 2 answer
+  conversation.turn_2_completed: "turn.completed [turn 2]\nnew message delta"
+  conversation.turn_3_queued: "turn.queued [turn 3]\nnext prompt"
+  conversation -> workers: Load turn 3 prompt and history
+  workers -> workers: Run turn 3 with turn 1 + turn 2 history
+}
+
+failure: Failed turn {
+  shape: sequence_diagram
+  client: Client
+  conversation: Conversation events
+  dispatch: Shared dispatch
+  workers: Workers
+
+  dispatch.poke: conversation.poke
+  dispatch -> workers: Claim action
+  workers -> workers: Load turn and run agent
+  workers -> workers: Processing raises a non-Redis exception
+  workers -> conversation: Save failure
+  conversation.failed: turn.failed
+  conversation -> client: "Read matching outcome\nreceive raises RuntimeError"
+  workers -> dispatch: "Acknowledge conversation.poke\nXACK existing action"
+}

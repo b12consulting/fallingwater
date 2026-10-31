@@ -5,12 +5,14 @@ from unittest.mock import MagicMock
 from redis import Redis
 
 from fallingwater.stream import DispatchStream
-from fallingwater.stream_utils import (
+from fallingwater.stream_models import (
     ConversationPokeAction,
     ConversationStreamEvent,
     Action,
     Event,
     TurnQueuedPayload,
+)
+from fallingwater.stream_utils import (
     decode_conversation_event,
     encode_conversation_event,
 )

@@ -1,0 +1,90 @@
+# Sequence equivalents of the ASCII diagrams in tool-call-flow.md.
+# Start after client submission. Each action may use a different worker.
+# Render: d2 docs/tool-call-flow.d2 /tmp/tool-call-flow.svg
+grid-columns: 1
+
+success: Successful tool call {
+  shape: sequence_diagram
+  conversation: Conversation events
+  dispatch: Shared dispatch
+  workers: Workers
+
+  conversation.queued: turn.queued already recorded
+  dispatch.poke: conversation.poke already queued
+  dispatch -> workers: Claim conversation.poke
+  conversation -> workers: Load turn
+  workers -> workers: Run agent and receive deferred tool requests
+  request: "Save request + jobs: atomic transaction" {
+    workers -> conversation: Save request set
+    conversation.requested: turn.tool.requested
+    workers -> dispatch: Queue tool action
+    dispatch.tool_call: turn.tool.call
+  }
+  workers -> dispatch: "Acknowledge conversation.poke\nXACK existing action"
+
+  dispatch -> workers: Claim turn.tool.call
+  workers -> workers: Execute tool and receive result
+  result: "Save result + resume: atomic transaction" {
+    workers -> conversation: Save tool result
+    conversation.tool_result: turn.tool.result
+    workers -> dispatch: Queue resume action
+    dispatch.resume: turn.agent.resume
+  }
+  workers -> dispatch: "Acknowledge turn.tool.call\nXACK existing action"
+
+  dispatch -> workers: Claim turn.agent.resume
+  workers -> workers: Run agent with tool result
+  workers -> conversation: Save final answer
+  conversation.completed: turn.completed
+  workers -> dispatch: "Acknowledge turn.agent.resume\nXACK existing action"
+}
+
+parallel: Parallel tool calls {
+  shape: sequence_diagram
+  conversation: Conversation events
+  dispatch: Shared dispatch
+  workers: Workers
+
+  conversation.request: "turn.tool.requested\nrequests: A, B, C"
+  dispatch.call_a: "turn.tool.call [A]"
+  dispatch.call_b: "turn.tool.call [B]"
+  dispatch.call_c: "turn.tool.call [C]"
+  dispatch -> workers: Worker 1 claims A
+  dispatch -> workers: Worker 2 claims B
+  dispatch -> workers: Worker 3 claims C
+
+  workers -> conversation: Worker 2 saves B
+  conversation.result_b: "turn.tool.result [B]"
+  conversation.wait_ac: Waiting for A and C
+  workers -> dispatch: "Worker 2 acknowledges turn.tool.call [B]"
+
+  workers -> conversation: Worker 3 saves C
+  conversation.result_c: "turn.tool.result [C]"
+  conversation.wait_a: Waiting for A
+  workers -> dispatch: "Worker 3 acknowledges turn.tool.call [C]"
+
+  final_result: "Worker 1 saves final result + resume: atomic transaction" {
+    workers -> conversation: Save A
+    conversation.result_a: "turn.tool.result [A]"
+    workers -> dispatch: Queue resume action
+    dispatch.resume: turn.agent.resume
+  }
+  workers -> dispatch: "Worker 1 acknowledges turn.tool.call [A]"
+  dispatch -> workers: Claim turn.agent.resume
+  workers -> workers: Run agent with A, B, C
+}
+
+failure: Failed tool call {
+  shape: sequence_diagram
+  conversation: Conversation events
+  dispatch: Shared dispatch
+  workers: Workers
+
+  dispatch.tool_call: turn.tool.call
+  dispatch -> workers: Claim tool action
+  workers -> workers: Execute tool
+  workers -> workers: Tool raises exception
+  workers -> conversation: Save turn failure
+  conversation.failed: turn.failed
+  workers -> dispatch: "Acknowledge turn.tool.call\nXACK existing action"
+}

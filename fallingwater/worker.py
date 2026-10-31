@@ -18,7 +18,7 @@ from .agent_proxy import (
 )
 from .catalog import reify_agent
 from .stream import ConversationStream, DispatchStream
-from .stream_utils import (
+from .stream_models import (
     AgentResumeAction,
     ConversationPokeAction,
     DispatchAction,

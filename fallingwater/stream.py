@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 from redis import Redis
 from redis.exceptions import LockError, RedisError, WatchError
 
-from .stream_utils import (
+from .stream_models import (
     ConversationStreamEvent,
     ConversationPayload,
     ConversationCreatedPayload,
@@ -23,6 +23,9 @@ from .stream_utils import (
     TurnQueuedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
+    InvalidDispatchAction,
+)
+from .stream_utils import (
     decode_conversation_event,
     decode_conversation_stream_event,
     decode_dispatch_action,
@@ -30,7 +33,6 @@ from .stream_utils import (
     encode_conversation_event,
     fmt_conversation_stream,
     fmt_dispatch_stream,
-    InvalidDispatchAction,
 )
 
 

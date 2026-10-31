@@ -2,13 +2,15 @@
 
 import pytest
 
-from fallingwater.stream_utils import (
+from fallingwater.stream_models import (
     ConversationCreatedPayload,
     Event,
     InvalidDispatchAction,
     ToolRequestedPayload,
     ToolResultPayload,
     TurnQueuedPayload,
+)
+from fallingwater.stream_utils import (
     decode_conversation_entry,
     decode_conversation_event,
     decode_dispatch_fields,

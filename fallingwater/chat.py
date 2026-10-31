@@ -10,7 +10,7 @@ from redis.exceptions import ResponseError
 
 from .catalog import reify_agent
 from .stream import DispatchStream
-from .stream_utils import (
+from .stream_models import (
     ConversationCreatedPayload,
     ConversationStreamEvent,
     Event,

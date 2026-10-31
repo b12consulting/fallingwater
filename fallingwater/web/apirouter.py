@@ -12,10 +12,12 @@ from fastapi.sse import ServerSentEvent
 from fastapi.templating import Jinja2Templates
 from redis import Redis
 
-from ..stream_utils import (
+from ..stream_models import (
     ConversationEvent,
     Action,
     Event,
+)
+from ..stream_utils import (
     decode_conversation_entry,
     decode_dispatch_fields,
     decode_text,

@@ -25,7 +25,7 @@ from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, SubAgentRequest
 from fallingwater.stream import ConversationStream
 from fallingwater.turn_state import reconstruct_turn
-from fallingwater.stream_utils import (
+from fallingwater.stream_models import (
     ConversationCreatedPayload,
     ConversationPayload,
     Action,
@@ -37,6 +37,8 @@ from fallingwater.stream_utils import (
     SubAgentRequestedPayload,
     ToolRequestedPayload,
     ToolResultPayload,
+)
+from fallingwater.stream_utils import (
     decode_dispatch_action,
     decode_conversation_event,
     encode_conversation_event,

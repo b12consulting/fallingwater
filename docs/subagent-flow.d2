@@ -1,0 +1,89 @@
+# Sequence equivalents of the ASCII diagrams in subagent-flow.md.
+# Start after client submission. Each action may use a different worker.
+# Render: d2 docs/subagent-flow.d2 /tmp/subagent-flow.svg
+grid-columns: 1
+
+success: Successful child turn {
+  shape: sequence_diagram
+  parent: Parent conversation
+  child: Child conversation
+  dispatch: Shared dispatch
+  workers: Workers
+
+  parent.queued: turn.queued already recorded
+  dispatch.parent_poke: "conversation.poke [parent] already queued"
+  dispatch -> workers: "Claim conversation.poke [parent]"
+  workers -> workers: Run parent agent
+  request: "Save request + job: atomic transaction" {
+    workers -> parent: Save request set
+    parent.tool_requested: turn.tool.requested
+    workers -> dispatch: Queue parent tool action
+    dispatch.tool_call: turn.tool.call
+  }
+  workers -> dispatch: "Acknowledge conversation.poke [parent]"
+
+  dispatch -> workers: Claim turn.tool.call
+  workers -> workers: Execute parent tool and get SubAgentRequest
+  create_child: "Create child work: atomic transaction" {
+    workers -> parent: Save child request
+    parent.subagent_requested: turn.subagent.requested
+    workers -> child: Create child conversation
+    child.created: conversation.created
+    workers -> child: Queue child turn
+    child.queued: turn.queued
+    workers -> dispatch: Queue child action
+    dispatch.child_poke: "conversation.poke [child]"
+  }
+  workers -> dispatch: Acknowledge turn.tool.call
+
+  dispatch -> workers: "Claim conversation.poke [child]"
+  workers -> workers: Run child agent
+  child_result: "Save answer + notify: atomic transaction" {
+    workers -> child: Save child answer
+    child.completed: turn.completed
+    workers -> dispatch: Notify parent
+    dispatch.subagent_result: turn.subagent.result
+  }
+  workers -> dispatch: "Acknowledge conversation.poke [child]"
+
+  dispatch -> workers: Claim turn.subagent.result
+  child -> workers: Read child answer
+  parent_result: "All results ready: save result + resume atomically" {
+    workers -> parent: Save parent tool result
+    parent.tool_result: turn.tool.result
+    workers -> dispatch: Queue parent resume
+    dispatch.resume: turn.agent.resume
+  }
+  workers -> dispatch: Acknowledge turn.subagent.result
+
+  dispatch -> workers: Claim turn.agent.resume
+  workers -> workers: Resume parent agent
+  workers -> parent: Save parent answer
+  parent.completed: turn.completed
+  workers -> dispatch: Acknowledge turn.agent.resume
+}
+
+failure: Failed child turn {
+  shape: sequence_diagram
+  parent: Parent conversation
+  child: Child conversation
+  dispatch: Shared dispatch
+  workers: Workers
+
+  dispatch.child_poke: "conversation.poke [child]"
+  dispatch -> workers: Claim child action
+  workers -> workers: Run child agent and encounter processing failure
+  child_failure: "Save failure + notify: atomic transaction" {
+    workers -> child: Save child failure
+    child.failed: turn.failed
+    workers -> dispatch: Notify parent
+    dispatch.subagent_result: turn.subagent.result
+  }
+  workers -> dispatch: "Acknowledge conversation.poke [child]"
+
+  dispatch -> workers: Claim turn.subagent.result
+  child -> workers: Read child failure
+  workers -> parent: Save parent failure
+  parent.failed: turn.failed
+  workers -> dispatch: Acknowledge turn.subagent.result
+}
