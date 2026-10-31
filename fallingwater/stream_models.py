@@ -132,7 +132,7 @@ class SubAgentRequestedPayload(ConversationPayload):
     turn_id: str
     step_id: str
     tool_call_id: str
-    conversation_id: str
+    child_conversation_id: str
     child_turn_id: str
 
 

@@ -28,7 +28,7 @@ Create Chat ---------------> conversation.created
 
 send(prompt)
   queue prompt + action
-  (atomic transaction)
+  (two writes)
        +-------------------> turn.queued
        +---------------------------------------------> conversation.poke
   return turn_id, cursor
@@ -51,13 +51,15 @@ and initial dependencies. Creating the conversation does not dispatch an agent
 run. Library-created conversations use a UUID by default; the CLI generates a
 readable conversation ID.
 
-`Chat.send(prompt)` generates a fresh UUID turn ID and writes two entries in
-one Redis transaction:
+`Chat.send(prompt)` generates a fresh UUID turn ID and writes two entries
+in order:
 
 1. Conversation: `turn.queued`, containing the turn ID and prompt message.
 2. Dispatch: `conversation.poke`, containing the conversation and turn IDs.
 
 The entries have their own Redis stream entry IDs but share the same turn ID.
+They are separate writes, so a failure between them can leave a queued turn
+without a dispatch action.
 `send` returns the turn ID and the queued event's entry ID as a cursor. A
 successful return confirms queuing; it does not mean the agent has completed.
 Every call submits a new turn, including repeated prompts.
@@ -65,8 +67,9 @@ Every call submits a new turn, including repeated prompts.
 A worker reads dispatch through the `workers` consumer group. It reconstructs
 the selected turn from the conversation stream, loads the agent and
 dependencies, and runs the agent with the prompt and saved message history.
-The first turn has no earlier conversation history. The worker uses a
-renewable per-step lease to suppress concurrent duplicate agent runs.
+The first turn has no earlier conversation history. Concurrent workers may
+run the same turn if a dispatch action is reclaimed while its first worker
+is still active.
 
 When the agent returns a final answer, the worker writes `turn.completed` with
 the turn ID, display message, new structured message history, and usage. It

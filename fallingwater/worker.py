@@ -84,7 +84,8 @@ class Worker:
             raise NotImplementedError(
                 "Fallingwater does not handle deferred tool approvals"
             )
-        return [call.tool_call_id for call in requests.calls]
+        ids = [call.tool_call_id for call in requests.calls]
+        return ids
 
     def _run_agent_step(
         self,
@@ -95,92 +96,62 @@ class Worker:
         deps: Any,
         prompt: str | None,
         requests: DeferredToolRequests | None,
-        resume_step_id: str,
     ) -> bool:
-        """Run once and atomically queue tool jobs or save a terminal result."""
-        lease_seconds = max(5.0, min(self.claim_idle_ms / 1000 or 5.0, 60.0))
-        with cnv_stream.lock_agent_run(
-            conversation.current_turn_id,
-            resume_step_id,
-            lease_seconds=lease_seconds,
-        ) as lease:
-            if lease is None:
-                return False
-            # The action can be redelivered after a prior worker checkpointed it.
-            refreshed = reconstruct_turn(
-                cnv_stream.iter_events(),
-                conversation.current_turn_id,
-                conversation_stream=cnv_stream.name,
+        """Run one agent step and save its requests or final result."""
+        deferred_results = (
+            requests.build_results(
+                calls=conversation.tool_results,
+                metadata=requests.metadata,
             )
-            if refreshed.completed or refreshed.failed is not None:
-                return True
-            if requests is None:
-                if refreshed.tool_requests is not None:
-                    return True
-            elif refreshed.tool_step_id != resume_step_id:
-                return True
-            elif not set(self._call_ids(requests)) <= set(
-                refreshed.tool_results
-            ):
-                return False
-
-            deferred_results = (
-                requests.build_results(
-                    calls=refreshed.tool_results,
-                    metadata=requests.metadata,
-                )
-                if requests is not None
-                else None
-            )
-            result = run(
-                agent,
-                prompt,
-                message_history=[*refreshed.history, *refreshed.turn_messages],
-                deferred_tool_results=deferred_results,
-                deps=deps,
-                model=refreshed.model or None,
-                usage=refreshed.usage,
-                conversation_id=cnv_stream.conversation_id,
-            )
-            if isinstance(result.output, DeferredToolRequests):
-                step_id = str(uuid4())
-                request_payload = ToolRequestedPayload(
-                    turn_id=refreshed.current_turn_id,
-                    step_id=step_id,
-                    requests=_requests_adapter.dump_python(
-                        result.output, mode="json"
-                    ),
-                    history=ModelMessagesTypeAdapter.dump_python(
-                        result.new_messages, mode="json"
-                    ),
-                    usage=result.usage,
-                )
-                lease.ensure_held()
-                cnv_stream.queue_tool_requests(
-                    request_payload,
-                    self._call_ids(result.output),
-                )
-                return True
-
-            completed = TurnCompletedPayload(
-                turn_id=refreshed.current_turn_id,
-                message=str(result.output),
+            if requests is not None
+            else None
+        )
+        result = run(
+            agent,
+            prompt,
+            message_history=[*conversation.history, *conversation.turn_messages],
+            deferred_tool_results=deferred_results,
+            deps=deps,
+            model=conversation.model or None,
+            usage=conversation.usage,
+            conversation_id=cnv_stream.conversation_id,
+        )
+        if isinstance(result.output, DeferredToolRequests):
+            step_id = str(uuid4())
+            request_payload = ToolRequestedPayload(
+                turn_id=conversation.current_turn_id,
+                step_id=step_id,
+                requests=_requests_adapter.dump_python(
+                    result.output, mode="json"
+                ),
                 history=ModelMessagesTypeAdapter.dump_python(
-                    [*refreshed.turn_messages, *result.new_messages],
-                    mode="json",
+                    result.new_messages, mode="json"
                 ),
                 usage=result.usage,
             )
-            lease.ensure_held()
-            cnv_stream.finish_turn(
-                Event.TURN_COMPLETED, completed, parent=refreshed.parent
-            )
-            logger.info(
-                "Sent response for turn %s in conversation %s",
-                refreshed.current_turn_id,
-                cnv_stream.conversation_id,
+            cnv_stream.queue_tool_requests(
+                request_payload, self._call_ids(result.output)
             )
             return True
+
+        completed = TurnCompletedPayload(
+            turn_id=conversation.current_turn_id,
+            message=str(result.output),
+            history=ModelMessagesTypeAdapter.dump_python(
+                [*conversation.turn_messages, *result.new_messages],
+                mode="json",
+            ),
+            usage=result.usage,
+        )
+        cnv_stream.finish_turn(
+            Event.TURN_COMPLETED, completed, parent=conversation.parent
+        )
+        logger.info(
+            "Sent response for turn %s in conversation %s",
+            conversation.current_turn_id,
+            cnv_stream.conversation_id,
+        )
+        return True
 
     def _execute_tool_call(
         self,
@@ -242,7 +213,7 @@ class Worker:
                 turn_id=conversation.current_turn_id,
                 step_id=step_id,
                 tool_call_id=tool_call_id,
-                conversation_id=child_conversation_id,
+                child_conversation_id=child_conversation_id,
                 child_turn_id=child_turn_id,
             )
             cnv_stream.queue_subagent(
@@ -298,7 +269,7 @@ class Worker:
         if (
             request is None
             or request.step_id != action.step_id
-            or request.conversation_id != child_conversation_id
+            or request.child_conversation_id != child_conversation_id
             or request.child_turn_id != child_turn_id
         ):
             return True
@@ -358,7 +329,6 @@ class Worker:
                     deps=deps,
                     prompt=conversation.next_prompt,
                     requests=None,
-                    resume_step_id="initial",
                 )
             case AgentResumeAction():
                 step_id = action.step_id
@@ -381,7 +351,6 @@ class Worker:
                     deps=deps,
                     prompt=None,
                     requests=requests,
-                    resume_step_id=step_id,
                 )
             case ToolCallAction():
                 return self._execute_tool_call(

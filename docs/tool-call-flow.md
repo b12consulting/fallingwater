@@ -28,7 +28,7 @@ turn.queued                   conversation.poke ----------> Claim action
                                                            Load turn; run agent
                                                            Receive tool requests
                                                            Save request + jobs
-                                                           (atomic transaction)
+                                                           (successive writes)
 turn.tool.requested <--------------------------------------+  |
                               turn.tool.call <---------------+
                               conversation.poke <--------- Acknowledge action
@@ -37,7 +37,7 @@ turn.tool.requested <--------------------------------------+  |
                                                            Execute tool
                                                            Receive result
                                                            Save result + resume
-                                                           (atomic transaction)
+                                                           (successive writes)
 turn.tool.result <-----------------------------------------+  |
                               turn.agent.resume <------------+
                               turn.tool.call <------------ Acknowledge action
@@ -49,14 +49,14 @@ turn.completed <------------------------------------------ Save final answer
 ```
 
 The prompt is recorded as `turn.queued`, and a `conversation.poke` action is
-appended to dispatch in the same Redis transaction. A worker reconstructs the
+appended to dispatch in a following write. A worker reconstructs the
 turn from the conversation stream and calls the agent once.
 
 Fallingwater's Pydantic AI hook defers attached function tools. Instead of
 executing them during that agent run, the run returns `DeferredToolRequests`.
 The worker writes one `turn.tool.requested` event containing the full request
 set, the run's new message history, and usage. It assigns the request set a
-`step_id`. The same transaction appends one `turn.tool.call` dispatch action
+`step_id`. Following writes append one `turn.tool.call` dispatch action
 per requested call, carrying the conversation, turn, step, and tool-call IDs.
 
 The worker acknowledges the agent action and becomes available for other work.
@@ -68,8 +68,8 @@ occupied until its current tool call returns.
 
 An ordinary tool return value is converted to JSON-compatible data and saved
 in a `turn.tool.result` event with the matching turn, step, and tool-call IDs.
-For a single-call request set, that result completes the set, so the same
-transaction also dispatches `turn.agent.resume`.
+For a single-call request set, that result completes the set, so a following
+write dispatches `turn.agent.resume`.
 
 The resume worker rebuilds the saved history and `DeferredToolResults`, restores
 checkpointed usage, and calls the agent with no new user prompt. The agent
@@ -98,7 +98,7 @@ turn.tool.result [C] <------------------------------------- Worker 3 saves C
   waiting for A               turn.tool.call [C] <--------- Worker 3 acknowledges
 
                                                            Worker 1 saves A
-                                                           and resume (atomic)
+                                                           and then resumes
 turn.tool.result [A] <-------------------------------------+  |
                               turn.agent.resume <------------+
                               turn.tool.call [A] <--------- Worker 1 acknowledges
@@ -106,9 +106,9 @@ turn.tool.result [A] <-------------------------------------+  |
                               turn.agent.resume ----------> Run agent with A, B, C
 ```
 
-The request event and all per-call dispatch entries are written atomically.
+The request event and per-call dispatch entries are separate writes.
 Result collection compares unique tool-call IDs against the saved request set.
-The transaction saving the final missing result also queues one resume action.
+After saving the final missing result, the worker queues one resume action.
 Earlier results do not queue a resume. No worker stays blocked waiting for
 sibling calls; after saving its own result, it acknowledges its action and
 becomes available again.
@@ -149,12 +149,11 @@ Workers acknowledge each action after saving its checkpoint. Acknowledgement
 clears pending status but does not delete the entry from `fw:dispatch`.
 Abandoned actions can be recovered with `XAUTOCLAIM`; saved tool results and
 terminal events allow recovered actions to skip work already checkpointed.
-Agent steps also use a renewable per-step lease to suppress concurrent duplicate
-agent runs.
+Agent steps have no execution lock; an active action reclaimed by another
+worker can run twice.
 
 Tool execution is not guaranteed to happen exactly once. A worker can crash
 after an external side effect but before saving its result, causing recovery
-to execute the tool again. Tool calls have no equivalent execution lease and
-may also run twice if an active action is reclaimed. Persisted result
-deduplication prevents duplicate results from scheduling extra resumes, but
-does not undo duplicate external effects.
+to execute the tool again. Tool calls may also run twice if an active action
+is reclaimed. Saved-result checks skip sequential duplicates, but concurrent
+workers can still write duplicate results and resume actions.

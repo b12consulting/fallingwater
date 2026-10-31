@@ -14,7 +14,7 @@ success: Successful child turn {
   dispatch.parent_poke: "conversation.poke [parent] already queued"
   dispatch -> workers: "Claim conversation.poke [parent]"
   workers -> workers: Run parent agent
-  request: "Save request + job: atomic transaction" {
+  request: "Save request, then queue job" {
     workers -> parent: Save request set
     parent.tool_requested: turn.tool.requested
     workers -> dispatch: Queue parent tool action
@@ -24,7 +24,7 @@ success: Successful child turn {
 
   dispatch -> workers: Claim turn.tool.call
   workers -> workers: Execute parent tool and get SubAgentRequest
-  create_child: "Create child work: atomic transaction" {
+  create_child: "Create child work with successive writes" {
     workers -> parent: Save child request
     parent.subagent_requested: turn.subagent.requested
     workers -> child: Create child conversation
@@ -38,7 +38,7 @@ success: Successful child turn {
 
   dispatch -> workers: "Claim conversation.poke [child]"
   workers -> workers: Run child agent
-  child_result: "Save answer + notify: atomic transaction" {
+  child_result: "Save answer, then notify" {
     workers -> child: Save child answer
     child.completed: turn.completed
     workers -> dispatch: Notify parent
@@ -48,7 +48,7 @@ success: Successful child turn {
 
   dispatch -> workers: Claim turn.subagent.result
   child -> workers: Read child answer
-  parent_result: "All results ready: save result + resume atomically" {
+  parent_result: "All results ready: save result, then resume" {
     workers -> parent: Save parent tool result
     parent.tool_result: turn.tool.result
     workers -> dispatch: Queue parent resume
@@ -73,7 +73,7 @@ failure: Failed child turn {
   dispatch.child_poke: "conversation.poke [child]"
   dispatch -> workers: Claim child action
   workers -> workers: Run child agent and encounter processing failure
-  child_failure: "Save failure + notify: atomic transaction" {
+  child_failure: "Save failure, then notify" {
     workers -> child: Save child failure
     child.failed: turn.failed
     workers -> dispatch: Notify parent

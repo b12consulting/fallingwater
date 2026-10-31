@@ -101,10 +101,10 @@ consuming its work.
 
 ### Available
 
-Synchronous `RedisStream`, `DispatchStream`, and `ConversationStream` classes
-provide shared stream operations and `ReadGroup` handles consumer-group reads
-and acknowledgements. `Chat` and `Worker` use these classes, and `Chat.send`
-keeps the cross-stream transaction atomic.
+Synchronous `DispatchStream` and `ConversationStream` classes provide shared
+stream operations, including consumer-group reads and acknowledgements.
+`Chat` and `Worker` use these classes. Related conversation and dispatch
+writes are separate Redis commands.
 
 ### Remaining
 
@@ -117,7 +117,7 @@ consumers with no pending entries when the `WorkerPool` starts.
 
 ### Done when
 
-Chat, worker, and web code use the stream classes for Redis stream operations,
-with existing event and transaction behavior preserved. Worker pool startup removes
+Chat, worker, and web code use the stream classes for Redis stream operations.
+Worker pool startup removes
 consumers with no pending entries and preserves consumers that still have
 pending work.

@@ -1,9 +1,6 @@
 """Checks fan-out, fan-in, and nonblocking child turns."""
 
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
-from threading import Barrier, RLock
 from typing import Any
 from unittest.mock import Mock
 
@@ -19,11 +16,9 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from redis import Redis
-from redis.exceptions import WatchError
 
 from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, SubAgentRequest
-from fallingwater.stream import ConversationStream
 from fallingwater.turn_state import reconstruct_turn
 from fallingwater.stream_models import (
     ConversationCreatedPayload,
@@ -45,80 +40,13 @@ from fallingwater.stream_utils import (
 )
 
 
-class MemoryPipeline:
-    def __init__(
-        self, redis: "MemoryRedis", *, transaction: bool = False
-    ) -> None:
-        self.redis = redis
-        self.watched: dict[str, int] = {}
-        self.commands: list[tuple[str, Mapping[Any, Any]]] = []
-        self.in_multi = transaction
-        self.barrier: Barrier | None = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.watched.clear()
-
-    def watch(self, *streams: str):
-        self.watched = {
-            stream: self.redis.versions.get(stream, 0) for stream in streams
-        }
-        with self.redis.guard:
-            if (
-                self.redis.watch_barrier is not None
-                and self.redis.barrier_watch_count < 2
-            ):
-                self.redis.barrier_watch_count += 1
-                self.barrier = self.redis.watch_barrier
-
-    def unwatch(self):
-        self.watched.clear()
-
-    def xrange(self, stream: str, min: str = "-", count: int = 100):
-        entries = self.redis.xrange(stream, min=min, count=count)
-        if self.barrier is not None:
-            self.barrier.wait(timeout=2)
-            self.barrier = None
-        return entries
-
-    def multi(self):
-        self.in_multi = True
-
-    def xadd(self, stream: str, fields: Mapping[Any, Any]):
-        if self.in_multi:
-            self.commands.append((stream, fields))
-            return self
-        return self.redis.xadd(stream, fields)
-
-    def execute(self):
-        with self.redis.guard:
-            if any(
-                self.redis.versions.get(stream, 0) != version
-                for stream, version in self.watched.items()
-            ):
-                raise WatchError
-            result = [
-                self.redis.xadd(stream, fields)
-                for stream, fields in self.commands
-            ]
-        self.commands.clear()
-        self.in_multi = False
-        return result
-
-
 class MemoryRedis(Redis):
-    """Small multi-stream fake with transactional writes and WATCH checks."""
+    """Small multi-stream fake for worker tests."""
 
     def __init__(self, entries: list[tuple[str, Mapping[Any, Any]]]):
         self.streams: dict[str, list[tuple[str, Mapping[Any, Any]]]] = {
             "fw:conversation:abc:events": list(entries)
         }
-        self.versions: dict[str, int] = {}
-        self.guard = RLock()
-        self.watch_barrier: Barrier | None = None
-        self.barrier_watch_count = 0
 
     def xrange(self, stream: str, min: str = "-", count: int = 100):
         entries = self.streams.get(stream, [])
@@ -133,15 +61,10 @@ class MemoryRedis(Redis):
         return selected[:count]
 
     def xadd(self, stream: str, fields: Mapping[Any, Any]):
-        with self.guard:
-            entries = self.streams.setdefault(stream, [])
-            entry_id = f"{len(entries) + 1}-0"
-            entries.append((entry_id, dict(fields)))
-            self.versions[stream] = self.versions.get(stream, 0) + 1
-            return entry_id
-
-    def pipeline(self, *, transaction: bool = False, **_kwargs):
-        return MemoryPipeline(self, transaction=transaction)
+        entries = self.streams.setdefault(stream, [])
+        entry_id = f"{len(entries) + 1}-0"
+        entries.append((entry_id, dict(fields)))
+        return entry_id
 
 
 def _entry(entry_id: str, event_type: Event, payload: ConversationPayload):
@@ -190,14 +113,8 @@ def _tool_request(calls: list[ToolCallPart], *, step_id: str = "step-1"):
     )
 
 
-def _worker(redis: MemoryRedis, monkeypatch) -> Worker:
-    worker = Worker(redis)
-    monkeypatch.setattr(
-        ConversationStream,
-        "lock_agent_run",
-        lambda *_args, **_kwargs: nullcontext(Mock()),
-    )
-    return worker
+def _worker(redis: MemoryRedis) -> Worker:
+    return Worker(redis)
 
 
 def _process(worker: Worker, fields: dict[str, str]) -> bool:
@@ -307,7 +224,7 @@ def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
     monkeypatch.setattr("fallingwater.worker.run", run_agent)
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -392,7 +309,7 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
         ]
     )
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -410,55 +327,46 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
     assert _dispatch(redis)[-1]["type"] == Action.AGENT_RESUME
 
 
-def test_concurrent_tool_results_queue_one_resume() -> None:
+def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
     request = _tool_request(
         [
             ToolCallPart("unused", {}, tool_call_id="call-1"),
             ToolCallPart("unused", {}, tool_call_id="call-2"),
         ]
     )
-    redis = MemoryRedis(_base_entries())
-    redis.xadd(
-        "fw:conversation:abc:events",
-        encode_conversation_event(Event.TURN_TOOL_REQUESTED, request),
+    redis = MemoryRedis(
+        [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
-    redis.watch_barrier = Barrier(2)
-    streams = [
-        Worker(redis).dsp_stream.conversation_stream("abc") for _ in range(2)
-    ]
-    payloads = [
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    append_event = stream.append_event
+
+    def append_with_sibling(event_type, payload):
+        entry_id = append_event(event_type, payload)
+        append_event(
+            Event.TURN_TOOL_RESULT,
+            ToolResultPayload(
+                turn_id="turn-1",
+                step_id="step-1",
+                tool_call_id="call-2",
+                result="second",
+            ),
+        )
+        return entry_id
+
+    monkeypatch.setattr(stream, "append_event", append_with_sibling)
+
+    assert stream.save_tool_result(
         ToolResultPayload(
             turn_id="turn-1",
             step_id="step-1",
-            tool_call_id=call_id,
-            result=call_id,
-        )
-        for call_id in ("call-1", "call-2")
+            tool_call_id="call-1",
+            result="first",
+        ),
+        ["call-1", "call-2"],
+    )
+    assert [entry["type"] for entry in _dispatch(redis)] == [
+        Action.AGENT_RESUME
     ]
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        saved = list(
-            executor.map(
-                lambda args: args[0].save_tool_result(
-                    args[1],
-                    ["call-1", "call-2"],
-                ),
-                zip(streams, payloads, strict=True),
-            )
-        )
-
-    assert all(saved)
-    dispatch = _dispatch(redis)
-    assert [entry["type"] for entry in dispatch] == [Action.AGENT_RESUME]
-    results = [
-        event
-        for event in _events(redis)
-        if event.type == Event.TURN_TOOL_RESULT
-    ]
-    assert {event.payload.tool_call_id for event in results} == {
-        "call-1",
-        "call-2",
-    }
 
 
 def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
@@ -510,7 +418,7 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
     )
     monkeypatch.setattr("fallingwater.worker.run", runs)
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -533,9 +441,9 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
         for action in _dispatch(redis)
         if action["type"] == Action.CONVERSATION_POKE
     )
-    assert child_poke["conversation_id"] == subagent.conversation_id
+    assert child_poke["conversation_id"] == subagent.child_conversation_id
     assert _process(worker, child_poke)
-    child_events = _events(redis, subagent.conversation_id)
+    child_events = _events(redis, subagent.child_conversation_id)
     assert child_events[-1].type == Event.TURN_COMPLETED
     parent_notify = _dispatch(redis)[-1]
     assert parent_notify["type"] == Action.SUBAGENT_RESULT
@@ -573,7 +481,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
         "fallingwater.worker.reify_agent", lambda _path: object()
     )
     monkeypatch.setattr("fallingwater.worker.run", run_agent)
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -596,7 +504,7 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
         ),
     )
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
     action = decode_dispatch_action(
         "1-0",
         {
@@ -628,36 +536,10 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     acknowledge.assert_called_once_with(worker.group, "1-0")
 
 
-def test_duplicate_agent_resume_waits_for_existing_run_lease(
-    monkeypatch,
-) -> None:
-    agent = Agent(TestModel(), name="leased-agent")
-    run_agent = Mock()
-    monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
-    redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
-    monkeypatch.setattr(
-        ConversationStream,
-        "lock_agent_run",
-        lambda *_args, **_kwargs: nullcontext(None),
-    )
-
-    assert not _process(
-        worker,
-        {
-            "type": Action.CONVERSATION_POKE,
-            "turn_id": "turn-1",
-            "conversation_id": "abc",
-        },
-    )
-    run_agent.assert_not_called()
-
-
 def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     parent_agent = Agent(TestModel(), name="parent")
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
     parent_stream = worker.dsp_stream.conversation_stream("abc")
     request = _tool_request(
         [ToolCallPart("delegate", {"prompt": "child"}, tool_call_id="call-1")]
@@ -670,7 +552,7 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
         turn_id="turn-1",
         step_id="step-1",
         tool_call_id="call-1",
-        conversation_id="child-conversation",
+        child_conversation_id="child-conversation",
         child_turn_id="child-turn",
     )
     assert parent_stream.queue_subagent(

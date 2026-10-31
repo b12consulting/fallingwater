@@ -31,9 +31,10 @@ are created for each turn. Agents can bring their own tools and capabilities.
 deferred tool requests. `Worker.run` loads each dispatch action and handles
 checkpoint failures; `Worker.process` handles the loaded action: an agent
 run, one tool call, or a child result. The full request set and per-call jobs
-are written atomically; each result is saved by call ID, and the last unique
-result queues one agent resume. A restarted worker reconstructs the turn from
-the conversation stream and recovers pending actions through `XAUTOCLAIM`.
+are written as separate stream commands; each result is saved by call ID, and
+the last unique result queues one agent resume. A restarted worker reconstructs
+the turn from the conversation stream and recovers pending actions through
+`XAUTOCLAIM`.
 `agent_proxy.execute_tool` resolves attached functions and reconstructs a
 basic `RunContext` for each deferred call. The next turn rebuilds its history
 from completed turns.
@@ -54,18 +55,17 @@ the same stream.
 `DispatchStream` owns the shared dispatch key, consumer-group reads, claims,
 and acknowledgements. It decodes each dispatch entry into a typed action or an
 invalid-entry value that the worker acknowledges. It creates a
-`ConversationStream` bound to an ID; that object owns typed event reads and writes,
-its reader groups, and transactions
-that write conversation and dispatch entries together. `Chat` keeps one bound
+`ConversationStream` bound to an ID; that object owns typed event reads and
+writes, its reader groups, and writes to both streams. `Chat` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
-conversation stream for each action, including child conversations. `stream_models.py`
-defines the event and action schemas; `stream_utils.py` handles naming validation
-and wire codecs. `Chat` and
-`Worker` decide when to acknowledge entries and resume turns.
+conversation stream for each action, including child conversations.
+`stream_models.py` defines the event and action schemas; `stream_utils.py`
+handles naming validation and wire codecs. `Chat` and `Worker` decide when to
+acknowledge entries and resume turns.
 
 `Chat.send` asks its conversation stream to write the queued event and dispatch
-poke with two `XADD` commands in one Redis transaction. Group and consumer
-names remain explicit on stream operations.
+poke with two successive `XADD` commands. Group and consumer names remain
+explicit on stream operations.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -83,7 +83,7 @@ Pydantic payload serialization. `Chat` uses event IDs for cursors and
 acknowledgements, while `Worker` uses action IDs for acknowledgements.
 
 Submitting a prompt writes `turn.queued` to the conversation stream and a
-`conversation.poke` instruction to dispatch in one Redis transaction. The
+`conversation.poke` instruction to dispatch in a following write. The
 entries have different Redis stream IDs but share a turn ID. A worker uses the
 conversation ID and turn ID to load the queued prompt, fixed agent and model,
 and prior history from the conversation stream. It writes `turn.tool.requested`
@@ -94,9 +94,10 @@ can span several independently recovered actions.
 
 Each tool-request event stores the message delta and `RunUsage` from that
 `Agent.run_sync` call, along with JSON-compatible deferred requests. The same
-Redis transaction writes one dispatch entry per tool call. Tool-result events
-are associated with that request and store one JSON-compatible result per call.
-The result transaction compares unique call IDs and queues one resume when the
+sequence of writes adds one dispatch entry per tool call. An empty deferred
+request set is rejected before the event is written. Tool-result events are
+associated with that request and store one JSON-compatible result per call.
+The result handler compares unique call IDs and queues one resume when the
 whole request set has results. Completed events store the accumulated new
 messages, display response, and `RunUsage`; their `history` field remains the
 canonical delta for later turns.
@@ -135,9 +136,7 @@ new entries with `XREADGROUP`, through `DispatchStream`. The default idle
 period is five minutes and `fw worker --claim-idle-ms` changes it. Dispatch
 entries identify one initial/resume run, one tool call, or one child result.
 Each action checkpoints its event before acknowledgement, so independent calls
-can run on different workers and out of order. Agent runs use a renewable
-per-step Redis lease, managed by `ConversationStream.lock_agent_run()`, to avoid
-concurrent duplicate `run_sync` calls. On SIGINT
+can run on different workers and out of order. On SIGINT
 or SIGTERM, an active model or tool call finishes and is checkpointed; the
 worker then leaves unfinished work pending for another worker. A restarted
 worker has a new consumer ID and recovers eligible dispatch entries with
@@ -252,7 +251,7 @@ payload model:
   - Fields: `turn_id: str`, `step_id: str`, `tool_call_id: str`, `result: Any`
   - One JSON-compatible tool result associated with a deferred request.
 - `turn.subagent.requested`
-  - Fields: `turn_id`, `step_id`, `tool_call_id`, `conversation_id`,
+  - Fields: `turn_id`, `step_id`, `tool_call_id`, `child_conversation_id`,
     `child_turn_id`
   - Correlation between a parent tool call and its separately queued child
     conversation.
@@ -309,12 +308,14 @@ On restart, the worker reconstructs the turn from these events and skips saved
 tool results. A crash after a tool side effect but before its result event can
 still repeat that tool call. A stop request takes effect after the current
 model or tool call is saved, leaving unfinished actions for `XAUTOCLAIM`
-recovery.
+recovery. Related event and dispatch writes are separate Redis commands. A
+failure between them can leave saved state without its next dispatch action;
+replaying the original action does not repair every such partial write.
 
 Nested agent work uses its own conversation stream. A tool may return the
 public `SubAgentRequest` model with an agent import path, prompt, optional
 model, and JSON dependencies. The worker persists parent correlation and queues
-the child in one transaction; it does not wait for the child. Child completion
+the child with successive writes; it does not wait for the child. Child completion
 or failure queues a parent-result action. Child IDs are deterministic for the
 parent tool call, so retries reuse the same child. A child failure fails its
 parent, and late sibling results are ignored after a terminal event. No worker
@@ -323,14 +324,15 @@ capacity is reserved while child work runs.
 ## AD14 — Stream access by role
 
 `fallingwater.stream.DispatchStream` handles dispatch group creation, typed
-action decoding, reads, claims, and acknowledgements. Its
+action decoding, reads, claims, acknowledgements, and action writes through
+`append_event`. Its
 `conversation_stream(id)` factory creates a `ConversationStream` bound to one
 conversation. That object handles typed event encoding and decoding,
 conversation reads and reader groups, and paginated event iteration for turn
-reconstruction and child-result lookup. It also
-handles atomic transactions that append both conversation and dispatch entries.
-Its `lock_agent_run()` context manager owns Redis lease acquisition, renewal, loss
-reporting, and release; `Worker` checks the lease before checkpointing a run.
+reconstruction and child-result lookup. Related writes to conversation and
+dispatch streams are issued separately, without a Redis transaction or an
+agent-run lock. Conversation events are written through the bound stream's
+`append_event` method.
 Both stream classes treat Redis `BUSYGROUP` during group creation as an
 already-created group and propagate other Redis errors.
 `stream_models.py` contains the event and action schemas and the event payload

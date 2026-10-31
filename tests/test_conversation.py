@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import ResponseError
 
@@ -12,6 +13,7 @@ from fallingwater.stream_models import (
     ConversationStreamEvent,
     Action,
     Event,
+    ToolRequestedPayload,
     TurnQueuedPayload,
 )
 from fallingwater.stream_utils import (
@@ -45,6 +47,43 @@ def test_append_and_read_event_use_the_conversation_codec() -> None:
             payload=payload,
         )
     ]
+
+
+def test_dispatch_append_event_writes_action_fields() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xadd.return_value = b"3-0"
+    dispatch = DispatchStream(redis)
+
+    assert dispatch.append_event(
+        Action.CONVERSATION_POKE,
+        conversation_id="abc",
+        turn_id="turn-1",
+    ) == "3-0"
+    redis.xadd.assert_called_once_with(
+        "fw:dispatch",
+        {
+            "type": Action.CONVERSATION_POKE,
+            "conversation_id": "abc",
+            "turn_id": "turn-1",
+        },
+    )
+
+
+def test_queue_tool_requests_rejects_empty_set_without_writing() -> None:
+    redis = MagicMock(spec=Redis)
+    conversation = DispatchStream(redis).conversation_stream("abc")
+    payload = ToolRequestedPayload(
+        turn_id="turn-1",
+        step_id="step-1",
+        requests={},
+        history=[],
+        usage=RunUsage(),
+    )
+
+    with pytest.raises(ValueError, match="must contain a call"):
+        conversation.queue_tool_requests(payload, [])
+
+    redis.xadd.assert_not_called()
 
 
 def test_group_operations_keep_stream_group_and_consumer_explicit() -> None:

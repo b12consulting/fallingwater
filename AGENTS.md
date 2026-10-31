@@ -48,7 +48,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
 |   |-- names.py              Words and generator for CLI conversation names
-|   |-- stream.py             Dispatch and conversation streams and run leases
+|   |-- stream.py             Dispatch and conversation stream access
 |   |-- stream_models.py      Conversation event and dispatch action schemas
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
 |   |-- turn_state.py         Pure reconstruction of one turn from events
