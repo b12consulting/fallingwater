@@ -183,12 +183,12 @@ class Chat:
             if not ffwd and not pending:
                 return
 
-    def _resume_group(self) -> None:
+    def resume_group(self) -> None:
         """Read available events before accepting another turn."""
         for _ in self.read(ffwd=True):
             pass
 
-    def _send_and_wait(self, prompt: str) -> None:
+    def send_and_wait(self, prompt: str) -> None:
         turn_id, _ = self.send(prompt)
         while True:
             completed = False
@@ -200,8 +200,8 @@ class Chat:
 
     def run_once(self, prompt: str) -> None:
         """Print the result of one prompt and return without opening a terminal."""
-        self._resume_group()
-        self._send_and_wait(prompt)
+        self.resume_group()
+        self.send_and_wait(prompt)
 
     def run(self) -> None:
         """Run a small terminal chat; Ctrl-C leaves the conversation intact."""
@@ -209,9 +209,9 @@ class Chat:
         print(f"Model: {self.model}")
         print(f"Agent: {self.agent_path}")
         try:
-            self._resume_group()
+            self.resume_group()
             while True:
                 prompt = input("> ")
-                self._send_and_wait(prompt)
+                self.send_and_wait(prompt)
         except (EOFError, KeyboardInterrupt):
             print("\nConversation left open.")
