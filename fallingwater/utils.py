@@ -1,7 +1,25 @@
-"""Shared logging for Fallingwater."""
+"""
+Shared logging for Fallingwater.
+"""
 
 import logging
 import os
+
+import brotli
+
+
+def compress(data: bytes) -> bytes:
+    """
+    Compress data with Brotli quality 5 for conversation stream payloads.
+    """
+    return brotli.compress(data, quality=5)
+
+
+def decompress(data: bytes) -> bytes:
+    """
+    Decompress a Brotli payload from a conversation stream.
+    """
+    return brotli.decompress(data)
 
 
 fmt = "%(levelname)s:%(asctime).19s: %(message)s"

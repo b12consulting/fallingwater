@@ -1,35 +1,55 @@
-"""Command-line entry point for Fallingwater."""
+"""
+Command-line entry point for Fallingwater.
+"""
 
 import argparse
+import json
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from importlib.metadata import version
-from collections.abc import Sequence
 
 from redis import Redis
 
 from .chat import Chat
 from .names import generate_name
-from .streams import StreamNames
+from .stream_utils import (
+    decode_conversation_entry,
+    decode_dispatch_fields,
+    decode_text,
+    fmt_conversation_stream,
+    fmt_dispatch_stream,
+    validate_conversation_id,
+)
 from .utils import logger
-from .worker import Worker
+from .worker_pool import WorkerPool
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser and its subcommands."""
-    parser = argparse.ArgumentParser(prog="fw", description="Fallingwater agent tools.")
+    """
+    Build the CLI parser and its subcommands.
+    """
+    parser = argparse.ArgumentParser(
+        prog="fw", description="Fallingwater agent tools."
+    )
     parser.add_argument(
         "-V", "--version", action="version", version=version("fallingwater")
     )
     parser.add_argument(
-        "-s", "--silent", action="store_true", default=False, help="Suppress logs."
+        "-s",
+        "--silent",
+        action="store_true",
+        default=False,
+        help="Suppress logs.",
     )
     parser.add_argument(
         "-r",
         "--redis-url",
         default=os.getenv("FW_REDIS_URL", "redis://localhost:6379/0"),
     )
-    parser.add_argument("-n", "--namespace", default=os.getenv("FW_NAMESPACE", "fw"))
+    parser.add_argument(
+        "-n", "--namespace", default=os.getenv("FW_NAMESPACE", "fw")
+    )
 
     subparsers = parser.add_subparsers(dest="command")
     version_parser = subparsers.add_parser(
@@ -40,12 +60,62 @@ def build_parser() -> argparse.ArgumentParser:
     worker_parser = subparsers.add_parser(
         "worker", help="Run Redis-backed agent workers."
     )
-    worker_parser.add_argument("-p", "--proxies", type=int, default=1)
+    worker_parser.add_argument("-w", "--workers", type=int, default=1)
+    worker_parser.add_argument(
+        "--claim-idle-ms",
+        type=_nonnegative_int,
+        default=300_000,
+        help="Idle time before reclaiming pending dispatch entries (default: 300000).",
+    )
     worker_parser.set_defaults(handler=run_worker)
 
-    chat_parser = subparsers.add_parser("chat", help="Start or resume a conversation.")
+    ls_parser = subparsers.add_parser("ls", help="List conversations.")
+    ls_parser.set_defaults(handler=run_ls)
+
+    tail_parser = subparsers.add_parser(
+        "tail", help="Show the latest events for a conversation."
+    )
+    tail_parser.add_argument("conversation", help="Conversation ID to inspect.")
+    tail_parser.add_argument(
+        "-n",
+        "--count",
+        type=_positive_int,
+        default=10,
+        help="Number of latest events to show (default: 10).",
+    )
+    tail_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Include message history and usage in completed events.",
+    )
+    tail_parser.set_defaults(handler=run_tail)
+
+    dispatch_parser = subparsers.add_parser(
+        "dispatch", help="Show the latest dispatch events."
+    )
+    dispatch_parser.add_argument(
+        "-n",
+        "--count",
+        type=_positive_int,
+        default=10,
+        help="Number of latest events to show (default: 10).",
+    )
+    dispatch_parser.set_defaults(handler=run_dispatch)
+
+    chat_parser = subparsers.add_parser(
+        "chat", help="Start or resume a conversation."
+    )
     chat_parser.add_argument(
         "conversation", nargs="?", help="Conversation ID to start or resume."
+    )
+    chat_parser.add_argument(
+        "-p",
+        "--param",
+        dest="params",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Dependency for a new conversation (repeatable; KEY=VALUE).",
     )
     chat_parser.add_argument(
         "-a",
@@ -60,14 +130,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model for a new conversation (default: FW_MODEL).",
     )
     chat_parser.add_argument(
-        "--group", default="user", help="Conversation reader group (default: user)."
+        "--group",
+        default="user",
+        help="Conversation reader group (default: user).",
     )
     chat_parser.add_argument(
         "--msg", help="Send one message, print the response, and exit."
     )
     chat_parser.set_defaults(handler=run_chat)
 
-    web_parser = subparsers.add_parser("web", help="Serve the Fallingwater API.")
+    web_parser = subparsers.add_parser(
+        "web", help="Serve the Fallingwater API."
+    )
     web_parser.add_argument("--host", default="127.0.0.1")
     web_parser.add_argument("--port", type=int, default=8000)
     web_parser.set_defaults(handler=run_web)
@@ -86,32 +160,116 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def show_version(_args: argparse.Namespace) -> int:
-    """Print the installed version."""
+def show_version(_args: argparse.Namespace) -> None:
+    """
+    Print the installed version.
+    """
     print(version("fallingwater"))
-    return 0
 
 
-def run_worker(args: argparse.Namespace) -> int:
-    with Redis.from_url(args.redis_url, decode_responses=True) as redis:
-        worker = Worker(redis, namespace=args.namespace, proxy_count=args.proxies)
-        print(f"Worker running with {args.proxies} proxy(s). Press Ctrl-C to stop.")
-        worker.run()
-    return 0
+def run_worker(args: argparse.Namespace) -> None:
+    with Redis.from_url(args.redis_url) as redis:
+        worker_pool = WorkerPool(
+            redis,
+            namespace=args.namespace,
+            worker_count=args.workers,
+            claim_idle_ms=args.claim_idle_ms,
+        )
+        print(
+            f"Worker pool running with {args.workers} worker(s). Press Ctrl-C to stop."
+        )
+        worker_pool.run()
 
 
-def run_chat(args: argparse.Namespace) -> int:
-    with Redis.from_url(args.redis_url, decode_responses=True) as redis:
-        conversation_id = args.conversation
+def run_ls(args: argparse.Namespace) -> None:
+    """
+    List conversation IDs found in the selected Redis namespace.
+    """
+    try:
+        pattern = fmt_conversation_stream(args.namespace, "*")
+    except ValueError as error:
+        raise SystemExit(f"fw ls: {error}") from None
+    prefix = f"{args.namespace}:conversation:"
+    suffix = ":events"
+    with Redis.from_url(args.redis_url) as redis:
+        for raw_key in redis.scan_iter(match=pattern):
+            key = decode_text(raw_key)
+            conversation_id = key[len(prefix) : -len(suffix)]
+            try:
+                validate_conversation_id(conversation_id)
+            except ValueError:
+                continue
+            print(conversation_id)
+
+
+def _print_event(
+    entry_id: str, event_type: str, payload: Mapping[str, object]
+) -> None:
+    print(
+        f"{entry_id} {event_type} "
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
+
+
+def run_tail(args: argparse.Namespace) -> None:
+    """
+    Print the latest decoded events from one conversation stream.
+    """
+    with Redis.from_url(args.redis_url) as redis:
+        try:
+            stream = fmt_conversation_stream(args.namespace, args.conversation)
+        except ValueError as error:
+            raise SystemExit(f"fw tail: {error}") from None
+        if not redis.exists(stream):
+            raise SystemExit(
+                f"fw tail: conversation not found: {args.conversation}"
+            )
+        entries = redis.xrevrange(stream, count=args.count)
+        for raw_entry in reversed(entries):
+            entry_id, event = decode_conversation_entry(raw_entry)
+            payload = event.payload.fmt(full=args.full)
+            _print_event(entry_id, event.type.value, payload)
+
+
+def run_dispatch(args: argparse.Namespace) -> None:
+    """
+    Print the latest decoded dispatch stream entries.
+    """
+    with Redis.from_url(args.redis_url) as redis:
+        try:
+            stream = fmt_dispatch_stream(args.namespace)
+        except ValueError as error:
+            raise SystemExit(f"fw dispatch: {error}") from None
+        entries = redis.xrevrange(stream, count=args.count)
+        for raw_entry_id, raw_fields in reversed(entries):
+            entry_id = decode_text(raw_entry_id)
+            event = decode_dispatch_fields(raw_fields)
+            event_type = event.get("type", "unknown")
+            payload = {
+                key: value for key, value in event.items() if key != "type"
+            }
+            _print_event(entry_id, event_type, payload)
+
+
+def run_chat(args: argparse.Namespace) -> None:
+    conversation_id = args.conversation
+    try:
+        deps = _parse_chat_params(args.params)
+    except ValueError as error:
+        raise SystemExit(f"fw chat: {error}") from None
+
+    with Redis.from_url(args.redis_url) as redis:
         if conversation_id is None:
-            names = StreamNames(args.namespace)
             for _ in range(100):
                 candidate = generate_name()
-                if not redis.exists(names.conversation(candidate)):
+                stream = fmt_conversation_stream(args.namespace, candidate)
+                if not redis.exists(stream):
                     conversation_id = candidate
                     break
             else:
-                raise SystemExit("fw chat: could not find an unused conversation name")
+                raise SystemExit(
+                    "fw chat: could not find an unused conversation name"
+                )
         try:
             chat = Chat(
                 redis,
@@ -120,6 +278,7 @@ def run_chat(args: argparse.Namespace) -> int:
                 agent_path=args.agent,
                 model=args.model,
                 group=args.group,
+                deps=deps,
             )
         except ValueError as error:
             logger.debug(
@@ -132,11 +291,53 @@ def run_chat(args: argparse.Namespace) -> int:
             if args.conversation is None:
                 print(f"Conversation: {chat.conversation_id}", file=sys.stderr)
             chat.run_once(args.msg)
-    return 0
 
 
-def run_web(args: argparse.Namespace) -> int:
-    """Run the optional FastAPI app with Uvicorn."""
+def _parse_chat_params(params: Sequence[str]) -> dict[str, str]:
+    """
+    Parse CLI dependency values supplied as ``key=value`` arguments.
+    """
+    deps: dict[str, str] = {}
+    for param in params:
+        key, separator, value = param.partition("=")
+        if not separator or not key or not value:
+            raise ValueError(f"invalid param {param!r}")
+        deps[key] = value
+    return deps
+
+
+def _positive_int(value: str) -> int:
+    """
+    Parse a positive count used by event inspection commands.
+    """
+    try:
+        count = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be a positive integer"
+        ) from error
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return count
+
+
+def _nonnegative_int(value: str) -> int:
+    """Parse a nonnegative duration in milliseconds."""
+    try:
+        duration = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be a nonnegative integer"
+        ) from error
+    if duration < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return duration
+
+
+def run_web(args: argparse.Namespace) -> None:
+    """
+    Run the optional FastAPI app with Uvicorn.
+    """
     try:
         import uvicorn
 
@@ -145,19 +346,30 @@ def run_web(args: argparse.Namespace) -> int:
         logger.debug("Web dependency is missing", exc_info=True)
         raise SystemExit("fw web requires fallingwater[web]") from error
 
-    app = create_app(redis_url=args.redis_url, namespace=args.namespace)
-    uvicorn.run(app, host=args.host, port=args.port)
-    return 0
+    with Redis.from_url(args.redis_url) as redis:
+        app = create_app(namespace=args.namespace, redis=redis)
+        # SSE connections stay open, so give them a short window to finish on exit.
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            timeout_graceful_shutdown=3,
+        )
 
 
-def run_reset(args: argparse.Namespace) -> int:
-    """Delete keys belonging to the selected Fallingwater namespace."""
-    namespace = args.namespace if args.reset_namespace is None else args.reset_namespace
-    prefix = f"{StreamNames(namespace).namespace}:"
+def run_reset(args: argparse.Namespace) -> None:
+    """
+    Delete keys belonging to the selected Fallingwater namespace.
+    """
+    namespace = (
+        args.namespace if args.reset_namespace is None else args.reset_namespace
+    )
+    prefix = fmt_dispatch_stream(namespace).removesuffix("dispatch")
     deleted = 0
-    with Redis.from_url(args.redis_url, decode_responses=True) as redis:
+    with Redis.from_url(args.redis_url) as redis:
         batch: list[str] = []
         for key in redis.scan_iter():
+            key = decode_text(key)
             if key.startswith(prefix):
                 batch.append(key)
             if len(batch) == 100:
@@ -166,11 +378,12 @@ def run_reset(args: argparse.Namespace) -> int:
         if batch:
             deleted += redis.delete(*batch)
     print(f"Deleted {deleted} key(s) from namespace {namespace!r}.")
-    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the command-line interface."""
+    """
+    Run the command-line interface.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.silent:
@@ -178,4 +391,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    return args.handler(args)
+    args.handler(args)
+    return 0

@@ -1,4 +1,5 @@
-"""Small Redis Streams echo experiment.
+"""
+Small Redis Streams echo experiment.
 
 With a local Redis server, run these in separate terminals:
 
@@ -46,14 +47,18 @@ from fallingwater.utils import configure_cli_logging, logger
 
 
 class EchoAgent:
-    """Return each message unchanged, without an AI model."""
+    """
+    Return each message unchanged, without an AI model.
+    """
 
     def receive(self, message: str) -> str:
         return message
 
 
 class Proxy:
-    """Read requests from a stream and append the agent's replies."""
+    """
+    Read requests from a stream and append the agent's replies.
+    """
 
     def __init__(self, agent: EchoAgent, redis: Redis, stream: str) -> None:
         self.agent = agent
@@ -65,9 +70,13 @@ class Proxy:
             redis.xgroup_create(stream, self.group, id="0", mkstream=True)
         except ResponseError as error:
             if not str(error).startswith("BUSYGROUP"):
-                logger.exception("Could not create consumer group for %s", stream)
+                logger.exception(
+                    "Could not create consumer group for %s", stream
+                )
                 raise
-            logger.debug("Consumer group %s already exists on %s", self.group, stream)
+            logger.debug(
+                "Consumer group %s already exists on %s", self.group, stream
+            )
 
     def run(self, stop: Event) -> None:
         while not stop.is_set():
@@ -84,7 +93,11 @@ class Proxy:
                         reply = self.agent.receive(fields["message"])
                         self.redis.xadd(
                             self.stream,
-                            {"kind": "reply", "request_id": entry_id, "message": reply},
+                            {
+                                "kind": "reply",
+                                "request_id": entry_id,
+                                "message": reply,
+                            },
                         )
                     self.redis.xack(self.stream, self.group, entry_id)
                     if fields.get("kind") == "request":
@@ -92,14 +105,18 @@ class Proxy:
 
 
 class CLI:
-    """Submit messages and wait for their matching replies on a stream."""
+    """
+    Submit messages and wait for their matching replies on a stream.
+    """
 
     def __init__(self, stream: str, redis: Redis) -> None:
         self.stream = stream
         self.redis = redis
 
     def send(self, message: str) -> str:
-        return self.redis.xadd(self.stream, {"kind": "request", "message": message})
+        return self.redis.xadd(
+            self.stream, {"kind": "request", "message": message}
+        )
 
     def receive(self, request_id: str) -> str:
         cursor = request_id
@@ -128,14 +145,18 @@ class CLI:
 
 
 def show_info(redis: Redis, stream: str) -> None:
-    """Print stream and worker-group status without consuming entries."""
+    """
+    Print stream and worker-group status without consuming entries.
+    """
     if not redis.exists(stream):
         print(f"Stream {stream} does not exist.")
         return
 
     info = redis.xinfo_stream(stream)
     groups = redis.xinfo_groups(stream)
-    group = next((item for item in groups if item["name"] == "echo-proxy"), None)
+    group = next(
+        (item for item in groups if item["name"] == "echo-proxy"), None
+    )
 
     print(f"Stream: {stream}")
     print(f"Entries: {info['length']}")
@@ -152,7 +173,9 @@ def show_info(redis: Redis, stream: str) -> None:
 
 def main() -> None:
     configure_cli_logging()
-    parser = argparse.ArgumentParser(description="Redis Streams echo experiment")
+    parser = argparse.ArgumentParser(
+        description="Redis Streams echo experiment"
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("worker", "chat", "info"):
         command = commands.add_parser(name)

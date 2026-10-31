@@ -1,4 +1,6 @@
-"""Smoke checks for the installed CLI entry point."""
+"""
+Smoke checks for the installed CLI entry point.
+"""
 
 from importlib.metadata import version
 from unittest.mock import MagicMock
@@ -26,12 +28,23 @@ def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_redis_options_are_global() -> None:
     args = build_parser().parse_args(
-        ["-r", "redis://example:6379/1", "-n", "fw-test", "worker", "-p", "2"]
+        [
+            "-r",
+            "redis://example:6379/1",
+            "-n",
+            "fw-test",
+            "worker",
+            "-w",
+            "2",
+            "--claim-idle-ms",
+            "1500",
+        ]
     )
     assert args.redis_url == "redis://example:6379/1"
     assert args.namespace == "fw-test"
     assert args.command == "worker"
-    assert args.proxies == 2
+    assert args.workers == 2
+    assert args.claim_idle_ms == 1500
 
 
 def test_web_command_passes_config_to_app_and_uvicorn(
@@ -41,8 +54,14 @@ def test_web_command_passes_config_to_app_and_uvicorn(
     pytest.importorskip("jinja2")
     pytest.importorskip("uvicorn")
     app = object()
+    redis = MagicMock(spec=Redis)
+    redis_context = MagicMock()
+    redis_context.__enter__.return_value = redis
     create_app = MagicMock(return_value=app)
     serve = MagicMock()
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", MagicMock(return_value=redis_context)
+    )
     monkeypatch.setattr("fallingwater.web.apirouter.create_app", create_app)
     monkeypatch.setattr("uvicorn.run", serve)
 
@@ -63,10 +82,13 @@ def test_web_command_passes_config_to_app_and_uvicorn(
         == 0
     )
 
-    create_app.assert_called_once_with(
-        redis_url="redis://example:6379/1", namespace="fw-test"
+    create_app.assert_called_once_with(namespace="fw-test", redis=redis)
+    serve.assert_called_once_with(
+        app,
+        host="0.0.0.0",
+        port=9000,
+        timeout_graceful_shutdown=3,
     )
-    serve.assert_called_once_with(app, host="0.0.0.0", port=9000)
 
 
 def test_chat_positional_conversation_and_short_options() -> None:
@@ -80,9 +102,14 @@ def test_chat_positional_conversation_and_short_options() -> None:
             "test",
             "--group",
             "web-user",
+            "-p",
+            "name=Alice",
+            "--param",
+            "message=hello=world",
         ]
     )
     assert args.conversation == "boring_wozniak"
+    assert args.params == ["name=Alice", "message=hello=world"]
     assert args.agent == "example:agent"
     assert args.model == "test"
     assert args.group == "web-user"
@@ -101,6 +128,7 @@ def test_chat_argument_defaults_come_from_environment(
     assert args.model == "openai:gpt-4o-mini"
     assert args.group == "user"
     assert args.msg is None
+    assert args.params == []
 
     explicit = build_parser().parse_args(
         [
@@ -149,6 +177,10 @@ def test_named_chat_passes_agent_and_model_to_chat(
                 "openai:gpt-4o-mini",
                 "--group",
                 "reader-one",
+                "-p",
+                "name=Alice",
+                "--param",
+                "region=eu-west",
             ]
         )
         == 0
@@ -161,6 +193,7 @@ def test_named_chat_passes_agent_and_model_to_chat(
         "agent_path": "fallingwater.demo:haiku_master",
         "model": "openai:gpt-4o-mini",
         "group": "reader-one",
+        "deps": {"name": "Alice", "region": "eu-west"},
     }
 
 
@@ -174,7 +207,9 @@ def test_chat_uses_agent_and_model_environment_defaults(
     monkeypatch.setattr(
         "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
     )
-    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "bright_turing")
+    monkeypatch.setattr(
+        "fallingwater.cli.generate_name", lambda: "bright_turing"
+    )
     chat_class = MagicMock()
     monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
 
@@ -186,6 +221,7 @@ def test_chat_uses_agent_and_model_environment_defaults(
         "agent_path": "fallingwater.demo:haiku_master",
         "model": "openai:gpt-4o-mini",
         "group": "user",
+        "deps": {},
     }
 
 
@@ -244,7 +280,8 @@ def test_cli_passes_resume_options_to_chat(
     )
 
     assert (
-        chat_class.call_args.kwargs["agent_path"] == "fallingwater.demo:missing_agent"
+        chat_class.call_args.kwargs["agent_path"]
+        == "fallingwater.demo:missing_agent"
     )
     assert chat_class.call_args.kwargs["model"] == "openai:another-model"
     chat.run.assert_called_once_with()
@@ -258,7 +295,9 @@ def test_chat_msg_sends_one_prompt_without_starting_terminal(
     monkeypatch.setattr(
         "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
     )
-    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "bright_turing")
+    monkeypatch.setattr(
+        "fallingwater.cli.generate_name", lambda: "bright_turing"
+    )
     chat = MagicMock(conversation_id="bright_turing")
     monkeypatch.setattr("fallingwater.cli.Chat", MagicMock(return_value=chat))
 
@@ -293,4 +332,6 @@ def test_reset_deletes_only_selected_namespace(
     redis.delete.assert_called_once_with(
         "fw-test:dispatch", "fw-test:conversation:abc:events"
     )
-    assert "Deleted 2 key(s) from namespace 'fw-test'." in capsys.readouterr().out
+    assert (
+        "Deleted 2 key(s) from namespace 'fw-test'." in capsys.readouterr().out
+    )

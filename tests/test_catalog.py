@@ -1,4 +1,6 @@
-"""Agent import paths are the integration point for client applications."""
+"""
+Agent import paths are the integration point for client applications.
+"""
 
 import sys
 from types import ModuleType
@@ -16,9 +18,13 @@ def test_load_existing_agent_from_both_path_forms() -> None:
     assert reify_agent("fallingwater.demo.haiku_master") is haiku_master
 
 
-def test_build_agent_from_application_function(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_agent_from_application_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     module = ModuleType("fallingwater_test_agents")
-    module.build = lambda: Agent.from_spec(AgentSpec.from_dict({"name": "test"}))
+    module.build = lambda: Agent.from_spec(
+        AgentSpec.from_dict({"name": "test"})
+    )
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     first = reify_agent("fallingwater_test_agents:build")

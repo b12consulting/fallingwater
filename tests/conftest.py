@@ -1,4 +1,6 @@
-"""Configure runtime type checks for tests."""
+"""
+Configure runtime type checks for tests.
+"""
 
 from typeguard import install_import_hook
 

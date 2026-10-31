@@ -57,6 +57,19 @@ When you resume a chat, it prints any answers or failures that arrived
 while the terminal was closed. This includes a response to a prompt sent
 just before exit.
 
+Use `fw ls` to list conversation IDs in the selected namespace. To inspect
+recent events, use `fw tail <id>`; it prints the latest ten events in stream
+order by default, without completed message history or usage. Set `-n` to
+change the number of events, or `--full` to include both. `fw dispatch` shows
+the latest ten dispatch entries and accepts the same `-n` option.
+
+```shell
+fw ls
+fw tail relaxed_euler -n 20
+fw tail relaxed_euler --full
+fw dispatch
+```
+
 For a single non-interactive turn, run `fw chat <id> --msg "Hello"`. The
 command waits for that turn's result, prints it to stdout, and exits. If
 you omit the ID, it starts a conversation and prints its new ID to stderr.
@@ -68,7 +81,8 @@ Any earlier unread results are also printed to stderr before the new turn.
 Install the web dependencies with `python -m pip install -e '.[web]'`, then
 start the API with `fw web`. It listens on `http://localhost:8000` by default.
 Open `http://localhost:8000/fw-api/monitor` for a read-only page that follows
-the recent conversation feed.
+the recent conversation feed. Add `?full=1` to include completed-turn history
+and usage in the page.
 
 To follow an existing conversation, replace `boring_wozniak` with its ID:
 
