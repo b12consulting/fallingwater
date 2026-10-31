@@ -5,23 +5,23 @@ Shared logging for Fallingwater.
 import logging
 import os
 
-import brotli
+import zstandard as zstd
 
 from fallingwater.catalog import reify_agent
 
 
 def compress(data: bytes) -> bytes:
     """
-    Compress data with Brotli quality 5 for conversation stream payloads.
+    Compress a conversation stream payload with Zstandard.
     """
-    return brotli.compress(data, quality=5)
+    return zstd.compress(data)
 
 
 def decompress(data: bytes) -> bytes:
     """
-    Decompress a Brotli payload from a conversation stream.
+    Decompress a Zstandard payload from a conversation stream.
     """
-    return brotli.decompress(data)
+    return zstd.decompress(data)
 
 
 def check_agent(agent_path: str, model: str | None) -> None:

@@ -1,6 +1,7 @@
 """Conversation event encoding and Redis key helpers."""
 
 import pytest
+import zstandard as zstd
 
 from fallingwater.stream_models import (
     ConversationCreatedPayload,
@@ -30,6 +31,11 @@ def test_conversation_event_round_trips_as_compressed_payload() -> None:
 
     assert encoded["type"] == Event.TURN_QUEUED.value
     assert isinstance(encoded["payload"], bytes)
+    assert zstd.ZstdDecompressor().decompress(encoded["payload"]) == (
+        TurnQueuedPayload(turn_id="turn-1", message="hello")
+        .model_dump_json()
+        .encode("utf-8")
+    )
 
     event = decode_conversation_event(
         {b"type": encoded["type"].encode(), b"payload": encoded["payload"]}

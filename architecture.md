@@ -73,7 +73,7 @@ names remain explicit on stream operations.
 | Dispatch, `fw:dispatch`                     | action type         | conversation, turn, step, call, or child IDs |
 
 Each conversation event payload has a Pydantic model selected by its `type`.
-The stream entry stores only the text event type and a Brotli level 5 compressed
+The stream entry stores only the text event type and a Zstandard-compressed
 JSON payload. `encode_conversation_event` compresses and validates payloads on
 writes; `decode_conversation_event` decompresses and validates them on reads.
 The dispatch stream stays text based because its action entries only carry
@@ -211,7 +211,7 @@ The library's `Chat.receive` and the web feed still use independent `XREAD` call
 
 Conversation stream entries contain exactly `type` and `payload`. The payload
 is JSON serialized from a Pydantic event payload model and compressed with
-Brotli quality 5 through the shared `compress` and `decompress` helpers in
+Zstandard through the shared `compress` and `decompress` helpers in
 `utils.py`. Redis clients use binary responses so compressed bytes remain
 intact; `ConversationStream` uses the event codec functions in `stream_utils.py` for
 compression, decompression, and model validation. Dispatch entries remain text
@@ -343,4 +343,4 @@ multi-stream reads.
 Zstandard-compressed file. Zstandard's stream writer and reader keep file I/O
 incremental. Restore validates each event and appends it to an empty conversation
 stream. Archive files use only `.jsonl.zst`; Redis conversation event payloads
-continue to use Brotli independently of the archive format.
+also use Zstandard, with a separate frame for each event.
