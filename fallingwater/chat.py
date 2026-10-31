@@ -1,6 +1,5 @@
 """Terminal and library workflows for Redis-backed conversations."""
 
-import sys
 from collections.abc import Iterator, Mapping
 from typing import cast
 from uuid import uuid4
@@ -112,12 +111,7 @@ class Chat:
         """Submit a new turn and wait for its result."""
         return self.receive(*self.send(prompt))
 
-    def _handle_group_event(
-        self,
-        event: ConversationStreamEvent,
-        *,
-        to_stderr: bool = False,
-    ) -> str | None:
+    def _handle_group_event(self, event: ConversationStreamEvent) -> str | None:
         event_type = event.type
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)
@@ -126,13 +120,12 @@ class Chat:
             return None
 
         if event_type in (Event.TURN_COMPLETED, Event.TURN_FAILED):
-            output = sys.stderr if to_stderr else sys.stdout
             if event_type == Event.TURN_COMPLETED:
                 completed = cast(TurnCompletedPayload, payload)
-                print(completed.message, file=output, flush=True)
+                print(completed.message)
             else:
                 failed = cast(TurnFailedPayload, payload)
-                print(f"Turn failed: {failed.error}", file=output, flush=True)
+                print(f"Turn failed: {failed.error}")
             self.stream.acknowledge(self.group, event.entry_id)
             return turn_id
 
@@ -143,7 +136,6 @@ class Chat:
         self,
         *,
         block: int | None = None,
-        to_stderr: bool = False,
     ) -> Iterator[str]:
         """Read pending entries, then new events, yielding completed turn IDs."""
         logger.debug("READ %s", self.events)
@@ -160,7 +152,7 @@ class Chat:
                 break
             for event in entries:
                 cursor = event.entry_id
-                turn_id = self._handle_group_event(event, to_stderr=to_stderr)
+                turn_id = self._handle_group_event(event)
                 if turn_id is not None:
                     completed_pending = True
                     yield turn_id
@@ -179,13 +171,13 @@ class Chat:
             if not entries:
                 return
             for event in entries:
-                turn_id = self._handle_group_event(event, to_stderr=to_stderr)
+                turn_id = self._handle_group_event(event)
                 if turn_id is not None:
                     yield turn_id
             if block is not None:
                 return
 
-    def _resume_group(self, *, to_stderr: bool = False) -> None:
+    def _resume_group(self) -> None:
         """Read available events before accepting another turn."""
         try:
             self.stream.create_group(self.group, id="0")
@@ -197,7 +189,7 @@ class Chat:
                 self.group,
                 self.events,
             )
-        for _ in self.read(to_stderr=to_stderr):
+        for _ in self.read():
             pass
 
     def _send_and_wait(self, prompt: str) -> None:
@@ -212,7 +204,7 @@ class Chat:
 
     def run_once(self, prompt: str) -> None:
         """Print the result of one prompt and return without opening a terminal."""
-        self._resume_group(to_stderr=True)
+        self._resume_group()
         self._send_and_wait(prompt)
 
     def run(self) -> None:
