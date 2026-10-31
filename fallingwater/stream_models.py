@@ -66,6 +66,7 @@ class SubAgentResultAction(_DispatchAction):
     tool_call_id: str = Field(min_length=1)
     child_conversation_id: str = Field(min_length=1)
     child_turn_id: str = Field(min_length=1)
+    child_terminal_event_id: str = Field(min_length=1)
 
 
 DispatchAction: TypeAlias = Annotated[

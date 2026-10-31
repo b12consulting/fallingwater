@@ -293,6 +293,9 @@ the shared conversation event decoder.
 function tools and returns their requests to `Worker`. The worker stores each
 request and dispatches each call independently. Results are stored by call ID;
 the last unique result schedules the next agent run with `DeferredToolResults`.
+The reconstructed turn records its last event ID. Result fan-in checks only
+events written after that snapshot, then checks the new tail after saving its
+result to include sibling results that arrived during the write.
 Synchronous and asynchronous function tools are supported; deferred requests
 and results must be JSON serializable. `agent_proxy.execute_tool` resolves the
 attached callable, decodes arguments, and rebuilds basic `RunContext` fields
@@ -315,8 +318,12 @@ replaying the original action does not repair every such partial write.
 Nested agent work uses its own conversation stream. A tool may return the
 public `SubAgentRequest` model with an agent import path, prompt, optional
 model, and JSON dependencies. The worker persists parent correlation and queues
-the child with successive writes; it does not wait for the child. Child completion
-or failure queues a parent-result action. Child IDs are deterministic for the
+the child with successive writes: child `conversation.created`, child
+`turn.queued`, parent `turn.subagent.requested`, then child
+`conversation.poke`. The child stream can reconstruct the parent request once
+its queued turn is saved. The worker does not wait for the child. Child completion
+or failure queues a parent-result action carrying the child's terminal event
+ID, which lets the parent read that event directly. Child IDs are deterministic for the
 parent tool call, so retries reuse the same child. A child failure fails its
 parent, and late sibling results are ignored after a terminal event. No worker
 capacity is reserved while child work runs.
@@ -328,8 +335,8 @@ action decoding, reads, claims, acknowledgements, and action writes through
 `append_event`. Its
 `conversation_stream(id)` factory creates a `ConversationStream` bound to one
 conversation. That object handles typed event encoding and decoding,
-conversation reads and reader groups, and paginated event iteration for turn
-reconstruction and child-result lookup. Related writes to conversation and
+conversation reads and reader groups, and paginated event iteration from an
+optional exclusive Redis ID. Related writes to conversation and
 dispatch streams are issued separately, without a Redis transaction or an
 agent-run lock. Conversation events are written through the bound stream's
 `append_event` method.
@@ -344,6 +351,9 @@ policy. `Worker` routes child-result actions before loading an agent because
 those actions use only saved stream state. The CLI inspection commands and web
 SSE feeds keep their read-only query patterns, which include scans and
 multi-stream reads.
+
+`recovery.py` currently contains only a no-op `recover()` and a checklist for
+future reconciliation of partial writes. It does not repair streams yet.
 
 ## AD15 — Conversation archive files
 

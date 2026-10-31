@@ -43,9 +43,9 @@ revisited. Close or revise an item when the code resolves it.
   does not cover retries or long-running tools.
 - **R6 — Child results beyond the first page (closed).**
   `ConversationStream.iter_events()` advances through Redis range
-  pages with an exclusive entry-ID cursor. Both turn reconstruction
-  and child-result lookup consume the iterator, so a terminal child
-  event after the first page can resume its parent.
+  pages with an exclusive entry-ID cursor for turn reconstruction.
+  Child-result actions now carry the exact terminal event ID, so the
+  parent reads that event directly regardless of stream length.
 - **R7 — Unbounded tool or child-agent chains (open).** Each deferred
   step schedules another independent action, and the current worker
   has no limit on tool rounds or child-agent depth. An agent that
@@ -539,9 +539,23 @@ revisited. Close or revise an item when the code resolves it.
   `SubAgentRequestedPayload` `child_conversation_id` rather than the
   ambiguous `conversation_id`. `ParentToolReference.conversation_id`
   continues to identify the parent. This changes the serialized field
-  directly; no legacy format is supported before production. It does
-  not fix partial child creation: after the parent request event alone,
-  the child agent, model, dependencies, and prompt are missing; after
-  child creation but before `turn.queued`, the prompt is still missing.
-  Once the child queued event exists, a missing dispatch poke can be
-  reconstructed from the child stream.
+  directly; no legacy format is supported before production. The
+  rename alone does not repair partial child creation; see D70.
+- **D70 — Recovery checklist and child write order (decided).** Add a
+  no-op `recover()` in `recovery.py` with the reconciliation work listed
+  in comments. No recovery command is implemented yet. Write child
+  `conversation.created`, child `turn.queued`, parent
+  `turn.subagent.requested`, then child `conversation.poke`.
+  After the child turn is queued, its stream has the configuration,
+  prompt, turn ID, and parent reference needed to repair later writes.
+  A crash after only `conversation.created` still needs safe rollback
+  (for example XDEL of a proven orphan) and replay of the parent tool
+  action; reordering alone cannot make every prefix forward-recoverable.
+- **D71 — Cursor-based result fan-in (decided).** Keep the last conversation
+  event ID in reconstructed turn state. When saving a tool result, combine
+  the reconstructed results with only events written after that ID, then
+  scan the short tail again after the append to include concurrent sibling
+  results. Child-result actions carry the child's terminal event ID so their
+  parent can read that event directly. This reduces repeated full-stream
+  scans; the separate reads and writes still permit duplicate results or
+  resume actions under concurrent workers.

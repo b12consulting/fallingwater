@@ -31,9 +31,9 @@ turn.tool.requested <-----------------------------------------------------------
                                                                                    Get SubAgentRequest
                                                                                    Create child work
                                                                                    (successive writes)
-turn.subagent.requested <----------------------------------------------------------+  |
-                           conversation.created <------------------------------------+
+                           conversation.created <------------------------------------+  |
                            turn.queued <---------------------------------------------+
+turn.subagent.requested <----------------------------------------------------------+
                                                       conversation.poke [child] <----+
                                                       turn.tool.call <------------- Acknowledge action
 
@@ -67,25 +67,30 @@ A subagent request starts as an ordinary deferred tool call. When a worker
 executes the tool and receives a `SubAgentRequest`, it writes four entries
 in order:
 
-1. Parent: `turn.subagent.requested`, containing the child conversation and
-   turn IDs, together with the parent turn, step, and tool-call IDs.
-2. Child: `conversation.created`, containing its agent, model, dependencies,
+1. Child: `conversation.created`, containing its agent, model, dependencies,
    and a reference back to the parent tool call.
-3. Child: `turn.queued`, containing its prompt and turn ID.
+2. Child: `turn.queued`, containing its prompt and turn ID.
+3. Parent: `turn.subagent.requested`, containing the child conversation and
+   turn IDs, together with the parent turn, step, and tool-call IDs.
 4. Dispatch: `conversation.poke`, targeting the child conversation and turn.
 
 The worker acknowledges the parent tool action and becomes available for
 other work. No worker stays blocked waiting for the child. Child IDs are
 deterministic for the parent tool call. A recovered action skips a saved
 subagent request, but concurrent workers can still create duplicate child work.
+If the worker stops after only `conversation.created`, the child prompt is not
+saved and that orphan needs cleanup before the parent tool action is replayed.
+Once `turn.queued` is saved, recovery can reconstruct a missing parent request
+from the child's parent reference and queued turn, then add a missing poke.
 
 Another available worker, or the same worker on a later action, runs the child.
 The child can use tools and request further subagents through the same flow.
 When it completes, its `turn.completed` event and the parent-directed
 `turn.subagent.result` dispatch action are separate writes.
 
-The `turn.subagent.result` action contains routing identifiers. Its receiving
-worker reads the child's terminal event and records the child's answer message
+The `turn.subagent.result` action contains routing identifiers and the child's
+terminal event ID. Its receiving worker reads that event directly and records
+the child's answer message
 as a `turn.tool.result` in the parent conversation. The child's full message
 history and usage stay in the child stream.
 

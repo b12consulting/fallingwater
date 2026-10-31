@@ -31,6 +31,7 @@ from .stream_utils import (
     fmt_dispatch_stream,
 )
 from .utils import logger
+from .turn_state import Conversation
 
 
 GroupEntry = TypeVar("GroupEntry")
@@ -172,12 +173,12 @@ class ConversationStream:
         ]
 
     def iter_events(
-        self, *, page_size: int = 100
+        self, *, after_id: str = "0-0", page_size: int = 100
     ) -> Iterator[ConversationStreamEvent]:
-        """Yield all conversation events across successive Redis range pages."""
+        """Yield conversation events after an ID across Redis range pages."""
         if page_size < 1:
             raise ValueError("page_size must be positive")
-        cursor = "-"
+        cursor = f"({after_id}"
         while entries := self.read_conversation_range(
             min=cursor, count=page_size
         ):
@@ -270,7 +271,7 @@ class ConversationStream:
             step_id=parent_request.step_id,
             tool_call_id=parent_request.tool_call_id,
         )
-        self.append_event(Event.TURN_SUBAGENT_REQUESTED, parent_request)
+        # A queued child can reconstruct its parent request during recovery.
         child_stream.append_event(
             Event.CONVERSATION_CREATED,
             ConversationCreatedPayload(
@@ -287,6 +288,7 @@ class ConversationStream:
                 message=child_prompt,
             ),
         )
+        self.append_event(Event.TURN_SUBAGENT_REQUESTED, parent_request)
         self.dispatch.append_event(
             Action.CONVERSATION_POKE,
             conversation_id=parent_request.child_conversation_id,
@@ -298,6 +300,7 @@ class ConversationStream:
         self,
         payload: ToolResultPayload,
         expected_call_ids: list[str],
+        conversation: Conversation,
     ) -> bool:
         """Save a unique call result and queue one resume after the final result."""
         expected = set(expected_call_ids)
@@ -306,34 +309,45 @@ class ConversationStream:
                 "tool result is not part of the deferred request set"
             )
 
-        prior_results: set[str] = set()
-        request_found = False
-        for event in self.iter_events():
+        if (
+            conversation.current_turn_id != payload.turn_id
+            or conversation.tool_step_id != payload.step_id
+            or conversation.tool_requests is None
+        ):
+            raise ValueError("tool result has no matching request step")
+        if conversation.completed or conversation.failed is not None:
+            return False
+
+        prior_results = set(conversation.tool_results)
+        if payload.tool_call_id in prior_results:
+            return False
+        cursor = conversation.last_event_id
+        for event in self.iter_events(after_id=cursor):
+            cursor = event.entry_id
             if getattr(event.payload, "turn_id", None) != payload.turn_id:
                 continue
-            if event.type == Event.TURN_TOOL_REQUESTED:
-                if event.payload.step_id == payload.step_id:
-                    request_found = True
-            elif event.type == Event.TURN_TOOL_RESULT:
+            if event.type == Event.TURN_TOOL_RESULT:
                 if event.payload.step_id == payload.step_id:
                     prior_results.add(event.payload.tool_call_id)
             elif event.type in (Event.TURN_COMPLETED, Event.TURN_FAILED):
                 return False
+            elif event.type == Event.TURN_TOOL_REQUESTED:
+                return False
 
         if payload.tool_call_id in prior_results:
             return False
-        if not request_found:
-            raise ValueError("tool result has no matching request step")
 
         self.append_event(Event.TURN_TOOL_RESULT, payload)
-        result_ids = {
-            event.payload.tool_call_id
-            for event in self.iter_events()
-            if event.type == Event.TURN_TOOL_RESULT
-            and event.payload.turn_id == payload.turn_id
-            and event.payload.step_id == payload.step_id
-        }
-        if expected <= result_ids:
+        prior_results.add(payload.tool_call_id)
+        for event in self.iter_events(after_id=cursor):
+            if (
+                event.type == Event.TURN_TOOL_RESULT
+                and event.payload.turn_id == payload.turn_id
+                and event.payload.step_id == payload.step_id
+            ):
+                prior_results.add(event.payload.tool_call_id)
+        # All requested results are available; resume the agent.
+        if expected <= prior_results:
             self.dispatch.append_event(
                 Action.AGENT_RESUME,
                 conversation_id=self.conversation_id,
@@ -350,7 +364,7 @@ class ConversationStream:
         parent: ParentToolReference | None,
     ) -> bool:
         """Persist a terminal event and notify its parent."""
-        self.append_event(event_type, payload)
+        terminal_id = self.append_event(event_type, payload)
         if parent is not None:
             self.dispatch.append_event(
                 Action.SUBAGENT_RESULT,
@@ -360,6 +374,7 @@ class ConversationStream:
                 tool_call_id=parent.tool_call_id,
                 child_conversation_id=self.conversation_id,
                 child_turn_id=payload.turn_id,
+                child_terminal_event_id=terminal_id,
             )
         return True
 

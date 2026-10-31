@@ -13,6 +13,7 @@ from fallingwater.stream_models import (
     ConversationStreamEvent,
     Action,
     Event,
+    SubAgentRequestedPayload,
     ToolRequestedPayload,
     TurnQueuedPayload,
 )
@@ -84,6 +85,45 @@ def test_queue_tool_requests_rejects_empty_set_without_writing() -> None:
         conversation.queue_tool_requests(payload, [])
 
     redis.xadd.assert_not_called()
+
+
+def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xadd.return_value = b"1-0"
+    parent = DispatchStream(redis).conversation_stream("parent")
+    request = SubAgentRequestedPayload(
+        turn_id="parent-turn",
+        step_id="step-1",
+        tool_call_id="call-1",
+        child_conversation_id="child",
+        child_turn_id="child-turn",
+    )
+
+    assert parent.queue_subagent(
+        parent_request=request,
+        child_agent="example:child",
+        child_model="test",
+        child_deps={},
+        child_prompt="hello",
+    )
+
+    calls = redis.xadd.call_args_list
+    assert [call.args[0] for call in calls] == [
+        "fw:conversation:child:events",
+        "fw:conversation:child:events",
+        "fw:conversation:parent:events",
+        "fw:dispatch",
+    ]
+    assert [decode_conversation_event(call.args[1]).type for call in calls[:3]] == [
+        Event.CONVERSATION_CREATED,
+        Event.TURN_QUEUED,
+        Event.TURN_SUBAGENT_REQUESTED,
+    ]
+    assert calls[-1].args[1] == {
+        "conversation_id": "child",
+        "turn_id": "child-turn",
+        "type": Action.CONVERSATION_POKE,
+    }
 
 
 def test_group_operations_keep_stream_group_and_consumer_explicit() -> None:

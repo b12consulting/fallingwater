@@ -236,6 +236,7 @@ class Worker:
                 result=result,
             ),
             self._call_ids(requests),
+            conversation,
         )
         return True
 
@@ -252,7 +253,11 @@ class Worker:
             child_conversation_id
         )
         child_terminal: TurnCompletedPayload | TurnFailedPayload | None = None
-        for event in child_stream.iter_events():
+        for event in child_stream.read_conversation_range(
+            min=action.child_terminal_event_id, count=1
+        ):
+            if event.entry_id != action.child_terminal_event_id:
+                break
             if getattr(event.payload, "turn_id", None) != child_turn_id:
                 continue
             if event.type == Event.TURN_COMPLETED:
@@ -295,6 +300,7 @@ class Worker:
                 result=child_terminal.message,
             ),
             self._call_ids(requests),
+            conversation,
         )
         return True
 

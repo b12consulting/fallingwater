@@ -41,6 +41,7 @@ class Conversation(BaseModel):
     parent: ParentToolReference | None = None
     completed: bool = False
     failed: TurnFailedPayload | None = None
+    last_event_id: str
 
 
 def reconstruct_turn(
@@ -65,8 +66,10 @@ def reconstruct_turn(
     completed = False
     failed: TurnFailedPayload | None = None
     queued = False
+    last_event_id = "0-0"
 
     for event in events:
+        last_event_id = event.entry_id
         if event.type == Event.CONVERSATION_CREATED:
             created = cast(ConversationCreatedPayload, event.payload)
             agent_path = created.agent
@@ -140,4 +143,5 @@ def reconstruct_turn(
         parent=parent,
         completed=completed,
         failed=failed,
+        last_event_id=last_event_id,
     )

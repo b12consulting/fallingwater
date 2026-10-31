@@ -25,12 +25,12 @@ success: Successful child turn {
   dispatch -> workers: Claim turn.tool.call
   workers -> workers: Execute parent tool and get SubAgentRequest
   create_child: "Create child work with successive writes" {
-    workers -> parent: Save child request
-    parent.subagent_requested: turn.subagent.requested
     workers -> child: Create child conversation
     child.created: conversation.created
     workers -> child: Queue child turn
     child.queued: turn.queued
+    workers -> parent: Save child request
+    parent.subagent_requested: turn.subagent.requested
     workers -> dispatch: Queue child action
     dispatch.child_poke: "conversation.poke [child]"
   }

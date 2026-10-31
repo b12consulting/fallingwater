@@ -354,6 +354,18 @@ def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
         return entry_id
 
     monkeypatch.setattr(stream, "append_event", append_with_sibling)
+    conversation = reconstruct_turn(
+        stream.iter_events(), "turn-1", conversation_stream=stream.name
+    )
+    assert conversation.last_event_id == "3-0"
+    iter_events = stream.iter_events
+    after_ids: list[str] = []
+
+    def tracked_events(*, after_id="0-0", page_size=100):
+        after_ids.append(after_id)
+        yield from iter_events(after_id=after_id, page_size=page_size)
+
+    monkeypatch.setattr(stream, "iter_events", tracked_events)
 
     assert stream.save_tool_result(
         ToolResultPayload(
@@ -363,7 +375,9 @@ def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
             result="first",
         ),
         ["call-1", "call-2"],
+        conversation,
     )
+    assert after_ids == ["3-0", "3-0"]
     assert [entry["type"] for entry in _dispatch(redis)] == [
         Action.AGENT_RESUME
     ]
@@ -447,6 +461,12 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
     assert child_events[-1].type == Event.TURN_COMPLETED
     parent_notify = _dispatch(redis)[-1]
     assert parent_notify["type"] == Action.SUBAGENT_RESULT
+    child_entries = redis.xrange(
+        worker.dsp_stream.conversation_stream(
+            subagent.child_conversation_id
+        ).name
+    )
+    assert parent_notify["child_terminal_event_id"] == child_entries[-1][0]
 
     assert _process(worker, parent_notify)
     resume = _dispatch(redis)[-1]
