@@ -73,7 +73,7 @@ fw dispatch
 For a single non-interactive turn, run `fw chat <id> --msg "Hello"`. The
 command waits for that turn's result, prints it to stdout, and exits. If
 you omit the ID, it starts a conversation and prints its new ID to stderr.
-Any earlier unread results are also printed to stderr before the new turn.
+Any earlier unread results are printed to stdout before the new turn's result.
 
 
 ## Web

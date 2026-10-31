@@ -128,6 +128,9 @@ def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     assert created.type == Event.CONVERSATION_CREATED
     assert created.payload.agent == "pydantic_ai:Agent"
     assert created.payload.model == "test"
+    redis.xgroup_create.assert_called_once_with(
+        "fw:conversation:test:events", "user", id="0"
+    )
 
 
 def test_receive_reads_completed_message() -> None:
@@ -321,6 +324,36 @@ def test_cli_group_replays_pending_failure(monkeypatch, capsys) -> None:
     redis.xack.assert_any_call(stream, "user", "3-0")
 
 
+def test_read_keeps_new_event_cursor_across_calls(capsys) -> None:
+    redis = MagicMock(spec=Redis)
+    stream = "fw:conversation:abc:events"
+    redis.xreadgroup.side_effect = [
+        [(stream, [("2-0", _queued("old"))])],
+        [(stream, [])],
+        [(stream, [])],
+        [(stream, [("3-0", _completed("new", "answer"))])],
+    ]
+    chat = _empty_chat(redis)
+
+    assert chat.cursor == "0"
+    assert list(chat.read(ffwd=True)) == []
+    assert chat.cursor == ">"
+    assert list(chat.read()) == ["new"]
+    assert capsys.readouterr().out == "answer\n"
+    assert [call.args[2] for call in redis.xreadgroup.call_args_list] == [
+        {stream: "0"},
+        {stream: "2-0"},
+        {stream: ">"},
+        {stream: ">"},
+    ]
+    assert [call.kwargs["block"] for call in redis.xreadgroup.call_args_list] == [
+        None,
+        None,
+        None,
+        1000,
+    ]
+
+
 def test_run_once_prints_its_response_and_acknowledges_it(
     monkeypatch, capsys
 ) -> None:
@@ -352,7 +385,7 @@ def test_run_once_prints_its_response_and_acknowledges_it(
     redis.xack.assert_any_call(stream, "user", "3-0")
 
 
-def test_run_once_keeps_prior_answers_out_of_stdout(
+def test_run_once_prints_prior_answers_before_new_answer(
     monkeypatch, capsys
 ) -> None:
     redis = MagicMock(spec=Redis)
@@ -386,8 +419,8 @@ def test_run_once_keeps_prior_answers_out_of_stdout(
     chat.run_once("Hello again")
 
     output = capsys.readouterr()
-    assert output.out == "new answer\n"
-    assert output.err == "earlier answer\n"
+    assert output.out == "earlier answer\nnew answer\n"
+    assert output.err == ""
     redis.xack.assert_any_call(stream, "user", "2-0")
     redis.xack.assert_any_call(stream, "user", "3-0")
     redis.xack.assert_any_call(stream, "user", "4-0")

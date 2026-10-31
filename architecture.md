@@ -189,22 +189,26 @@ cleanup.
 
 ## AD8 — CLI reader groups
 
-`Chat.run` and `Chat.run_once` use a consumer group on the conversation stream,
-starting at ID `0`. The default group is `user`; `fw chat --group` selects
-another. They use the stable consumer name `terminal` so a later CLI process
-can read entries left pending by an interrupted session. On startup it reads
-pending entries with `XREADGROUP` at `0`, then reads new entries with `>`.
+`Chat` creates or reuses a consumer group on the conversation stream during
+initialization, starting at ID `0`. The default group is `user`;
+`fw chat --group` selects another. Terminal reads use the stable consumer name
+`terminal` so a later CLI process can read entries left pending by an
+interrupted session. Each `Chat` starts with a reader cursor at `0`, advances
+through pending entries, and switches to `>` when the pending read is empty.
+Later reads on that instance stay on `>`.
 
 The CLI acknowledges `conversation.created`, `turn.queued`, and unrecognized
 events as it reads them. It prints each `turn.completed` or `turn.failed` event
 before acknowledging it, so a terminal exit between printing and acknowledgement
 can cause the result to be printed again. A single `Chat.read` method reads
-pending entries for the stable consumer, then new entries. On startup it handles
+pending entries for the stable consumer, then new entries. With `ffwd=True`, it
+handles all available events without blocking; normal reads wait up to one
+second for new events and return after a batch. On startup it handles
 events that are available and returns without waiting for queued turns whose
 results have not arrived; a new prompt can therefore overlap such a turn. Each
 group represents one logical terminal reader. In one-shot mode, `--msg` prints
-the new turn's result to stdout and earlier results read during startup catch-up
-to stderr. Results that arrive after the new prompt is queued use normal output.
+earlier results read during startup catch-up and the new turn's result to stdout.
+Results that arrive after the new prompt is queued use the same output.
 The library's `Chat.receive` and the web feed still use independent `XREAD` calls.
 
 ## AD9 — Compressed conversation payloads
