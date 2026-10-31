@@ -8,7 +8,6 @@ from uuid import uuid4
 from redis import Redis
 from redis.exceptions import ResponseError
 
-from .catalog import reify_agent
 from .stream import DispatchStream
 from .stream_models import (
     ConversationCreatedPayload,
@@ -18,7 +17,7 @@ from .stream_models import (
     TurnFailedPayload,
     TurnQueuedPayload,
 )
-from .utils import logger
+from .utils import logger, check_agent
 
 
 class Chat:
@@ -67,7 +66,7 @@ class Chat:
             self.agent_path = agent_path
             self.model = model or ""
 
-        self._check_agent()
+        check_agent(self.agent_path, self.model)
         if not record:
             self.stream.append_event(
                 Event.CONVERSATION_CREATED,
@@ -77,26 +76,6 @@ class Chat:
                     deps=dict(deps or {}),
                 ),
             )
-
-    def _check_agent(self) -> None:
-        """Validate the effective agent and model before using the chat."""
-        try:
-            agent = reify_agent(self.agent_path)
-        except Exception as error:
-            logger.debug(
-                "Could not instantiate agent %s", self.agent_path, exc_info=True
-            )
-            raise ValueError(
-                f"cannot instantiate agent {self.agent_path!r}: {error}"
-            ) from error
-        if self.model or agent.model is not None:
-            return
-        if agent._root_capability.get_model() is not None:
-            return
-        raise ValueError(
-            f"agent {self.agent_path!r} has no model; "
-            "pass --model or configure one on the agent"
-        )
 
     def send(self, prompt: str) -> tuple[str, str]:
         """Queue a prompt as a new turn and return its ID and event cursor."""
