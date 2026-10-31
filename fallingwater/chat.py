@@ -39,6 +39,7 @@ class Chat:
         if not group:
             raise ValueError("chat group must be nonempty")
         self.group = group
+        self.cursor = "0"
         self.conversation_id = conversation_id or str(uuid4())
         self.stream = DispatchStream(
             redis, namespace=namespace
@@ -74,6 +75,20 @@ class Chat:
                     model=self.model,
                     deps=dict(deps or {}),
                 ),
+            )
+        self._create_group()
+
+    def _create_group(self) -> None:
+        """Ensure the terminal reader group exists for this conversation."""
+        try:
+            self.stream.create_group(self.group, id="0")
+        except ResponseError as error:
+            if not str(error).startswith("BUSYGROUP"):
+                raise
+            logger.debug(
+                "Consumer group %s already exists on %s",
+                self.group,
+                self.events,
             )
 
     def send(self, prompt: str) -> tuple[str, str]:
@@ -132,71 +147,52 @@ class Chat:
         self.stream.acknowledge(self.group, event.entry_id)
         return None
 
-    def read(
-        self,
-        *,
-        block: int | None = None,
-    ) -> Iterator[str]:
-        """Read pending entries, then new events, yielding completed turn IDs."""
+    def read(self, *, ffwd: bool = False) -> Iterator[str]:
+        """Yield completed turn IDs, draining available events when ffwd is true."""
         logger.debug("READ %s", self.events)
-        cursor = "0"
         completed_pending = False
+        block = 1000
         while True:
+            # Consume Stream
+            pending = self.cursor != ">"
             entries = self.stream.read_group(
                 self.group,
                 self.consumer,
-                cursor,
+                self.cursor,
                 count=100,
+                block=None if pending or ffwd else block,
             )
+            # handle empty result
             if not entries:
-                break
+                if not pending:
+                    # Pre-existing entries are drained
+                    return
+                if not ffwd and completed_pending:
+                    return
+                self.cursor = ">"
+                continue
+
+            # process events
             for event in entries:
-                cursor = event.entry_id
                 turn_id = self._handle_group_event(event)
+                if pending:
+                    self.cursor = event.entry_id
                 if turn_id is not None:
                     completed_pending = True
                     yield turn_id
-
-        if block is not None and completed_pending:
-            return
-
-        while True:
-            entries = self.stream.read_group(
-                self.group,
-                self.consumer,
-                ">",
-                count=100,
-                block=block,
-            )
-            if not entries:
-                return
-            for event in entries:
-                turn_id = self._handle_group_event(event)
-                if turn_id is not None:
-                    yield turn_id
-            if block is not None:
+            if not ffwd and not pending:
                 return
 
     def _resume_group(self) -> None:
         """Read available events before accepting another turn."""
-        try:
-            self.stream.create_group(self.group, id="0")
-        except ResponseError as error:
-            if not str(error).startswith("BUSYGROUP"):
-                raise
-            logger.debug(
-                "Consumer group %s already exists on %s",
-                self.group,
-                self.events,
-            )
-        for _ in self.read():
+        for _ in self.read(ffwd=True):
             pass
 
     def _send_and_wait(self, prompt: str) -> None:
         turn_id, _ = self.send(prompt)
         while True:
             completed = False
-            for completed_turn_id in self.read(block=1000):
+            for completed_turn_id in self.read():
                 if completed_turn_id == turn_id:
                     completed = True
             if completed:
