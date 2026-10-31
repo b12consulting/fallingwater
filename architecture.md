@@ -336,3 +336,11 @@ policy. `Worker` routes child-result actions before loading an agent because
 those actions use only saved stream state. The CLI inspection commands and web
 SSE feeds keep their read-only query patterns, which include scans and
 multi-stream reads.
+
+## AD15 — Conversation archive files
+
+`archive.py` writes conversation events as newline-delimited Pydantic JSON in a
+Zstandard-compressed file. Zstandard's stream writer and reader keep file I/O
+incremental. Restore validates each event and appends it to an empty conversation
+stream. Archive files use only `.jsonl.zst`; Redis conversation event payloads
+continue to use Brotli independently of the archive format.

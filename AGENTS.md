@@ -43,9 +43,10 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
 |   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
+|   |-- archive.py            Conversation archive export and restore
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
-|   |-- cli.py                argparse CLI for workers, chat, web, and reset
+|   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- stream.py             Dispatch and conversation streams and run leases
 |   |-- stream_models.py      Conversation event and dispatch action schemas
@@ -65,6 +66,7 @@ This is the quick-start guide for agents working in this repository. See
 `-- tests/                    Pytest tests; conftest enables Typeguard
     |-- conftest.py           Typeguard import hook
     |-- test_agent_proxy.py   Single-call deferred agent checks
+    |-- test_archive.py       Zstandard archive export and restore checks
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks

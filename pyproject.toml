@@ -12,6 +12,7 @@ dependencies = [
   "pydantic-ai-slim>=2.54,<3",
   "redis>=8",
   "PyYAML>=6,<7",
+  "zstandard>=0.23,<1",
 ]
 
 [project.optional-dependencies]
