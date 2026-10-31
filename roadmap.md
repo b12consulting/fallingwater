@@ -5,6 +5,14 @@ Fallingwater, including developers integrating the library. Each milestone
 states what is available, what remains, and what completion means. Technical
 implementation choices and concerns belong in `raid.md`.
 
+## Development principle
+
+The library architecture is still evolving. Prioritize concrete workflows and
+keep public behavior minimal. Defer advanced behavioral guarantees, such as
+submission deduplication, retry semantics, strict ordering, and conversation
+lifecycle rules, until a demonstrated use case requires them. Record deferred
+choices and their reasons in `raid.md` without implementing them speculatively.
+
 ## 0. Repository setup — complete
 
 ### Available

@@ -3,7 +3,7 @@
 import sys
 from collections.abc import Iterator, Mapping
 from typing import cast
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -98,42 +98,12 @@ class Chat:
             "pass --model or configure one on the agent"
         )
 
-    def _queued_cursor(self, turn_id: str, prompt: str) -> str | None:
-        """Find an existing queued turn for an idempotent delegated request."""
-        for event in self.stream.iter_events():
-            if event.type != EventType.TURN_QUEUED:
-                continue
-            queued = cast(TurnQueuedPayload, event.payload)
-            if queued.turn_id != turn_id:
-                continue
-            if queued.message != prompt:
-                raise ValueError(
-                    f"turn ID {turn_id!r} is already queued with another prompt"
-                )
-            return event.entry_id
-        return None
-
-    def _queue(
-        self, prompt: str, turn_id: str, *, reuse_turn_id: bool
-    ) -> tuple[str, str]:
-        """Queue a prompt using a generated or stable turn ID."""
-        if reuse_turn_id:
-            queued_cursor = self._queued_cursor(turn_id, prompt)
-            if queued_cursor is not None:
-                return turn_id, queued_cursor
+    def send(self, prompt: str) -> tuple[str, str]:
+        """Queue a prompt as a new turn and return its ID and event cursor."""
+        turn_id = str(uuid4())
         logger.debug("SEND (stream: %s): %.20s", self.events, prompt)
         queued_id = self.stream.queue_turn(turn_id, prompt)
         return turn_id, queued_id
-
-    def send(
-        self, prompt: str, *, turn_id: str | None = None
-    ) -> tuple[str, str]:
-        """Queue a prompt, optionally reusing an existing turn ID."""
-        reuse_turn_id = turn_id is not None
-        if reuse_turn_id and not turn_id:
-            raise ValueError("turn ID must be nonempty")
-        turn_id = turn_id or str(uuid4())
-        return self._queue(prompt, turn_id, reuse_turn_id=reuse_turn_id)
 
     def receive(self, turn_id: str, cursor: str) -> str:
         """Wait for this turn's result without joining the worker group."""
@@ -159,24 +129,9 @@ class Chat:
                     failed = cast(TurnFailedPayload, event.payload)
                     raise RuntimeError(failed.error)
 
-    def ask(self, prompt: str, *, idempotency_key: str | None = None) -> str:
-        """Submit or resume one turn, optionally using a stable idempotency key."""
-        if idempotency_key is None:
-            turn_id = str(uuid4())
-            reuse_turn_id = False
-        else:
-            if not idempotency_key:
-                raise ValueError("idempotency key must be nonempty")
-            turn_id = str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"fallingwater:{self.conversation_id}:ask:{idempotency_key}",
-                )
-            )
-            reuse_turn_id = True
-        return self.receive(
-            *self._queue(prompt, turn_id, reuse_turn_id=reuse_turn_id)
-        )
+    def ask(self, prompt: str) -> str:
+        """Submit a new turn and wait for its result."""
+        return self.receive(*self.send(prompt))
 
     def _handle_group_event(
         self,

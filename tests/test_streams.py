@@ -5,12 +5,14 @@ import pytest
 from fallingwater.stream_utils import (
     ConversationCreatedPayload,
     EventType,
+    InvalidDispatchAction,
     ToolRequestedPayload,
     ToolResultPayload,
     TurnQueuedPayload,
     decode_conversation_entry,
     decode_conversation_event,
     decode_dispatch_fields,
+    decode_dispatch_action,
     encode_conversation_event,
     fmt_conversation_stream,
     fmt_dispatch_stream,
@@ -78,6 +80,17 @@ def test_dispatch_fields_decode_text_without_compression() -> None:
     assert decode_dispatch_fields(
         {b"type": b"conversation.poke", b"conversation_id": b"abc"}
     ) == {"type": "conversation.poke", "conversation_id": "abc"}
+
+
+def test_dispatch_action_without_type_is_invalid() -> None:
+    fields = {b"conversation_id": b"abc", b"turn_id": b"turn-1"}
+
+    action = decode_dispatch_action(b"2-0", fields)
+
+    assert isinstance(action, InvalidDispatchAction)
+    assert action.entry_id == "2-0"
+    assert action.fields == fields
+    assert "type" in action.error
 
 
 def test_stream_name_helpers_validate_components() -> None:

@@ -221,6 +221,51 @@ def _dispatch(redis: MemoryRedis):
     return [fields for _, fields in redis.streams.get("fw:dispatch", [])]
 
 
+def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
+    history = _messages("previous prompt")
+    previous_usage = RunUsage(requests=4, input_tokens=100)
+    redis = MemoryRedis(
+        [
+            *_base_entries(),
+            _entry(
+                "3-0",
+                EventType.TURN_COMPLETED,
+                TurnCompletedPayload(
+                    turn_id="turn-1",
+                    message="previous answer",
+                    history=ModelMessagesTypeAdapter.dump_python(
+                        history, mode="json"
+                    ),
+                    usage=previous_usage,
+                ),
+            ),
+            _entry(
+                "4-0",
+                EventType.TURN_QUEUED,
+                TurnQueuedPayload(turn_id="turn-2", message="next prompt"),
+            ),
+        ]
+    )
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    conversation = reconstruct_turn(
+        stream.iter_events(), "turn-2", conversation_stream=stream.name
+    )
+    assert conversation.history == history
+    assert conversation.usage == previous_usage
+
+    current_usage = RunUsage(requests=5, input_tokens=120)
+    request = _tool_request(
+        [ToolCallPart("multiply", {"left": 2, "right": 3}, tool_call_id="call-1")]
+    ).model_copy(update={"turn_id": "turn-2", "usage": current_usage})
+    stream.append_event(EventType.TURN_TOOL_REQUESTED, request)
+
+    resumed = reconstruct_turn(
+        stream.iter_events(), "turn-2", conversation_stream=stream.name
+    )
+    assert resumed.history == history
+    assert resumed.usage == current_usage
+
+
 def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
     monkeypatch,
 ) -> None:
@@ -569,7 +614,7 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     monkeypatch.setattr(
         worker.dsp_stream,
         "read_group",
-        lambda *_args, **_kwargs: [("1-0", action)],
+        lambda *_args, **_kwargs: [action],
     )
     acknowledge = Mock(side_effect=lambda *_args: worker.stop())
     monkeypatch.setattr(worker.dsp_stream, "acknowledge", acknowledge)

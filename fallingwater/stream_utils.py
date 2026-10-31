@@ -257,7 +257,6 @@ def decode_dispatch_action(
     entry_id = decode_text(entry_id)
     try:
         values = decode_dispatch_fields(fields)
-        values.setdefault("type", DispatchType.CONVERSATION_POKE)
         values["entry_id"] = entry_id
         return _dispatch_action_adapter.validate_python(values)
     except (ValueError, TypeError) as error:

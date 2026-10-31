@@ -120,6 +120,11 @@ values, ignoring supplied agent and model options. The CLI passes its arguments
 to `Chat` in both cases and defaults to `pydantic_ai:Agent` when `FW_AGENT` is
 unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
 
+`Chat.send(prompt)` generates a fresh UUID turn ID on every call and returns
+that ID with the queued event cursor. `Chat.ask(prompt)` submits through `send`
+and waits for the result through `receive`. Repeated prompts create separate
+turns; client submission deduplication is deferred until its behavior is needed.
+
 ## AD6 — Worker pool lifecycle
 
 `WorkerPool` starts one or more workers and handles process stop signals. Each
@@ -215,8 +220,9 @@ is the public mapping from event types to their Pydantic payload models.
 The web event feeds decode conversation payloads before sending SSE data. A
 completed payload carries the turn's new message history and `RunUsage`; the
 worker restores the latest usage and passes it to `Agent.run_sync` on the next
-turn. This preserves usage across sequential turns. Existing stream data is
-reset when adopting the format; legacy event decoding is not supported.
+turn. This preserves usage across sequential turns. Deferred steps restore their
+latest checkpointed usage when resuming. Existing stream data is reset when
+adopting the format; legacy event decoding is not supported.
 
 ## AD10 — Event payload schemas
 
@@ -257,6 +263,8 @@ payload model:
 The dispatch stream is text based and does not use the conversation payload
 envelope. `DispatchStream` validates its fields as a discriminated action model;
 invalid entries retain their Redis IDs so the worker can acknowledge them.
+Every dispatch entry must include an explicit action type; a missing type is
+invalid and follows the worker's malformed-action acknowledgement policy.
 `conversation.poke` starts a turn; `turn.tool.call` identifies one
 deferred call; `turn.agent.resume` resumes a request step after fan-in; and
 `turn.subagent.result` routes a child terminal result to its parent. Entries
@@ -312,7 +320,7 @@ action decoding, reads, claims, and acknowledgements. Its
 `conversation_stream(id)` factory creates a `ConversationStream` bound to one
 conversation. That object handles typed event encoding and decoding,
 conversation reads and reader groups, and paginated event iteration for turn
-reconstruction, child-result lookup, and idempotent prompt lookup. It also
+reconstruction and child-result lookup. It also
 handles atomic transactions that append both conversation and dispatch entries.
 Its `lock_agent_run()` context manager owns Redis lease acquisition, renewal, loss
 reporting, and release; `Worker` checks the lease before checkpointing a run.
