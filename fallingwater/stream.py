@@ -7,7 +7,7 @@ from threading import Event as ThreadEvent, Thread
 from typing import Any, TypeVar
 
 from redis import Redis
-from redis.exceptions import LockError, RedisError, WatchError
+from redis.exceptions import LockError, RedisError, ResponseError, WatchError
 
 from .stream_models import (
     ConversationStreamEvent,
@@ -34,9 +34,30 @@ from .stream_utils import (
     fmt_conversation_stream,
     fmt_dispatch_stream,
 )
+from .utils import logger
 
 
 GroupEntry = TypeVar("GroupEntry")
+
+
+def _create_group(
+    redis: Redis,
+    stream: str,
+    group: str,
+    *,
+    id: str,
+    mkstream: bool | None = None,
+) -> None:
+    try:
+        if mkstream is None:
+            redis.xgroup_create(stream, group, id=id)
+        else:
+            redis.xgroup_create(stream, group, id=id, mkstream=mkstream)
+    except ResponseError as error:
+        if not str(error).startswith("BUSYGROUP"):
+            logger.exception("Could not create consumer group for %s", stream)
+            raise
+        logger.debug("Consumer group %s already exists on %s", group, stream)
 
 
 @dataclass(frozen=True)
@@ -85,7 +106,9 @@ class DispatchStream:
     def create_group(
         self, group: str, *, id: str = "0", mkstream: bool = False
     ) -> None:
-        self.redis.xgroup_create(self.name, group, id=id, mkstream=mkstream)
+        _create_group(
+            self.redis, self.name, group, id=id, mkstream=mkstream
+        )
 
     def read_group(
         self,
@@ -506,7 +529,7 @@ class ConversationStream:
                     continue
 
     def create_group(self, group: str, *, id: str = "0") -> None:
-        self.redis.xgroup_create(self.name, group, id=id)
+        _create_group(self.redis, self.name, group, id=id)
 
     def read_group(
         self,

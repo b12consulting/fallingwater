@@ -331,6 +331,8 @@ reconstruction and child-result lookup. It also
 handles atomic transactions that append both conversation and dispatch entries.
 Its `lock_agent_run()` context manager owns Redis lease acquisition, renewal, loss
 reporting, and release; `Worker` checks the lease before checkpointing a run.
+Both stream classes treat Redis `BUSYGROUP` during group creation as an
+already-created group and propagate other Redis errors.
 `stream_models.py` contains the event and action schemas and the event payload
 registry. `stream_utils.py` contains stream key formatting and codecs; callers
 import schemas directly from `stream_models.py`.

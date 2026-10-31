@@ -2,7 +2,9 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from redis import Redis
+from redis.exceptions import ResponseError
 
 from fallingwater.stream import DispatchStream
 from fallingwater.stream_models import (
@@ -142,3 +144,19 @@ def test_group_creation_and_acknowledgement_target_the_given_stream() -> None:
     redis.xack.assert_called_once_with(
         "fw:conversation:abc:events", "terminal", "2-0", "3-0"
     )
+
+
+def test_group_creation_ignores_only_existing_group_errors() -> None:
+    redis = MagicMock(spec=Redis)
+    dispatch = DispatchStream(redis)
+    conversation = dispatch.conversation_stream("abc")
+    redis.xgroup_create.side_effect = ResponseError("BUSYGROUP already exists")
+
+    dispatch.create_group("workers", mkstream=True)
+    conversation.create_group("terminal")
+
+    redis.xgroup_create.side_effect = ResponseError("ERR other failure")
+    with pytest.raises(ResponseError, match="other failure"):
+        dispatch.create_group("workers", mkstream=True)
+    with pytest.raises(ResponseError, match="other failure"):
+        conversation.create_group("terminal")

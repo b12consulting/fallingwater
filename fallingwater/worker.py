@@ -9,7 +9,7 @@ from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 from pydantic_ai.usage import RunUsage
 from redis import Redis
-from redis.exceptions import RedisError, ResponseError
+from redis.exceptions import RedisError
 
 from .agent_proxy import (
     SubAgentRequest,
@@ -395,16 +395,7 @@ class Worker:
 
     def run(self) -> None:
         """Read independent actions until stopped; each action is checkpointed once."""
-        try:
-            self.dsp_stream.create_group(self.group, id="0", mkstream=True)
-        except ResponseError as error:
-            if not str(error).startswith("BUSYGROUP"):
-                logger.exception(
-                    "Could not create consumer group for %s",
-                    self.dsp_stream.name,
-                )
-                raise
-            logger.debug("Consumer group %s already exists", self.group)
+        self.dsp_stream.create_group(self.group, id="0", mkstream=True)
 
         while not self.stop_event.is_set():
             claim_cursor, claimed, _deleted = self.dsp_stream.claim(
