@@ -8,8 +8,8 @@ from fallingwater.stream import DispatchStream
 from fallingwater.stream_utils import (
     ConversationPokeAction,
     ConversationStreamEvent,
-    DispatchType,
-    EventType,
+    Action,
+    Event,
     TurnQueuedPayload,
     decode_conversation_event,
     encode_conversation_event,
@@ -23,7 +23,7 @@ def test_append_and_read_event_use_the_conversation_codec() -> None:
         (
             b"2-0",
             encode_conversation_event(
-                EventType.TURN_QUEUED,
+                Event.TURN_QUEUED,
                 TurnQueuedPayload(turn_id="turn-1", message="hello"),
             ),
         )
@@ -31,13 +31,13 @@ def test_append_and_read_event_use_the_conversation_codec() -> None:
     stream = DispatchStream(redis).conversation_stream("abc")
     payload = TurnQueuedPayload(turn_id="turn-1", message="hello")
 
-    assert stream.append_event(EventType.TURN_QUEUED, payload) == "2-0"
+    assert stream.append_event(Event.TURN_QUEUED, payload) == "2-0"
     fields = redis.xadd.call_args.args[1]
     assert decode_conversation_event(fields).payload == payload
     assert stream.read_conversation_range() == [
         ConversationStreamEvent(
             entry_id="2-0",
-            type=EventType.TURN_QUEUED,
+            type=Event.TURN_QUEUED,
             payload=payload,
         )
     ]
@@ -47,7 +47,7 @@ def test_group_operations_keep_stream_group_and_consumer_explicit() -> None:
     redis = MagicMock(spec=Redis)
     stream = "fw:conversation:abc:events"
     fields = encode_conversation_event(
-        EventType.TURN_QUEUED,
+        Event.TURN_QUEUED,
         TurnQueuedPayload(turn_id="turn-1", message="hello"),
     )
     redis.xreadgroup.return_value = [(stream, [(b"2-0", fields)])]
@@ -89,7 +89,7 @@ def test_dispatch_group_read_and_autoclaim_decode_entries_and_cursor() -> None:
     ) == [
         ConversationPokeAction(
             entry_id="3-0",
-            type=DispatchType.CONVERSATION_POKE,
+            type=Action.CONVERSATION_POKE,
             conversation_id="abc",
             turn_id="turn-1",
         ),
@@ -105,7 +105,7 @@ def test_dispatch_group_read_and_autoclaim_decode_entries_and_cursor() -> None:
         [
             ConversationPokeAction(
                 entry_id="3-0",
-                type=DispatchType.CONVERSATION_POKE,
+                type=Action.CONVERSATION_POKE,
                 conversation_id="abc",
                 turn_id="turn-1",
             ),

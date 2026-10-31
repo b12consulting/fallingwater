@@ -13,7 +13,7 @@ from .stream import DispatchStream
 from .stream_utils import (
     ConversationCreatedPayload,
     ConversationStreamEvent,
-    EventType,
+    Event,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -50,7 +50,7 @@ class Chat:
         records = self.stream.read_conversation_range(count=1)
         record = records[0] if records else None
         if record:
-            if record.type != EventType.CONVERSATION_CREATED:
+            if record.type != Event.CONVERSATION_CREATED:
                 raise ValueError(
                     f"{self.events} is not a Fallingwater conversation"
                 )
@@ -70,7 +70,7 @@ class Chat:
         self._check_agent()
         if not record:
             self.stream.append_event(
-                EventType.CONVERSATION_CREATED,
+                Event.CONVERSATION_CREATED,
                 ConversationCreatedPayload(
                     agent=self.agent_path,
                     model=self.model,
@@ -122,10 +122,10 @@ class Chat:
                     continue
                 if event.payload.turn_id != turn_id:
                     continue
-                if event.type == EventType.TURN_COMPLETED:
+                if event.type == Event.TURN_COMPLETED:
                     completed = cast(TurnCompletedPayload, event.payload)
                     return completed.message
-                if event.type == EventType.TURN_FAILED:
+                if event.type == Event.TURN_FAILED:
                     failed = cast(TurnFailedPayload, event.payload)
                     raise RuntimeError(failed.error)
 
@@ -142,13 +142,13 @@ class Chat:
         event_type = event.type
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)
-        if event_type == EventType.TURN_QUEUED and turn_id is not None:
+        if event_type == Event.TURN_QUEUED and turn_id is not None:
             self.stream.acknowledge(self.group, event.entry_id)
             return None
 
-        if event_type in (EventType.TURN_COMPLETED, EventType.TURN_FAILED):
+        if event_type in (Event.TURN_COMPLETED, Event.TURN_FAILED):
             output = sys.stderr if to_stderr else sys.stdout
-            if event_type == EventType.TURN_COMPLETED:
+            if event_type == Event.TURN_COMPLETED:
                 completed = cast(TurnCompletedPayload, payload)
                 print(completed.message, file=output, flush=True)
             else:

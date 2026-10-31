@@ -116,6 +116,13 @@ Use `fw reset --namespace fw-test` to clear the testing namespace. The
 command deletes all Redis keys with the selected namespace prefix.
 
 
+## Diagrams
+
+Install [D2](https://d2lang.com/tour/install/), then run `make docs` (or `make`)
+to compile all `docs/*.d2` diagrams to SVGs beside their sources in `docs/`.
+Only changed sources are rebuilt. Use `make -B docs` to rebuild all diagrams.
+
+
 ## Tooling
 
 - iredis: https://github.com/laixintao/iredis

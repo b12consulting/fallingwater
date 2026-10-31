@@ -14,8 +14,8 @@ from .stream_utils import (
     ConversationPayload,
     ConversationCreatedPayload,
     DispatchAction,
-    DispatchType,
-    EventType,
+    Action,
+    Event,
     ParentToolReference,
     SubAgentRequestedPayload,
     ToolRequestedPayload,
@@ -234,7 +234,7 @@ class ConversationStream:
         ]
 
     def append_event(
-        self, event_type: EventType, payload: ConversationPayload
+        self, event_type: Event, payload: ConversationPayload
     ) -> str:
         """Encode and append one typed conversation event."""
         entry_id = self.redis.xadd(
@@ -252,14 +252,14 @@ class ConversationStream:
             pipeline.xadd(
                 self.name,
                 encode_conversation_event(
-                    EventType.TURN_QUEUED,
+                    Event.TURN_QUEUED,
                     TurnQueuedPayload(turn_id=turn_id, message=prompt),
                 ),
             )
             pipeline.xadd(
                 self.dispatch.name,
                 {
-                    "type": EventType.CONVERSATION_POKE,
+                    "type": Action.CONVERSATION_POKE,
                     "turn_id": turn_id,
                     "conversation_id": self.conversation_id,
                 },
@@ -279,14 +279,14 @@ class ConversationStream:
             pipeline.xadd(
                 self.name,
                 encode_conversation_event(
-                    EventType.TURN_TOOL_REQUESTED, payload
+                    Event.TURN_TOOL_REQUESTED, payload
                 ),
             )
             for tool_call_id in call_ids:
                 pipeline.xadd(
                     self.dispatch.name,
                     {
-                        "type": DispatchType.TOOL_CALL,
+                        "type": Action.TOOL_CALL,
                         "conversation_id": self.conversation_id,
                         "turn_id": payload.turn_id,
                         "step_id": payload.step_id,
@@ -297,7 +297,7 @@ class ConversationStream:
                 pipeline.xadd(
                     self.dispatch.name,
                     {
-                        "type": DispatchType.AGENT_RESUME,
+                        "type": Action.AGENT_RESUME,
                         "conversation_id": self.conversation_id,
                         "turn_id": payload.turn_id,
                         "step_id": payload.step_id,
@@ -332,7 +332,7 @@ class ConversationStream:
                     pipeline.watch(parent_stream)
                     parent_entries = pipeline.xrange(parent_stream)
                     if any(
-                        event.type == EventType.TURN_SUBAGENT_REQUESTED
+                        event.type == Event.TURN_SUBAGENT_REQUESTED
                         and event.payload.turn_id == parent_request.turn_id
                         and event.payload.step_id == parent_request.step_id
                         and event.payload.tool_call_id
@@ -346,13 +346,13 @@ class ConversationStream:
                     pipeline.xadd(
                         parent_stream,
                         encode_conversation_event(
-                            EventType.TURN_SUBAGENT_REQUESTED, parent_request
+                            Event.TURN_SUBAGENT_REQUESTED, parent_request
                         ),
                     )
                     pipeline.xadd(
                         child_stream,
                         encode_conversation_event(
-                            EventType.CONVERSATION_CREATED,
+                            Event.CONVERSATION_CREATED,
                             ConversationCreatedPayload(
                                 agent=child_agent,
                                 model=child_model,
@@ -364,7 +364,7 @@ class ConversationStream:
                     pipeline.xadd(
                         child_stream,
                         encode_conversation_event(
-                            EventType.TURN_QUEUED,
+                            Event.TURN_QUEUED,
                             TurnQueuedPayload(
                                 turn_id=child_turn_id, message=child_prompt
                             ),
@@ -373,7 +373,7 @@ class ConversationStream:
                     pipeline.xadd(
                         self.dispatch.name,
                         {
-                            "type": DispatchType.CONVERSATION_POKE,
+                            "type": Action.CONVERSATION_POKE,
                             "conversation_id": parent_request.conversation_id,
                             "turn_id": child_turn_id,
                         },
@@ -411,17 +411,17 @@ class ConversationStream:
                             != payload.turn_id
                         ):
                             continue
-                        if event.type == EventType.TURN_TOOL_REQUESTED:
+                        if event.type == Event.TURN_TOOL_REQUESTED:
                             requested = event.payload
                             if requested.step_id == payload.step_id:
                                 request_found = True
-                        elif event.type == EventType.TURN_TOOL_RESULT:
+                        elif event.type == Event.TURN_TOOL_RESULT:
                             result = event.payload
                             if result.step_id == payload.step_id:
                                 prior_results.add(result.tool_call_id)
                         elif event.type in (
-                            EventType.TURN_COMPLETED,
-                            EventType.TURN_FAILED,
+                            Event.TURN_COMPLETED,
+                            Event.TURN_FAILED,
                         ):
                             terminal = True
 
@@ -438,14 +438,14 @@ class ConversationStream:
                     pipeline.xadd(
                         stream,
                         encode_conversation_event(
-                            EventType.TURN_TOOL_RESULT, payload
+                            Event.TURN_TOOL_RESULT, payload
                         ),
                     )
                     if expected <= all_results:
                         pipeline.xadd(
                             self.dispatch.name,
                             {
-                                "type": DispatchType.AGENT_RESUME,
+                                "type": Action.AGENT_RESUME,
                                 "conversation_id": self.conversation_id,
                                 "turn_id": payload.turn_id,
                                 "step_id": payload.step_id,
@@ -458,7 +458,7 @@ class ConversationStream:
 
     def finish_turn(
         self,
-        event_type: EventType,
+        event_type: Event,
         payload: TurnCompletedPayload | TurnFailedPayload,
         *,
         parent: ParentToolReference | None,
@@ -468,7 +468,7 @@ class ConversationStream:
         notification = None
         if parent is not None:
             notification = {
-                "type": DispatchType.SUBAGENT_RESULT,
+                "type": Action.SUBAGENT_RESULT,
                 "conversation_id": parent.conversation_id,
                 "turn_id": parent.turn_id,
                 "step_id": parent.step_id,
@@ -484,7 +484,7 @@ class ConversationStream:
                     entries = pipeline.xrange(stream)
                     if any(
                         event.type
-                        in (EventType.TURN_COMPLETED, EventType.TURN_FAILED)
+                        in (Event.TURN_COMPLETED, Event.TURN_FAILED)
                         and getattr(event.payload, "turn_id", None)
                         == payload.turn_id
                         for _entry_id, fields in entries

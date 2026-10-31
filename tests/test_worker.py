@@ -28,8 +28,8 @@ from fallingwater.turn_state import reconstruct_turn
 from fallingwater.stream_utils import (
     ConversationCreatedPayload,
     ConversationPayload,
-    DispatchType,
-    EventType,
+    Action,
+    Event,
     InvalidDispatchAction,
     TurnCompletedPayload,
     TurnFailedPayload,
@@ -142,7 +142,7 @@ class MemoryRedis(Redis):
         return MemoryPipeline(self, transaction=transaction)
 
 
-def _entry(entry_id: str, event_type: EventType, payload: ConversationPayload):
+def _entry(entry_id: str, event_type: Event, payload: ConversationPayload):
     return (entry_id, encode_conversation_event(event_type, payload))
 
 
@@ -161,14 +161,14 @@ def _base_entries(
     return [
         _entry(
             "1-0",
-            EventType.CONVERSATION_CREATED,
+            Event.CONVERSATION_CREATED,
             ConversationCreatedPayload(
                 agent=agent_path, model="test", deps=deps or {}
             ),
         ),
         _entry(
             "2-0",
-            EventType.TURN_QUEUED,
+            Event.TURN_QUEUED,
             TurnQueuedPayload(turn_id=turn_id, message=prompt),
         ),
     ]
@@ -229,7 +229,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
             *_base_entries(),
             _entry(
                 "3-0",
-                EventType.TURN_COMPLETED,
+                Event.TURN_COMPLETED,
                 TurnCompletedPayload(
                     turn_id="turn-1",
                     message="previous answer",
@@ -241,7 +241,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
             ),
             _entry(
                 "4-0",
-                EventType.TURN_QUEUED,
+                Event.TURN_QUEUED,
                 TurnQueuedPayload(turn_id="turn-2", message="next prompt"),
             ),
         ]
@@ -257,7 +257,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
     request = _tool_request(
         [ToolCallPart("multiply", {"left": 2, "right": 3}, tool_call_id="call-1")]
     ).model_copy(update={"turn_id": "turn-2", "usage": current_usage})
-    stream.append_event(EventType.TURN_TOOL_REQUESTED, request)
+    stream.append_event(Event.TURN_TOOL_REQUESTED, request)
 
     resumed = reconstruct_turn(
         stream.iter_events(), "turn-2", conversation_stream=stream.name
@@ -310,14 +310,14 @@ def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
     assert _process(
         worker,
         {
-            "type": DispatchType.CONVERSATION_POKE,
+            "type": Action.CONVERSATION_POKE,
             "turn_id": "turn-1",
             "conversation_id": "abc",
         },
     )
     actions = _dispatch(redis)
     assert [action["type"] for action in actions] == [
-        DispatchType.TOOL_CALL
+        Action.TOOL_CALL
     ] * 2
     assert {action["tool_call_id"] for action in actions} == {
         "call-1",
@@ -329,19 +329,19 @@ def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
     assert _process(worker, actions[1])
     assert _process(worker, actions[1])
     assert len(_dispatch(redis)) == 2
-    assert _dispatch(redis)[-1]["type"] == DispatchType.TOOL_CALL
+    assert _dispatch(redis)[-1]["type"] == Action.TOOL_CALL
     assert _process(worker, actions[0])
     resume = _dispatch(redis)[-1]
-    assert resume["type"] == DispatchType.AGENT_RESUME
+    assert resume["type"] == Action.AGENT_RESUME
     assert seen == [(2, 3), (6, 7)]
 
     assert _process(worker, resume)
     events = _events(redis)
     assert [event.type for event in events[-4:]] == [
-        EventType.TURN_TOOL_REQUESTED,
-        EventType.TURN_TOOL_RESULT,
-        EventType.TURN_TOOL_RESULT,
-        EventType.TURN_COMPLETED,
+        Event.TURN_TOOL_REQUESTED,
+        Event.TURN_TOOL_RESULT,
+        Event.TURN_TOOL_RESULT,
+        Event.TURN_COMPLETED,
     ]
     result_payloads = [event.payload for event in events[-3:-1]]
     assert all(
@@ -376,10 +376,10 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
     redis = MemoryRedis(
         [
             *_base_entries(deps={"answer": "dependency"}),
-            _entry("3-0", EventType.TURN_TOOL_REQUESTED, request),
+            _entry("3-0", Event.TURN_TOOL_REQUESTED, request),
             _entry(
                 "4-0",
-                EventType.TURN_TOOL_RESULT,
+                Event.TURN_TOOL_RESULT,
                 ToolResultPayload(
                     turn_id="turn-1",
                     step_id="step-1",
@@ -395,7 +395,7 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
     assert _process(
         worker,
         {
-            "type": DispatchType.TOOL_CALL,
+            "type": Action.TOOL_CALL,
             "turn_id": "turn-1",
             "conversation_id": "abc",
             "step_id": "step-1",
@@ -405,7 +405,7 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
     assert contexts == [
         ({"answer": "dependency"}, "abc", "call-2", "contextual")
     ]
-    assert _dispatch(redis)[-1]["type"] == DispatchType.AGENT_RESUME
+    assert _dispatch(redis)[-1]["type"] == Action.AGENT_RESUME
 
 
 def test_concurrent_tool_results_queue_one_resume() -> None:
@@ -418,7 +418,7 @@ def test_concurrent_tool_results_queue_one_resume() -> None:
     redis = MemoryRedis(_base_entries())
     redis.xadd(
         "fw:conversation:abc:events",
-        encode_conversation_event(EventType.TURN_TOOL_REQUESTED, request),
+        encode_conversation_event(Event.TURN_TOOL_REQUESTED, request),
     )
     redis.watch_barrier = Barrier(2)
     streams = [
@@ -447,11 +447,11 @@ def test_concurrent_tool_results_queue_one_resume() -> None:
 
     assert all(saved)
     dispatch = _dispatch(redis)
-    assert [entry["type"] for entry in dispatch] == [DispatchType.AGENT_RESUME]
+    assert [entry["type"] for entry in dispatch] == [Action.AGENT_RESUME]
     results = [
         event
         for event in _events(redis)
-        if event.type == EventType.TURN_TOOL_RESULT
+        if event.type == Event.TURN_TOOL_RESULT
     ]
     assert {event.payload.tool_call_id for event in results} == {
         "call-1",
@@ -513,7 +513,7 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
     assert _process(
         worker,
         {
-            "type": DispatchType.CONVERSATION_POKE,
+            "type": Action.CONVERSATION_POKE,
             "turn_id": "turn-1",
             "conversation_id": "abc",
         },
@@ -522,25 +522,25 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
     assert _process(worker, tool_action)
     parent_events = _events(redis)
     subagent_event = parent_events[-1]
-    assert subagent_event.type == EventType.TURN_SUBAGENT_REQUESTED
+    assert subagent_event.type == Event.TURN_SUBAGENT_REQUESTED
     subagent = subagent_event.payload
     assert isinstance(subagent, SubAgentRequestedPayload)
 
     child_poke = next(
         action
         for action in _dispatch(redis)
-        if action["type"] == DispatchType.CONVERSATION_POKE
+        if action["type"] == Action.CONVERSATION_POKE
     )
     assert child_poke["conversation_id"] == subagent.conversation_id
     assert _process(worker, child_poke)
     child_events = _events(redis, subagent.conversation_id)
-    assert child_events[-1].type == EventType.TURN_COMPLETED
+    assert child_events[-1].type == Event.TURN_COMPLETED
     parent_notify = _dispatch(redis)[-1]
-    assert parent_notify["type"] == DispatchType.SUBAGENT_RESULT
+    assert parent_notify["type"] == Action.SUBAGENT_RESULT
 
     assert _process(worker, parent_notify)
     resume = _dispatch(redis)[-1]
-    assert resume["type"] == DispatchType.AGENT_RESUME
+    assert resume["type"] == Action.AGENT_RESUME
     assert _process(worker, resume)
     assert _events(redis)[-1].payload.message == "parent answer"
     assert runs.call_count == 3
@@ -554,7 +554,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
             *_base_entries(),
             _entry(
                 "3-0",
-                EventType.TURN_COMPLETED,
+                Event.TURN_COMPLETED,
                 TurnCompletedPayload(
                     turn_id="turn-1",
                     message="already done",
@@ -576,7 +576,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
     assert _process(
         worker,
         {
-            "type": DispatchType.CONVERSATION_POKE,
+            "type": Action.CONVERSATION_POKE,
             "turn_id": "turn-1",
             "conversation_id": "abc",
         },
@@ -598,7 +598,7 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     action = decode_dispatch_action(
         "1-0",
         {
-            "type": DispatchType.CONVERSATION_POKE,
+            "type": Action.CONVERSATION_POKE,
             "turn_id": "turn-1",
             "conversation_id": "abc",
         },
@@ -644,7 +644,7 @@ def test_duplicate_agent_resume_waits_for_existing_run_lease(
     assert not _process(
         worker,
         {
-            "type": DispatchType.CONVERSATION_POKE,
+            "type": Action.CONVERSATION_POKE,
             "turn_id": "turn-1",
             "conversation_id": "abc",
         },
@@ -662,7 +662,7 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     )
     redis.xadd(
         parent_stream.name,
-        encode_conversation_event(EventType.TURN_TOOL_REQUESTED, request),
+        encode_conversation_event(Event.TURN_TOOL_REQUESTED, request),
     )
     parent_request = SubAgentRequestedPayload(
         turn_id="turn-1",
@@ -684,7 +684,7 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     ).payload
     assert child_created.parent is not None
     child_stream.finish_turn(
-        EventType.TURN_FAILED,
+        Event.TURN_FAILED,
         TurnFailedPayload(turn_id="child-turn", error="child failed"),
         parent=child_created.parent,
     )

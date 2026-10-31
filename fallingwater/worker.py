@@ -22,7 +22,7 @@ from .stream_utils import (
     AgentResumeAction,
     ConversationPokeAction,
     DispatchAction,
-    EventType,
+    Event,
     InvalidDispatchAction,
     SubAgentResultAction,
     SubAgentRequestedPayload,
@@ -71,7 +71,7 @@ class Worker:
         error: Exception,
     ) -> None:
         cnv_stream.finish_turn(
-            EventType.TURN_FAILED,
+            Event.TURN_FAILED,
             TurnFailedPayload(
                 turn_id=conversation.current_turn_id, error=str(error)
             ),
@@ -173,7 +173,7 @@ class Worker:
             )
             lease.ensure_held()
             cnv_stream.finish_turn(
-                EventType.TURN_COMPLETED, completed, parent=refreshed.parent
+                Event.TURN_COMPLETED, completed, parent=refreshed.parent
             )
             logger.info(
                 "Sent response for turn %s in conversation %s",
@@ -284,9 +284,9 @@ class Worker:
         for event in child_stream.iter_events():
             if getattr(event.payload, "turn_id", None) != child_turn_id:
                 continue
-            if event.type == EventType.TURN_COMPLETED:
+            if event.type == Event.TURN_COMPLETED:
                 child_terminal = cast(TurnCompletedPayload, event.payload)
-            elif event.type == EventType.TURN_FAILED:
+            elif event.type == Event.TURN_FAILED:
                 child_terminal = cast(TurnFailedPayload, event.payload)
             if child_terminal is not None:
                 break

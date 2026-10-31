@@ -17,9 +17,14 @@ from .utils import compress, decompress
 RawStreamEntry: TypeAlias = tuple[Any, Mapping[Any, Any]]
 
 
-class EventType(StrEnum):
+class Event(StrEnum):
+    """
+    Durable events stored in
+    <namespace>:conversation:<conversation-id>:events
+    streams
+    """
+
     CONVERSATION_CREATED = "conversation.created"
-    CONVERSATION_POKE = "conversation.poke"
     TURN_QUEUED = "turn.queued"
     TURN_TOOL_REQUESTED = "turn.tool.requested"
     TURN_TOOL_RESULT = "turn.tool.result"
@@ -28,10 +33,13 @@ class EventType(StrEnum):
     TURN_FAILED = "turn.failed"
 
 
-class DispatchType(StrEnum):
-    """Kinds of independently recoverable worker actions."""
+class Action(StrEnum):
+    """
+    Recoverable worker actions stored in the shared
+    <namespace>:dispatch stream.
+    """
 
-    CONVERSATION_POKE = EventType.CONVERSATION_POKE.value
+    CONVERSATION_POKE = "conversation.poke"
     TOOL_CALL = "turn.tool.call"
     AGENT_RESUME = "turn.agent.resume"
     SUBAGENT_RESULT = "turn.subagent.result"
@@ -46,22 +54,22 @@ class _DispatchAction(BaseModel):
 
 
 class ConversationPokeAction(_DispatchAction):
-    type: Literal[DispatchType.CONVERSATION_POKE]
+    type: Literal[Action.CONVERSATION_POKE]
 
 
 class AgentResumeAction(_DispatchAction):
-    type: Literal[DispatchType.AGENT_RESUME]
+    type: Literal[Action.AGENT_RESUME]
     step_id: str = Field(min_length=1)
 
 
 class ToolCallAction(_DispatchAction):
-    type: Literal[DispatchType.TOOL_CALL]
+    type: Literal[Action.TOOL_CALL]
     step_id: str = Field(min_length=1)
     tool_call_id: str = Field(min_length=1)
 
 
 class SubAgentResultAction(_DispatchAction):
-    type: Literal[DispatchType.SUBAGENT_RESULT]
+    type: Literal[Action.SUBAGENT_RESULT]
     step_id: str = Field(min_length=1)
     tool_call_id: str = Field(min_length=1)
     child_conversation_id: str = Field(min_length=1)
@@ -171,21 +179,21 @@ ConversationPayloadType: TypeAlias = (
     | TurnFailedPayload
 )
 
-PAYLOAD_MODELS: dict[EventType, type[ConversationPayloadType]] = {
-    EventType.CONVERSATION_CREATED: ConversationCreatedPayload,
-    EventType.TURN_QUEUED: TurnQueuedPayload,
-    EventType.TURN_TOOL_REQUESTED: ToolRequestedPayload,
-    EventType.TURN_TOOL_RESULT: ToolResultPayload,
-    EventType.TURN_SUBAGENT_REQUESTED: SubAgentRequestedPayload,
-    EventType.TURN_COMPLETED: TurnCompletedPayload,
-    EventType.TURN_FAILED: TurnFailedPayload,
+PAYLOAD_MODELS: dict[Event, type[ConversationPayloadType]] = {
+    Event.CONVERSATION_CREATED: ConversationCreatedPayload,
+    Event.TURN_QUEUED: TurnQueuedPayload,
+    Event.TURN_TOOL_REQUESTED: ToolRequestedPayload,
+    Event.TURN_TOOL_RESULT: ToolResultPayload,
+    Event.TURN_SUBAGENT_REQUESTED: SubAgentRequestedPayload,
+    Event.TURN_COMPLETED: TurnCompletedPayload,
+    Event.TURN_FAILED: TurnFailedPayload,
 }
 
 
 class ConversationEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    type: EventType
+    type: Event
     payload: ConversationPayloadType
 
 
@@ -266,7 +274,7 @@ def decode_dispatch_action(
 
 
 def encode_conversation_event(
-    event_type: EventType, payload: ConversationPayload
+    event_type: Event, payload: ConversationPayload
 ) -> dict[str, str | bytes]:
     """Validate and encode a compressed conversation stream event."""
     payload_model = PAYLOAD_MODELS.get(event_type)
@@ -280,7 +288,7 @@ def decode_conversation_event(fields: Mapping[Any, Any]) -> ConversationEvent:
     """Decode and validate one compressed conversation stream event."""
     text_fields = {decode_text(key): value for key, value in fields.items()}
     try:
-        event_type = EventType(decode_text(text_fields["type"]))
+        event_type = Event(decode_text(text_fields["type"]))
         payload_data = text_fields["payload"]
     except (KeyError, ValueError, TypeError) as error:
         raise ValueError(

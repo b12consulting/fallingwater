@@ -261,7 +261,9 @@ payload model:
   - Turn ID and failure description.
 
 The dispatch stream is text based and does not use the conversation payload
-envelope. `DispatchStream` validates its fields as a discriminated action model;
+envelope. `Event` contains only conversation event types; `Action`
+contains dispatch action types, including `conversation.poke`.
+`DispatchStream` validates its fields as a discriminated action model;
 invalid entries retain their Redis IDs so the worker can acknowledge them.
 Every dispatch entry must include an explicit action type; a missing type is
 invalid and follows the worker's malformed-action acknowledgement policy.

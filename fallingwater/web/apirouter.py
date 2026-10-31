@@ -14,7 +14,8 @@ from redis import Redis
 
 from ..stream_utils import (
     ConversationEvent,
-    EventType,
+    Action,
+    Event,
     decode_conversation_entry,
     decode_dispatch_fields,
     decode_text,
@@ -57,11 +58,7 @@ def monitor(request: Request, full: bool = False) -> HTMLResponse:
         name="monitor.html",
         context={
             "events_url": str(events_url),
-            "event_types": [
-                event.value
-                for event in EventType
-                if event != EventType.CONVERSATION_POKE
-            ],
+            "event_types": [event.value for event in Event],
         },
     )
 
@@ -99,7 +96,7 @@ def _recent_streams(redis: Redis, namespace: str) -> tuple[str, dict[str, str]]:
             dispatch_cursor = decode_text(entries[0][0])
         for _, fields in entries:
             fields = decode_dispatch_fields(fields)
-            if fields.get("type") != EventType.CONVERSATION_POKE:
+            if fields.get("type") != Action.CONVERSATION_POKE:
                 continue
             conversation_id = fields.get("conversation_id")
             if conversation_id and conversation_id not in recent_ids:
@@ -185,7 +182,7 @@ def recent_events(
             for entry_id, fields in entries:
                 dispatch_cursor = decode_text(entry_id)
                 fields = decode_dispatch_fields(fields)
-                if fields.get("type") != EventType.CONVERSATION_POKE:
+                if fields.get("type") != Action.CONVERSATION_POKE:
                     continue
                 conversation_id = fields.get("conversation_id")
                 if not conversation_id:

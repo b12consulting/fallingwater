@@ -9,7 +9,8 @@ from redis import Redis
 from fallingwater.chat import Chat
 from fallingwater.stream_utils import (
     ConversationCreatedPayload,
-    EventType,
+    Action,
+    Event,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -20,21 +21,21 @@ from fallingwater.stream_utils import (
 
 def _created(agent: str = "pydantic_ai:Agent", model: str = "test"):
     return encode_conversation_event(
-        EventType.CONVERSATION_CREATED,
+        Event.CONVERSATION_CREATED,
         ConversationCreatedPayload(agent=agent, model=model),
     )
 
 
 def _queued(turn_id: str, message: str = "hello"):
     return encode_conversation_event(
-        EventType.TURN_QUEUED,
+        Event.TURN_QUEUED,
         TurnQueuedPayload(turn_id=turn_id, message=message),
     )
 
 
 def _completed(turn_id: str, message: str):
     return encode_conversation_event(
-        EventType.TURN_COMPLETED,
+        Event.TURN_COMPLETED,
         TurnCompletedPayload(
             turn_id=turn_id, message=message, history=[], usage=RunUsage()
         ),
@@ -43,7 +44,7 @@ def _completed(turn_id: str, message: str):
 
 def _failed(turn_id: str, error: str):
     return encode_conversation_event(
-        EventType.TURN_FAILED, TurnFailedPayload(turn_id=turn_id, error=error)
+        Event.TURN_FAILED, TurnFailedPayload(turn_id=turn_id, error=error)
     )
 
 
@@ -74,13 +75,13 @@ def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
     queued_stream, queued_fields = pipeline.xadd.call_args_list[0].args
     queued = decode_conversation_event(queued_fields)
     assert queued_stream == "fw:conversation:abc:events"
-    assert queued.type == EventType.TURN_QUEUED
+    assert queued.type == Event.TURN_QUEUED
     assert queued.payload.turn_id == turn_id
     assert queued.payload.message == "hello"
     dispatch_stream, dispatch_fields = pipeline.xadd.call_args_list[1].args
     assert dispatch_stream == "fw:dispatch"
     assert dispatch_fields == {
-        "type": EventType.CONVERSATION_POKE,
+        "type": Action.CONVERSATION_POKE,
         "turn_id": turn_id,
         "conversation_id": "abc",
     }
@@ -122,7 +123,7 @@ def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     assert (chat.agent_path, chat.model) == ("pydantic_ai:Agent", "test")
     _stream, fields = redis.xadd.call_args.args
     created = decode_conversation_event(fields)
-    assert created.type == EventType.CONVERSATION_CREATED
+    assert created.type == Event.CONVERSATION_CREATED
     assert created.payload.agent == "pydantic_ai:Agent"
     assert created.payload.model == "test"
 

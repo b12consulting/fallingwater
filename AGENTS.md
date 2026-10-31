@@ -11,6 +11,7 @@ This is the quick-start guide for agents working in this repository. See
 .
 |-- AGENTS.md                 Agent-facing repo guide
 |-- README.md                 Project overview and local development
+|-- Makefile                  Compile D2 diagrams to SVGs beside their sources
 |-- architecture.md           Architecture decisions and conventions
 |-- pyproject.toml            Package, dependencies, CLI entry point, pytest setup
 |-- compose.yaml              Local Redis service
@@ -19,6 +20,16 @@ This is the quick-start guide for agents working in this repository. See
 |-- concept/
 |   |-- pydantic-ai-agent.md   Agent specs and conversation turns
 |   `-- redis-streams.md      Redis Streams concepts and examples
+|-- docs/
+|   |-- basic-conversation-flow.d2 Basic conversation sequence diagrams
+|   |-- basic-conversation-flow.md Conversation submission, history, and results
+|   |-- basic-conversation-flow.svg Rendered basic conversation diagrams
+|   |-- subagent-flow.d2      Subagent sequence diagrams
+|   |-- subagent-flow.md      Subagent stream events and dispatch flow
+|   |-- subagent-flow.svg     Rendered subagent diagrams
+|   |-- tool-call-flow.d2     Tool call sequence diagrams
+|   |-- tool-call-flow.md     Tool call events, dispatch, and recovery flow
+|   `-- tool-call-flow.svg    Rendered tool call diagrams
 |-- contrib/                  Small component experiments
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment

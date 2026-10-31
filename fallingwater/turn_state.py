@@ -10,7 +10,7 @@ from pydantic_ai.usage import RunUsage
 from .stream_utils import (
     ConversationCreatedPayload,
     ConversationEvent,
-    EventType,
+    Event,
     ParentToolReference,
     SubAgentRequestedPayload,
     ToolRequestedPayload,
@@ -67,7 +67,7 @@ def reconstruct_turn(
     queued = False
 
     for event in events:
-        if event.type == EventType.CONVERSATION_CREATED:
+        if event.type == Event.CONVERSATION_CREATED:
             created = cast(ConversationCreatedPayload, event.payload)
             agent_path = created.agent
             model = created.model
@@ -75,7 +75,7 @@ def reconstruct_turn(
             parent = created.parent
             continue
 
-        if event.type == EventType.TURN_QUEUED:
+        if event.type == Event.TURN_QUEUED:
             queued_payload = cast(TurnQueuedPayload, event.payload)
             if queued_payload.turn_id == current_turn_id and not queued:
                 next_prompt = queued_payload.message
@@ -83,7 +83,7 @@ def reconstruct_turn(
             continue
 
         if not queued:
-            if event.type == EventType.TURN_COMPLETED:
+            if event.type == Event.TURN_COMPLETED:
                 previous = cast(TurnCompletedPayload, event.payload)
                 history.extend(
                     ModelMessagesTypeAdapter.validate_python(previous.history)
@@ -94,7 +94,7 @@ def reconstruct_turn(
         payload = event.payload
         if getattr(payload, "turn_id", None) != current_turn_id:
             continue
-        if event.type == EventType.TURN_TOOL_REQUESTED:
+        if event.type == Event.TURN_TOOL_REQUESTED:
             requested = cast(ToolRequestedPayload, payload)
             turn_messages.extend(
                 ModelMessagesTypeAdapter.validate_python(requested.history)
@@ -104,17 +104,17 @@ def reconstruct_turn(
             step_id = requested.step_id
             tool_results = {}
             subagent_requests = {}
-        elif event.type == EventType.TURN_TOOL_RESULT:
+        elif event.type == Event.TURN_TOOL_RESULT:
             tool_result = cast(ToolResultPayload, payload)
             if tool_result.step_id == step_id:
                 tool_results[tool_result.tool_call_id] = tool_result.result
-        elif event.type == EventType.TURN_SUBAGENT_REQUESTED:
+        elif event.type == Event.TURN_SUBAGENT_REQUESTED:
             subagent = cast(SubAgentRequestedPayload, payload)
             if subagent.step_id == step_id:
                 subagent_requests[subagent.tool_call_id] = subagent
-        elif event.type == EventType.TURN_COMPLETED:
+        elif event.type == Event.TURN_COMPLETED:
             completed = True
-        elif event.type == EventType.TURN_FAILED:
+        elif event.type == Event.TURN_FAILED:
             failed = cast(TurnFailedPayload, payload)
 
     if next_prompt is None:

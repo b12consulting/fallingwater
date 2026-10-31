@@ -4,7 +4,7 @@ import pytest
 
 from fallingwater.stream_utils import (
     ConversationCreatedPayload,
-    EventType,
+    Event,
     InvalidDispatchAction,
     ToolRequestedPayload,
     ToolResultPayload,
@@ -22,30 +22,30 @@ from pydantic_ai.usage import RunUsage
 
 def test_conversation_event_round_trips_as_compressed_payload() -> None:
     encoded = encode_conversation_event(
-        EventType.TURN_QUEUED,
+        Event.TURN_QUEUED,
         TurnQueuedPayload(turn_id="turn-1", message="hello"),
     )
 
-    assert encoded["type"] == EventType.TURN_QUEUED.value
+    assert encoded["type"] == Event.TURN_QUEUED.value
     assert isinstance(encoded["payload"], bytes)
 
     event = decode_conversation_event(
         {b"type": encoded["type"].encode(), b"payload": encoded["payload"]}
     )
-    assert event.type == EventType.TURN_QUEUED
+    assert event.type == Event.TURN_QUEUED
     assert event.payload == TurnQueuedPayload(turn_id="turn-1", message="hello")
 
 
 def test_conversation_entry_decodes_its_id_and_event() -> None:
     fields = encode_conversation_event(
-        EventType.CONVERSATION_CREATED,
+        Event.CONVERSATION_CREATED,
         ConversationCreatedPayload(agent="example:agent", model="test"),
     )
 
     entry_id, event = decode_conversation_entry((b"1-0", fields))
 
     assert entry_id == "1-0"
-    assert event.type == EventType.CONVERSATION_CREATED
+    assert event.type == Event.CONVERSATION_CREATED
     assert event.payload.agent == "example:agent"
 
 
@@ -58,9 +58,9 @@ def test_tool_request_and_result_events_round_trip() -> None:
         usage=RunUsage(),
     )
     request_event = decode_conversation_event(
-        encode_conversation_event(EventType.TURN_TOOL_REQUESTED, requested)
+        encode_conversation_event(Event.TURN_TOOL_REQUESTED, requested)
     )
-    assert request_event.type == EventType.TURN_TOOL_REQUESTED
+    assert request_event.type == Event.TURN_TOOL_REQUESTED
     assert request_event.payload == requested
 
     result = ToolResultPayload(
@@ -70,9 +70,9 @@ def test_tool_request_and_result_events_round_trip() -> None:
         result={"value": 2},
     )
     result_event = decode_conversation_event(
-        encode_conversation_event(EventType.TURN_TOOL_RESULT, result)
+        encode_conversation_event(Event.TURN_TOOL_RESULT, result)
     )
-    assert result_event.type == EventType.TURN_TOOL_RESULT
+    assert result_event.type == Event.TURN_TOOL_RESULT
     assert result_event.payload == result
 
 

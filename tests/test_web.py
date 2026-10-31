@@ -14,7 +14,8 @@ from redis import Redis
 
 from fallingwater.stream_utils import (
     ConversationCreatedPayload,
-    EventType,
+    Action,
+    Event,
     TurnCompletedPayload,
     TurnQueuedPayload,
     encode_conversation_event,
@@ -31,17 +32,17 @@ from fallingwater.web.apirouter import (
 )
 
 
-def _event(event_type: EventType, **values):
-    if event_type == EventType.CONVERSATION_CREATED:
+def _event(event_type: Event, **values):
+    if event_type == Event.CONVERSATION_CREATED:
         payload = ConversationCreatedPayload(
             agent=values.get("agent", "demo"), model=values.get("model", "test")
         )
-    elif event_type == EventType.TURN_QUEUED:
+    elif event_type == Event.TURN_QUEUED:
         payload = TurnQueuedPayload(
             turn_id=values.get("turn_id", "turn-1"),
             message=values.get("message", "hello"),
         )
-    elif event_type == EventType.TURN_COMPLETED:
+    elif event_type == Event.TURN_COMPLETED:
         payload = TurnCompletedPayload(
             turn_id=values.get("turn_id", "turn-1"),
             message=values.get("message", "answer"),
@@ -55,7 +56,7 @@ def _event(event_type: EventType, **values):
 
 def _poke(conversation_id: str):
     return {
-        "type": EventType.CONVERSATION_POKE,
+        "type": Action.CONVERSATION_POKE,
         "conversation_id": conversation_id,
     }
 
@@ -103,16 +104,16 @@ def test_sse_replays_events_then_reads_the_tail() -> None:
                 [
                     (
                         "1-0",
-                        _event(EventType.CONVERSATION_CREATED, agent="demo"),
+                        _event(Event.CONVERSATION_CREATED, agent="demo"),
                     ),
-                    ("2-0", _event(EventType.TURN_QUEUED, message="hello")),
+                    ("2-0", _event(Event.TURN_QUEUED, message="hello")),
                 ],
             )
         ],
         [
             (
                 stream,
-                [("3-0", _event(EventType.TURN_COMPLETED, message="answer"))],
+                [("3-0", _event(Event.TURN_COMPLETED, message="answer"))],
             )
         ],
     ]
@@ -126,11 +127,11 @@ def test_sse_replays_events_then_reads_the_tail() -> None:
     assert isinstance(first, ServerSentEvent)
     assert (first.id, first.event, first.data["payload"]["agent"]) == (
         "1-0",
-        EventType.CONVERSATION_CREATED,
+        Event.CONVERSATION_CREATED,
         "demo",
     )
-    assert (second.id, second.event) == ("2-0", EventType.TURN_QUEUED)
-    assert (third.id, third.event) == ("3-0", EventType.TURN_COMPLETED)
+    assert (second.id, second.event) == ("2-0", Event.TURN_QUEUED)
+    assert (third.id, third.event) == ("3-0", Event.TURN_COMPLETED)
     assert redis.xread.call_args_list[0].args[0] == {stream: "0-0"}
     assert redis.xread.call_args_list[1].args[0] == {stream: "2-0"}
 
@@ -154,7 +155,7 @@ def test_recent_conversation_discovery_skips_duplicate_dispatch_entries() -> Non
             (
                 f"{number}-0",
                 {
-                    "type": EventType.CONVERSATION_POKE,
+                    "type": Action.CONVERSATION_POKE,
                     "conversation_id": "same",
                 },
             )
@@ -164,7 +165,7 @@ def test_recent_conversation_discovery_skips_duplicate_dispatch_entries() -> Non
             (
                 f"{number}-0",
                 {
-                    "type": EventType.CONVERSATION_POKE,
+                    "type": Action.CONVERSATION_POKE,
                     "conversation_id": f"c{index}",
                 },
             )
@@ -203,13 +204,13 @@ def test_recent_feed_replays_only_ten_events_then_follows_the_tail() -> None:
         [
             (
                 f"{number}-0",
-                _event(EventType.TURN_COMPLETED, message=str(number)),
+                _event(Event.TURN_COMPLETED, message=str(number)),
             )
             for number in range(12, 2, -1)
         ],
     ]
     redis.xread.return_value = [
-        (stream, [("13-0", _event(EventType.TURN_QUEUED))])
+        (stream, [("13-0", _event(Event.TURN_QUEUED))])
     ]
     feed = recent_events(redis, namespace)
 
@@ -242,9 +243,9 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
             ]
         if stream == c11_stream:
             return [
-                ("3-0", _event(EventType.TURN_COMPLETED)),
-                ("2-0", _event(EventType.TURN_QUEUED)),
-                ("1-0", _event(EventType.CONVERSATION_CREATED)),
+                ("3-0", _event(Event.TURN_COMPLETED)),
+                ("2-0", _event(Event.TURN_QUEUED)),
+                ("1-0", _event(Event.CONVERSATION_CREATED)),
             ]
         return []
 
@@ -253,7 +254,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
         [
             (
                 stream_for("c10"),
-                [("20-0", _event(EventType.TURN_COMPLETED, message="old"))],
+                [("20-0", _event(Event.TURN_COMPLETED, message="old"))],
             )
         ],
         [
@@ -263,10 +264,10 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
             ),
             (
                 stream_for("c1"),
-                [("21-0", _event(EventType.TURN_COMPLETED, message="evicted"))],
+                [("21-0", _event(Event.TURN_COMPLETED, message="evicted"))],
             ),
         ],
-        [(stream_for("c11"), [("4-0", _event(EventType.TURN_COMPLETED))])],
+        [(stream_for("c11"), [("4-0", _event(Event.TURN_COMPLETED))])],
     ]
     feed = recent_events(redis, namespace)
 
@@ -277,7 +278,7 @@ def test_recent_feed_adds_new_conversations_and_evicts_oldest() -> None:
         received[0].id,
         received[0].event,
         received[0].data["conversation_id"],
-    ) == ("c10:20-0", EventType.TURN_COMPLETED, "c10")
+    ) == ("c10:20-0", Event.TURN_COMPLETED, "c10")
     assert [event.id for event in received[1:]] == [
         "c11:1-0",
         "c11:2-0",
