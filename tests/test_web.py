@@ -48,7 +48,7 @@ def _event(event_type: Event, **values):
         payload = TurnCompletedPayload(
             turn_id=values.get("turn_id", "turn-1"),
             message=values.get("message", "answer"),
-            history=[],
+            turn_messages=[],
             usage=RunUsage(),
         )
     else:

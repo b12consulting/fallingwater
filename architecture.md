@@ -99,8 +99,10 @@ request set is rejected before the event is written. Tool-result events are
 associated with that request and store one JSON-compatible result per call.
 The result handler compares unique call IDs and queues one resume when the
 whole request set has results. Completed events store the accumulated new
-messages, display response, and `RunUsage`; their `history` field remains the
-canonical delta for later turns.
+messages, display response, and `RunUsage`; their `turn_messages` field remains
+the canonical delta for later turns. Deferred request payloads use
+`step_messages` for the new messages from one model step. Neither field contains
+the full conversation history.
 
 `ConversationStream.iter_events()` pages through the event stream and supplies
 decoded events to `turn_state.reconstruct_turn`. That pure function returns the
@@ -245,7 +247,7 @@ payload model:
   - Turn ID and user prompt.
 - `turn.tool.requested`
   - Fields: `turn_id: str`, `step_id: str`, `requests: dict[str, Any]`,
-    `history: list[dict[str, Any]]`, `usage: RunUsage`
+    `step_messages: list[dict[str, Any]]`, `usage: RunUsage`
   - Deferred requests from one model call, its message delta, and usage.
 - `turn.tool.result`
   - Fields: `turn_id: str`, `step_id: str`, `tool_call_id: str`, `result: Any`
@@ -256,7 +258,7 @@ payload model:
   - Correlation between a parent tool call and its separately queued child
     conversation.
 - `turn.completed`
-  - Fields: `turn_id: str`, `message: str`, `history: list[dict[str, Any]]`,
+  - Fields: `turn_id: str`, `message: str`, `turn_messages: list[dict[str, Any]]`,
     `usage: RunUsage`
   - Turn ID, displayed response, structured JSON data for the new Pydantic AI
     messages, and accumulated usage.

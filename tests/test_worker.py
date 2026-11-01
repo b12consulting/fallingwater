@@ -108,7 +108,7 @@ def _tool_request(calls: list[ToolCallPart], *, step_id: str = "step-1"):
         requests=TypeAdapter(DeferredToolRequests).dump_python(
             requests, mode="json"
         ),
-        history=ModelMessagesTypeAdapter.dump_python(messages, mode="json"),
+        step_messages=ModelMessagesTypeAdapter.dump_python(messages, mode="json"),
         usage=RunUsage(),
     )
 
@@ -152,7 +152,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
                 TurnCompletedPayload(
                     turn_id="turn-1",
                     message="previous answer",
-                    history=ModelMessagesTypeAdapter.dump_python(
+                    turn_messages=ModelMessagesTypeAdapter.dump_python(
                         history, mode="json"
                     ),
                     usage=previous_usage,
@@ -488,7 +488,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
                 TurnCompletedPayload(
                     turn_id="turn-1",
                     message="already done",
-                    history=ModelMessagesTypeAdapter.dump_python(
+                    turn_messages=ModelMessagesTypeAdapter.dump_python(
                         _messages("already done"), mode="json"
                     ),
                     usage=RunUsage(),

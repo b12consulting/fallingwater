@@ -89,7 +89,9 @@ def reconstruct_turn(
             if event.type == Event.TURN_COMPLETED:
                 previous = cast(TurnCompletedPayload, event.payload)
                 history.extend(
-                    ModelMessagesTypeAdapter.validate_python(previous.history)
+                    ModelMessagesTypeAdapter.validate_python(
+                        previous.turn_messages
+                    )
                 )
                 usage = previous.usage
             continue
@@ -100,7 +102,7 @@ def reconstruct_turn(
         if event.type == Event.TURN_TOOL_REQUESTED:
             requested = cast(ToolRequestedPayload, payload)
             turn_messages.extend(
-                ModelMessagesTypeAdapter.validate_python(requested.history)
+                ModelMessagesTypeAdapter.validate_python(requested.step_messages)
             )
             usage = requested.usage
             requests = requested.requests

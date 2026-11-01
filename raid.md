@@ -296,8 +296,8 @@ revisited. Close or revise an item when the code resolves it.
   chronological stream order.
 - **D31 — Structured completed history (decided).** Store the
   JSON-compatible list of message objects directly in a completed
-  payload's `history` field. Serialize the payload once at the stream
-  boundary, then validate the history value with
+  payload's `turn_messages` field (renamed by D75). Serialize the payload once
+  at the stream boundary, then validate the message value with
   `ModelMessagesTypeAdapter.validate_python` when loading it. This
   removes the nested JSON string encoding while retaining Pydantic
   AI's message representation.
@@ -309,7 +309,7 @@ revisited. Close or revise an item when the code resolves it.
   formatters.
 - **D33 — Formatted conversation payloads (decided).** Give
   conversation payload models a `fmt(full=False)` method for CLI and
-  monitor display. Completed payloads omit `history` and `usage` by
+  monitor display. Completed payloads omit `turn_messages` and `usage` by
   default to keep `fw tail` and the monitor readable; `fw tail --full`
   and `/monitor?full=1` include both. The per-conversation SSE API
   always publishes complete payloads.
@@ -516,8 +516,8 @@ revisited. Close or revise an item when the code resolves it.
   insufficient when turns and tool calls overlap. The current
   `turn.subagent.requested` event stores child IDs but not the agent,
   model, dependencies, or prompt, so it cannot rebuild a child after a
-  partial creation. Define a durable child intent before relying on
-  recovery. Replay should choose one canonical terminal outcome and
+  partial creation. D74 defines the durable child intent needed before
+  relying on recovery. Replay should choose one canonical terminal outcome and
   one result per call, ignoring later duplicates; `reconstruct_turn`
   does not yet do this for duplicate completed-turn history or
   repeated tool-request history.
@@ -572,3 +572,33 @@ revisited. Close or revise an item when the code resolves it.
   External-effect deduplication belongs to tools and downstream systems, not
   Fallingwater's worker recovery; this does not guarantee exactly-once
   effects or close R1.
+- **D73 — Stateful turn machine (proposed).** Explore a turn machine that
+  holds its current state and accepts events through a transition method,
+  rejecting events that are invalid in that state. Replace the initial
+  reconstruction/eligibility sketch in `contrib/turn-state-machine.py` with
+  a minimal machine initially in `NotStarted`. `PromptSubmitted` transitions
+  to `AwaitingAnswer(prompt)` and returns a poke message; `AgentAnswered`
+  transitions to `Completed(prompt, answer)` and returns no messages.
+  The caller publishes returned messages; the machine performs no Redis I/O.
+  Durable replay, tool and child transitions, and
+  concurrent checkpoint protection remain design work; the library is unchanged.
+- **D74 — Durable parent-side child intent (decided; implementation pending).**
+  Persist the full child delegation intent in the parent conversation stream
+  before creating or dispatching the child. Include the child conversation
+  and turn IDs, agent import path, effective model, serialized dependencies,
+  prompt, and parent turn/step/tool-call correlation. Once this intent is
+  saved, recovery must be able to create or complete missing child setup using
+  the same identities without rerunning the parent tool to rediscover its
+  delegation result. This makes the parent intent a durable checkpoint of that
+  result and avoids orphan rollback for crashes during subsequent child setup.
+  It does not cover a crash before the intent is saved. The event schema and
+  idempotent child materialization remain to be implemented; D70 describes the
+  current child-first write order, which this decision will replace.
+- **D75 — Scoped message payload names (decided).** Rename
+  `ToolRequestedPayload.history` to `step_messages` and
+  `TurnCompletedPayload.history` to `turn_messages`. The former holds one
+  model step's new messages; the latter holds all new messages accumulated
+  during a completed turn, not a full conversation snapshot. Update event
+  writers, reconstruction, and compact formatting together. Serialized event
+  and archive field names change directly; no legacy aliases or migration are
+  provided before production.

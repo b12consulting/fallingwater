@@ -39,7 +39,7 @@ def _completed(turn_id: str, message: str):
     return encode_conversation_event(
         Event.TURN_COMPLETED,
         TurnCompletedPayload(
-            turn_id=turn_id, message=message, history=[], usage=RunUsage()
+            turn_id=turn_id, message=message, turn_messages=[], usage=RunUsage()
         ),
     )
 

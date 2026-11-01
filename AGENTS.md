@@ -33,6 +33,7 @@ This is the quick-start guide for agents working in this repository. See
 |-- contrib/                  Small component experiments
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment
+|   |-- turn-state-machine.py Minimal stateful prompt-to-answer turn example
 |   |-- test-compression.py   Compression benchmark for a serialized conversation turn
 |   |-- test-conversation.py  Standalone Pydantic AI conversation history example
 |   |-- test-recursive-runner.py Generic deferred tool and subagent runner example

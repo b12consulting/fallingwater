@@ -77,7 +77,7 @@ def test_queue_tool_requests_rejects_empty_set_without_writing() -> None:
         turn_id="turn-1",
         step_id="step-1",
         requests={},
-        history=[],
+        step_messages=[],
         usage=RunUsage(),
     )
 

@@ -118,7 +118,7 @@ class ToolRequestedPayload(ConversationPayload):
     turn_id: str
     step_id: str
     requests: dict[str, Any]
-    history: list[dict[str, Any]]
+    step_messages: list[dict[str, Any]]
     usage: RunUsage
 
 
@@ -140,16 +140,17 @@ class SubAgentRequestedPayload(ConversationPayload):
 class TurnCompletedPayload(ConversationPayload):
     turn_id: str
     message: str
-    history: list[dict[str, Any]]
+    turn_messages: list[dict[str, Any]]
     usage: RunUsage
 
     def fmt(self, full: bool = False) -> dict[str, Any]:
         """
-        Return the payload, including history and usage only when requested.
+        Return the payload, including turn messages and usage only when
+        requested.
         """
         payload = super().fmt(full=full)
         if not full:
-            payload.pop("history")
+            payload.pop("turn_messages")
             payload.pop("usage")
         return payload
 

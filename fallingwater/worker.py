@@ -124,7 +124,7 @@ class Worker:
                 requests=_requests_adapter.dump_python(
                     result.output, mode="json"
                 ),
-                history=ModelMessagesTypeAdapter.dump_python(
+                step_messages=ModelMessagesTypeAdapter.dump_python(
                     result.new_messages, mode="json"
                 ),
                 usage=result.usage,
@@ -137,7 +137,7 @@ class Worker:
         completed = TurnCompletedPayload(
             turn_id=conversation.current_turn_id,
             message=str(result.output),
-            history=ModelMessagesTypeAdapter.dump_python(
+            turn_messages=ModelMessagesTypeAdapter.dump_python(
                 [*conversation.turn_messages, *result.new_messages],
                 mode="json",
             ),

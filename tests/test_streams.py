@@ -9,6 +9,7 @@ from fallingwater.stream_models import (
     InvalidDispatchAction,
     ToolRequestedPayload,
     ToolResultPayload,
+    TurnCompletedPayload,
     TurnQueuedPayload,
 )
 from fallingwater.stream_utils import (
@@ -62,7 +63,7 @@ def test_tool_request_and_result_events_round_trip() -> None:
         turn_id="turn-1",
         step_id="step-1",
         requests={"calls": [{"tool_name": "multiply", "args": {"value": 2}}]},
-        history=[{"kind": "request"}],
+        step_messages=[{"kind": "request"}],
         usage=RunUsage(),
     )
     request_event = decode_conversation_event(
@@ -70,6 +71,10 @@ def test_tool_request_and_result_events_round_trip() -> None:
     )
     assert request_event.type == Event.TURN_TOOL_REQUESTED
     assert request_event.payload == requested
+    assert requested.model_dump(mode="json")["step_messages"] == [
+        {"kind": "request"}
+    ]
+    assert "history" not in requested.model_dump(mode="json")
 
     result = ToolResultPayload(
         turn_id="turn-1",
@@ -82,6 +87,25 @@ def test_tool_request_and_result_events_round_trip() -> None:
     )
     assert result_event.type == Event.TURN_TOOL_RESULT
     assert result_event.payload == result
+
+
+def test_completed_turn_messages_round_trip_and_format() -> None:
+    completed = TurnCompletedPayload(
+        turn_id="turn-1",
+        message="answer",
+        turn_messages=[{"kind": "response"}],
+        usage=RunUsage(),
+    )
+    event = decode_conversation_event(
+        encode_conversation_event(Event.TURN_COMPLETED, completed)
+    )
+
+    assert event.type == Event.TURN_COMPLETED
+    assert event.payload == completed
+    assert completed.fmt() == {"turn_id": "turn-1", "message": "answer"}
+    assert completed.fmt(full=True)["turn_messages"] == [{"kind": "response"}]
+    assert "usage" in completed.fmt(full=True)
+    assert "history" not in completed.fmt(full=True)
 
 
 def test_dispatch_fields_decode_text_without_compression() -> None:
