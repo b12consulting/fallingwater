@@ -10,7 +10,7 @@ from redis.exceptions import ResponseError
 from fallingwater.stream import DispatchStream
 from fallingwater.stream_models import (
     ConversationPokeAction,
-    ConversationStreamEvent,
+    ConversationEvent,
     Action,
     Event,
     SubAgentRequestedPayload,
@@ -40,9 +40,9 @@ def test_append_and_read_event_use_the_conversation_codec() -> None:
 
     assert stream.append_event(Event.TURN_QUEUED, payload) == "2-0"
     fields = redis.xadd.call_args.args[1]
-    assert decode_conversation_event(fields).payload == payload
+    assert decode_conversation_event("2-0", fields).payload == payload
     assert stream.read_conversation_range() == [
-        ConversationStreamEvent(
+        ConversationEvent(
             entry_id="2-0",
             type=Event.TURN_QUEUED,
             payload=payload,
@@ -114,7 +114,10 @@ def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None
         "fw:conversation:parent:events",
         "fw:dispatch",
     ]
-    assert [decode_conversation_event(call.args[1]).type for call in calls[:3]] == [
+    assert [
+        decode_conversation_event("1-0", call.args[1]).type
+        for call in calls[:3]
+    ] == [
         Event.CONVERSATION_CREATED,
         Event.TURN_QUEUED,
         Event.TURN_SUBAGENT_REQUESTED,

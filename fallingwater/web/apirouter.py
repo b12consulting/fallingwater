@@ -18,7 +18,7 @@ from ..stream_models import (
     Event,
 )
 from ..stream_utils import (
-    decode_conversation_entry,
+    decode_conversation_event,
     decode_dispatch_fields,
     decode_text,
     fmt_conversation_stream,
@@ -115,15 +115,18 @@ def _recent_streams(redis: Redis, namespace: str) -> tuple[str, dict[str, str]]:
 
 def _recent_tail(
     redis: Redis, stream: str
-) -> tuple[str, list[tuple[str, ConversationEvent]]]:
+) -> tuple[str, list[ConversationEvent]]:
     """
     Return up to ten retained events in stream order and their latest ID.
     """
     entries = redis.xrevrange(
         stream, max="+", min="-", count=RECENT_EVENT_LIMIT
     )
-    decoded = [decode_conversation_entry(entry) for entry in entries]
-    return (decoded[0][0] if decoded else "0-0"), list(reversed(decoded))
+    decoded = [
+        decode_conversation_event(entry_id, fields)
+        for entry_id, fields in entries
+    ]
+    return (decoded[0].entry_id if decoded else "0-0"), list(reversed(decoded))
 
 
 def _event_data(event: ConversationEvent, *, full: bool) -> dict:
@@ -136,7 +139,6 @@ def _event_data(event: ConversationEvent, *, full: bool) -> dict:
 def _recent_sse(
     namespace: str,
     stream: str,
-    entry_id: str,
     event: ConversationEvent,
     *,
     full: bool,
@@ -145,7 +147,7 @@ def _recent_sse(
         f"{namespace}:conversation:"
     ).removesuffix(":events")
     return ServerSentEvent(
-        id=f"{conversation_id}:{entry_id}",
+        id=f"{conversation_id}:{event.entry_id}",
         event=event.type.value,
         data={
             **_event_data(event, full=full),
@@ -168,8 +170,8 @@ def recent_events(
 
     for stream in streams:
         streams[stream], entries = _recent_tail(redis, stream)
-        for entry_id, fields in entries:
-            yield _recent_sse(namespace, stream, entry_id, fields, full=full)
+        for event in entries:
+            yield _recent_sse(namespace, stream, event, full=full)
 
     while True:
         emitted_event = False
@@ -205,19 +207,19 @@ def recent_events(
             stream = decode_text(raw_stream)
             if stream == dispatch_name or stream not in streams:
                 continue
-            for raw_entry in entries:
-                entry_id, event = decode_conversation_entry(raw_entry)
-                streams[stream] = entry_id
+            for entry_id, fields in entries:
+                event = decode_conversation_event(entry_id, fields)
+                streams[stream] = event.entry_id
                 emitted_event = True
-                yield _recent_sse(namespace, stream, entry_id, event, full=full)
+                yield _recent_sse(namespace, stream, event, full=full)
 
         for stream in new_streams:
             if stream not in streams or streams[stream] != "0-0":
                 continue
             streams[stream], entries = _recent_tail(redis, stream)
-            for entry_id, event in entries:
+            for event in entries:
                 emitted_event = True
-                yield _recent_sse(namespace, stream, entry_id, event, full=full)
+                yield _recent_sse(namespace, stream, event, full=full)
 
         if not emitted_event:
             yield ServerSentEvent(comment="keep-alive")
@@ -239,12 +241,12 @@ def events(
         emitted_event = False
         batches = redis.xread({stream: cursor}, count=100, block=1000)
         for _, entries in batches:
-            for raw_entry in entries:
-                entry_id, event = decode_conversation_entry(raw_entry)
-                cursor = entry_id
+            for entry_id, fields in entries:
+                event = decode_conversation_event(entry_id, fields)
+                cursor = event.entry_id
                 emitted_event = True
                 yield ServerSentEvent(
-                    id=entry_id,
+                    id=event.entry_id,
                     event=event.type.value,
                     data=_event_data(event, full=True),
                 )

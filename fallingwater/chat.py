@@ -9,7 +9,7 @@ from redis import Redis
 from .stream import DispatchStream
 from .stream_models import (
     ConversationCreatedPayload,
-    ConversationStreamEvent,
+    ConversationEvent,
     Event,
     TurnCompletedPayload,
     TurnFailedPayload,
@@ -112,7 +112,7 @@ class Chat:
         """Submit a new turn and wait for its result."""
         return self.receive(*self.send(prompt))
 
-    def _handle_group_event(self, event: ConversationStreamEvent) -> str | None:
+    def _handle_group_event(self, event: ConversationEvent) -> str | None:
         event_type = event.type
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)

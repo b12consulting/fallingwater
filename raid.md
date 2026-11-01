@@ -405,9 +405,9 @@ revisited. Close or revise an item when the code resolves it.
   conversation events returned by stream
   reads. `DispatchStream.read_group` and the entries in `claim` return
   actions directly; all three `ConversationStream` read methods return
-  events directly. The ID is read metadata and is excluded from
-  serialized Pydantic payloads. Raw-entry CLI and web inspection
-  retain their separate tuple decoder.
+  events directly. IDs stay outside serialized Redis payloads. D76 removes
+  the tuple decoder for CLI and web inspection; D77 requires conversation
+  event IDs in the unified model and includes them in archive records.
 - **D50 — Chat turn identity (superseded).** The initial explicit
   turn-ID and idempotency-key options reused queued turns for repeated
   submissions. Removed under D51 because client retry behavior is
@@ -602,3 +602,21 @@ revisited. Close or revise an item when the code resolves it.
   writers, reconstruction, and compact formatting together. Serialized event
   and archive field names change directly; no legacy aliases or migration are
   provided before production.
+- **D76 — One decoder for conversation stream entries (amended by D77).** Remove
+  `decode_conversation_entry` and its tuple return in favor of
+  `decode_conversation_event(entry_id, fields)`. CLI inspection, web
+  feeds, and turn reconstruction use `ConversationStreamEvent`, with cursor
+  and SSE IDs taken from its `entry_id`. Keep the ID-free `ConversationEvent`
+  for payload decoding and archives; Redis entry IDs remain excluded from
+  serialization. This changes the internal read representation, not stored
+  events, archive records, or CLI/SSE output.
+- **D77 — Unified conversation event model (decided).** Fold payload decoding
+  into one `decode_conversation_event(entry_id, fields)` function, named
+  consistently with `encode_conversation_event`. Remove the former ID-free
+  decoder variant and `ConversationStreamEvent`. Use
+  `ConversationEvent` everywhere, with a required nonempty `entry_id`.
+  Archive records now store and require the source ID; no legacy ID-free
+  archive support is provided. Restore validates the archived IDs but continues
+  to append events with new Redis-generated IDs. Redis payload encoding and
+  CLI/SSE output remain unchanged; dispatch action IDs remain excluded from
+  their serialization.

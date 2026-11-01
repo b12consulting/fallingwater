@@ -7,7 +7,7 @@ from redis import Redis
 from redis.exceptions import ResponseError
 
 from .stream_models import (
-    ConversationStreamEvent,
+    ConversationEvent,
     ConversationPayload,
     ConversationCreatedPayload,
     DispatchAction,
@@ -23,7 +23,7 @@ from .stream_models import (
     InvalidDispatchAction,
 )
 from .stream_utils import (
-    decode_conversation_stream_event,
+    decode_conversation_event,
     decode_dispatch_action,
     decode_text,
     encode_conversation_event,
@@ -164,17 +164,17 @@ class ConversationStream:
 
     def read_conversation_range(
         self, *, min: str = "-", count: int = 100
-    ) -> list[ConversationStreamEvent]:
+    ) -> list[ConversationEvent]:
         """Read and decode a range of conversation events."""
         entries = self.redis.xrange(self.name, min=min, count=count)
         return [
-            decode_conversation_stream_event(entry_id, fields)
+            decode_conversation_event(entry_id, fields)
             for entry_id, fields in entries
         ]
 
     def iter_events(
         self, *, after_id: str = "0-0", page_size: int = 100
-    ) -> Iterator[ConversationStreamEvent]:
+    ) -> Iterator[ConversationEvent]:
         """Yield conversation events after an ID across Redis range pages."""
         if page_size < 1:
             raise ValueError("page_size must be positive")
@@ -191,14 +191,14 @@ class ConversationStream:
         *,
         count: int | None = None,
         block: int | None = None,
-    ) -> list[ConversationStreamEvent]:
+    ) -> list[ConversationEvent]:
         """Read and decode new conversation events after a cursor."""
         options: dict[str, Any] = {"block": block}
         if count is not None:
             options["count"] = count
         batches = self.redis.xread({self.name: cursor}, **options)
         return [
-            decode_conversation_stream_event(entry_id, fields)
+            decode_conversation_event(entry_id, fields)
             for _stream_name, entries in batches
             for entry_id, fields in entries
         ]
@@ -389,7 +389,7 @@ class ConversationStream:
         *,
         count: int = 100,
         block: int | None = None,
-    ) -> list[ConversationStreamEvent]:
+    ) -> list[ConversationEvent]:
         """Read and decode conversation events through a consumer group."""
         return _read_group(
             self.redis,
@@ -399,7 +399,7 @@ class ConversationStream:
             cursor,
             count=count,
             block=block,
-            decode_entry=decode_conversation_stream_event,
+            decode_entry=decode_conversation_event,
         )
 
     def acknowledge(self, group: str, *entry_ids: str) -> None:

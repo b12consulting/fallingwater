@@ -2,15 +2,15 @@
 
 import re
 from collections.abc import Mapping
-from typing import Any, TypeAlias
+from typing import Any
 
 from pydantic import TypeAdapter
+from zstandard import ZstdError
 
 from . import stream_models
 from .utils import compress, decompress
 
 
-RawStreamEntry: TypeAlias = tuple[Any, Mapping[Any, Any]]
 _dispatch_action_adapter = TypeAdapter(stream_models.DispatchAction)
 
 
@@ -96,9 +96,9 @@ def encode_conversation_event(
 
 
 def decode_conversation_event(
-    fields: Mapping[Any, Any],
+    entry_id: str | bytes, fields: Mapping[Any, Any]
 ) -> stream_models.ConversationEvent:
-    """Decode and validate one compressed conversation stream event."""
+    """Decode and validate a compressed conversation entry with its Redis ID."""
     text_fields = {decode_text(key): value for key, value in fields.items()}
     try:
         event_type = stream_models.Event(decode_text(text_fields["type"]))
@@ -120,26 +120,10 @@ def decode_conversation_event(
     try:
         payload_json = decompress(payload_data)
         payload = payload_model.model_validate_json(payload_json)
-    except Exception as error:
+    except (ValueError, ZstdError) as error:
         raise ValueError(
             f"invalid compressed payload for {event_type}"
         ) from error
-    return stream_models.ConversationEvent(type=event_type, payload=payload)
-
-
-def decode_conversation_stream_event(
-    entry_id: str | bytes, fields: Mapping[Any, Any]
-) -> stream_models.ConversationStreamEvent:
-    """Decode a Redis conversation entry with its ID as read metadata."""
-    event = decode_conversation_event(fields)
-    return stream_models.ConversationStreamEvent(
-        entry_id=decode_text(entry_id), type=event.type, payload=event.payload
+    return stream_models.ConversationEvent(
+        entry_id=decode_text(entry_id), type=event_type, payload=payload
     )
-
-
-def decode_conversation_entry(
-    entry: RawStreamEntry,
-) -> tuple[str, stream_models.ConversationEvent]:
-    """Decode one Redis conversation entry and its stream ID."""
-    entry_id, fields = entry
-    return decode_text(entry_id), decode_conversation_event(fields)

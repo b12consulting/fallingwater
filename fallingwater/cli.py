@@ -14,7 +14,7 @@ from redis import Redis
 from .chat import Chat
 from .names import generate_name
 from .stream_utils import (
-    decode_conversation_entry,
+    decode_conversation_event,
     decode_dispatch_fields,
     decode_text,
     fmt_conversation_stream,
@@ -274,10 +274,10 @@ def run_tail(args: argparse.Namespace) -> None:
                 f"fw tail: conversation not found: {args.conversation}"
             )
         entries = redis.xrevrange(stream, count=args.count)
-        for raw_entry in reversed(entries):
-            entry_id, event = decode_conversation_entry(raw_entry)
+        for entry_id, fields in reversed(entries):
+            event = decode_conversation_event(entry_id, fields)
             payload = event.payload.fmt(full=args.full)
-            _print_event(entry_id, event.type.value, payload)
+            _print_event(event.entry_id, event.type.value, payload)
 
 
 def run_dispatch(args: argparse.Namespace) -> None:

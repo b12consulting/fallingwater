@@ -184,11 +184,6 @@ PAYLOAD_MODELS: dict[Event, type[ConversationPayloadType]] = {
 class ConversationEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    entry_id: str = Field(min_length=1)
     type: Event
     payload: ConversationPayloadType
-
-
-class ConversationStreamEvent(ConversationEvent):
-    """A decoded conversation event with its Redis stream entry ID."""
-
-    entry_id: str = Field(exclude=True, min_length=1)

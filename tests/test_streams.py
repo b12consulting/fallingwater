@@ -5,6 +5,7 @@ import zstandard as zstd
 
 from fallingwater.stream_models import (
     ConversationCreatedPayload,
+    ConversationEvent,
     Event,
     InvalidDispatchAction,
     ToolRequestedPayload,
@@ -13,7 +14,6 @@ from fallingwater.stream_models import (
     TurnQueuedPayload,
 )
 from fallingwater.stream_utils import (
-    decode_conversation_entry,
     decode_conversation_event,
     decode_dispatch_fields,
     decode_dispatch_action,
@@ -39,23 +39,44 @@ def test_conversation_event_round_trips_as_compressed_payload() -> None:
     )
 
     event = decode_conversation_event(
+        "1-0",
         {b"type": encoded["type"].encode(), b"payload": encoded["payload"]}
     )
     assert event.type == Event.TURN_QUEUED
     assert event.payload == TurnQueuedPayload(turn_id="turn-1", message="hello")
 
 
-def test_conversation_entry_decodes_its_id_and_event() -> None:
+@pytest.mark.parametrize("entry_id", ["1-0", b"1-0"])
+def test_conversation_stream_event_decodes_its_id_and_event(entry_id) -> None:
     fields = encode_conversation_event(
         Event.CONVERSATION_CREATED,
         ConversationCreatedPayload(agent="example:agent", model="test"),
     )
 
-    entry_id, event = decode_conversation_entry((b"1-0", fields))
+    event = decode_conversation_event(entry_id, fields)
 
-    assert entry_id == "1-0"
+    assert isinstance(event, ConversationEvent)
+    assert event.entry_id == "1-0"
     assert event.type == Event.CONVERSATION_CREATED
     assert event.payload.agent == "example:agent"
+    assert event.model_dump(mode="json")["entry_id"] == "1-0"
+
+
+@pytest.mark.parametrize("entry_id", ["", b""])
+def test_conversation_stream_event_requires_nonempty_id(entry_id) -> None:
+    fields = encode_conversation_event(
+        Event.TURN_QUEUED,
+        TurnQueuedPayload(turn_id="turn-1", message="hello"),
+    )
+    with pytest.raises(ValueError, match="entry_id"):
+        decode_conversation_event(entry_id, fields)
+
+
+def test_conversation_stream_event_rejects_invalid_compressed_payload() -> None:
+    with pytest.raises(ValueError, match="invalid compressed payload"):
+        decode_conversation_event(
+            "1-0", {"type": Event.TURN_QUEUED.value, "payload": b"not zstd"}
+        )
 
 
 def test_tool_request_and_result_events_round_trip() -> None:
@@ -67,6 +88,7 @@ def test_tool_request_and_result_events_round_trip() -> None:
         usage=RunUsage(),
     )
     request_event = decode_conversation_event(
+        "1-0",
         encode_conversation_event(Event.TURN_TOOL_REQUESTED, requested)
     )
     assert request_event.type == Event.TURN_TOOL_REQUESTED
@@ -83,6 +105,7 @@ def test_tool_request_and_result_events_round_trip() -> None:
         result={"value": 2},
     )
     result_event = decode_conversation_event(
+        "2-0",
         encode_conversation_event(Event.TURN_TOOL_RESULT, result)
     )
     assert result_event.type == Event.TURN_TOOL_RESULT
@@ -97,6 +120,7 @@ def test_completed_turn_messages_round_trip_and_format() -> None:
         usage=RunUsage(),
     )
     event = decode_conversation_event(
+        "3-0",
         encode_conversation_event(Event.TURN_COMPLETED, completed)
     )
 

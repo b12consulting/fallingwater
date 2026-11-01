@@ -75,12 +75,17 @@ explicit on stream operations.
 Each conversation event payload has a Pydantic model selected by its `type`.
 The stream entry stores only the text event type and a Zstandard-compressed
 JSON payload. `encode_conversation_event` compresses and validates payloads on
-writes; `decode_conversation_event` decompresses and validates them on reads.
+writes; `decode_conversation_event` decompresses and validates them on
+reads.
 The dispatch stream stays text based because its action entries only carry
 routing identifiers. Stream reads attach Redis entry IDs to decoded dispatch
 actions and conversation events as metadata; those IDs are excluded from the
 Pydantic payload serialization. `Chat` uses event IDs for cursors and
 acknowledgements, while `Worker` uses action IDs for acknowledgements.
+All conversation reads, CLI inspection, web feeds, and archives use one
+`ConversationEvent` model with a required `entry_id`. The decoder attaches the
+Redis ID to that model, rather than returning a separate tuple. Event envelope
+serialization includes the ID; Redis payload serialization does not.
 
 Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in a following write. The
@@ -362,5 +367,8 @@ future reconciliation of partial writes. It does not repair streams yet.
 `archive.py` writes conversation events as newline-delimited Pydantic JSON in a
 Zstandard-compressed file. Zstandard's stream writer and reader keep file I/O
 incremental. Restore validates each event and appends it to an empty conversation
-stream. Archive files use only `.jsonl.zst`; Redis conversation event payloads
+stream. Each archive record includes the required source `entry_id`; restore
+validates it but lets Redis generate new stream IDs when appending events.
+Archives without IDs are not supported. Archive files use only `.jsonl.zst`;
+Redis conversation event payloads
 also use Zstandard, with a separate frame for each event.

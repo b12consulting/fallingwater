@@ -74,7 +74,7 @@ def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
 
     assert cursor == "2-0"
     queued_stream, queued_fields = redis.xadd.call_args_list[-2].args
-    queued = decode_conversation_event(queued_fields)
+    queued = decode_conversation_event(cursor, queued_fields)
     assert queued_stream == "fw:conversation:abc:events"
     assert queued.type == Event.TURN_QUEUED
     assert queued.payload.turn_id == turn_id
@@ -100,8 +100,10 @@ def test_send_queues_repeated_prompts_as_distinct_turns() -> None:
     assert first_turn != second_turn
     assert (first_cursor, second_cursor) == ("2-0", "3-0")
     queued = [
-        decode_conversation_event(call.args[1]).payload
-        for call in redis.xadd.call_args_list[-4::2]
+        decode_conversation_event(cursor, call.args[1]).payload
+        for cursor, call in zip(
+            (first_cursor, second_cursor), redis.xadd.call_args_list[-4::2]
+        )
     ]
     assert queued == [
         TurnQueuedPayload(turn_id=first_turn, message="hello"),
@@ -122,7 +124,7 @@ def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     assert chat.conversation_id == "test"
     assert (chat.agent_path, chat.model) == ("pydantic_ai:Agent", "test")
     _stream, fields = redis.xadd.call_args.args
-    created = decode_conversation_event(fields)
+    created = decode_conversation_event("1-0", fields)
     assert created.type == Event.CONVERSATION_CREATED
     assert created.payload.agent == "pydantic_ai:Agent"
     assert created.payload.model == "test"

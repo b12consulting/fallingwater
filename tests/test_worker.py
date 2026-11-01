@@ -132,7 +132,8 @@ def _process(worker: Worker, fields: dict[str, str]) -> bool:
 def _events(redis: MemoryRedis, conversation_id: str = "abc"):
     stream = f"fw:conversation:{conversation_id}:events"
     return [
-        decode_conversation_event(fields) for _, fields in redis.streams[stream]
+        decode_conversation_event(entry_id, fields)
+        for entry_id, fields in redis.streams[stream]
     ]
 
 
@@ -584,7 +585,7 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     )
     child_stream = worker.dsp_stream.conversation_stream("child-conversation")
     child_created = decode_conversation_event(
-        redis.xrange(child_stream.name)[0][1]
+        *redis.xrange(child_stream.name)[0]
     ).payload
     assert child_created.parent is not None
     child_stream.finish_turn(
