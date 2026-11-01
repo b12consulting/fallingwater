@@ -15,7 +15,8 @@ revisited. Close or revise an item when the code resolves it.
   model runs, results, terminal events, or dispatch actions. A crash
   after a tool's external side effect but before saving its result can
   also run the tool again. Attached tools need their own idempotency
-  strategy for effects that must occur once.
+  strategy for effects that must occur once; D72 defines the execution
+  identity Fallingwater should provide to support that strategy.
 - **R2 — Conversation changes across upgrades (open).** An agent
   definition may change while a conversation is idle. The conversation
   stores its import path but no version, so later turns may run
@@ -559,3 +560,15 @@ revisited. Close or revise an item when the code resolves it.
   parent can read that event directly. This reduces repeated full-stream
   scans; the separate reads and writes still permit duplicate results or
   resume actions under concurrent workers.
+- **D72 — Stable tool execution identity (decided; implementation pending).**
+  Provide tools with enough context to derive a scoped idempotency key from
+  the namespace, conversation ID, turn ID, step ID, and tool call ID.
+  Replaying the same persisted tool request must preserve that identity;
+  distinct requests must have distinct identities. Do not derive it from
+  worker IDs, dispatch entry IDs, or execution attempts. Tool context already
+  exposes conversation and tool call IDs; namespace, turn, and step context
+  remain to be exposed. Tools can pass the key to downstream systems, such as
+  an API's `Idempotency-Key`, so those systems can detect repeated execution.
+  External-effect deduplication belongs to tools and downstream systems, not
+  Fallingwater's worker recovery; this does not guarantee exactly-once
+  effects or close R1.
