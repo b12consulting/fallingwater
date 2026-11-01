@@ -8,7 +8,7 @@ from redis import Redis
 from redis.exceptions import ResponseError
 
 from fallingwater.stream import DispatchStream
-from fallingwater.stream_models import (
+from fallingwater.models import (
     ConversationPokeAction,
     ConversationEvent,
     Action,

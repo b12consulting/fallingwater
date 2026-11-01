@@ -20,7 +20,7 @@ from redis import Redis
 from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, SubAgentRequest
 from fallingwater.turn_state import reconstruct_turn
-from fallingwater.stream_models import (
+from fallingwater.models import (
     ConversationCreatedPayload,
     ConversationPayload,
     Action,

@@ -7,7 +7,7 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 
 from fallingwater.chat import Chat
-from fallingwater.stream_models import (
+from fallingwater.models import (
     ConversationCreatedPayload,
     Action,
     Event,

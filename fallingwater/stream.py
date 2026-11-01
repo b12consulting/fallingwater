@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 from redis import Redis
 from redis.exceptions import ResponseError
 
-from .stream_models import (
+from .models import (
     ConversationEvent,
     ConversationPayload,
     ConversationCreatedPayload,

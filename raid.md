@@ -451,7 +451,7 @@ revisited. Close or revise an item when the code resolves it.
   without configurable executable or rendering flags.
 - **D57 — Separate stream schemas from codecs (decided).** Keep event
   and dispatch action enums, payload and action models, their aliases,
-  and the payload registry in `stream_models.py`. Keep stream key
+  and the payload registry in `models.py` (renamed by D78). Keep stream key
   validation, encoding, decoding, and the dispatch type adapter in
   `stream_utils.py`. Callers import schemas directly from the model
   module, making the module boundary explicit without changing stored
@@ -620,3 +620,7 @@ revisited. Close or revise an item when the code resolves it.
   to append events with new Redis-generated IDs. Redis payload encoding and
   CLI/SSE output remain unchanged; dispatch action IDs remain excluded from
   their serialization.
+- **D78 — Models module name (decided).** Rename `stream_models.py` to
+  `models.py` and update library and test imports. Keep event and dispatch
+  schemas and their payload registry together; codecs remain in
+  `stream_utils.py`. The module rename does not change serialized data.

@@ -6,7 +6,7 @@ from redis import Redis
 from pydantic import TypeAdapter
 
 from fallingwater.stream import DispatchStream
-from fallingwater.stream_models import ConversationEvent
+from fallingwater.models import ConversationEvent
 
 
 adapter = TypeAdapter(ConversationEvent)

@@ -3,7 +3,7 @@
 import pytest
 import zstandard as zstd
 
-from fallingwater.stream_models import (
+from fallingwater.models import (
     ConversationCreatedPayload,
     ConversationEvent,
     Event,

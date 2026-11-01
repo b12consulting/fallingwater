@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pydantic_ai.usage import RunUsage
 
-from .stream_models import (
+from .models import (
     ConversationCreatedPayload,
     ConversationEvent,
     Event,

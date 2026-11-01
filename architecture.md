@@ -59,7 +59,7 @@ invalid-entry value that the worker acknowledges. It creates a
 writes, its reader groups, and writes to both streams. `Chat` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
-`stream_models.py` defines the event and action schemas; `stream_utils.py`
+`models.py` defines the event and action schemas; `stream_utils.py`
 handles naming validation and wire codecs. `Chat` and `Worker` decide when to
 acknowledge entries and resume turns.
 
@@ -349,9 +349,9 @@ agent-run lock. Conversation events are written through the bound stream's
 `append_event` method.
 Both stream classes treat Redis `BUSYGROUP` during group creation as an
 already-created group and propagate other Redis errors.
-`stream_models.py` contains the event and action schemas and the event payload
+`models.py` contains the event and action schemas and the event payload
 registry. `stream_utils.py` contains stream key formatting and codecs; callers
-import schemas directly from `stream_models.py`.
+import schemas directly from `models.py`.
 
 `Chat` and `Worker` retain completion, acknowledgement, and turn-resumption
 policy. `Worker` routes child-result actions before loading an agent because

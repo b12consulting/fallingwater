@@ -48,10 +48,10 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
+|   |-- models.py             Conversation event and dispatch action schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
 |   |-- stream.py             Dispatch and conversation stream access
-|   |-- stream_models.py      Conversation event and dispatch action schemas
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
 |   |-- turn_state.py         Pure reconstruction of one turn from events
 |   |-- utils.py              Shared logger and CLI logging setup

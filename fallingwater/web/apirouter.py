@@ -12,7 +12,7 @@ from fastapi.sse import ServerSentEvent
 from fastapi.templating import Jinja2Templates
 from redis import Redis
 
-from ..stream_models import (
+from ..models import (
     ConversationEvent,
     Action,
     Event,

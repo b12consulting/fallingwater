@@ -7,7 +7,7 @@ from uuid import uuid4
 from redis import Redis
 
 from .stream import DispatchStream
-from .stream_models import (
+from .models import (
     ConversationCreatedPayload,
     ConversationEvent,
     Event,
