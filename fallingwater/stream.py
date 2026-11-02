@@ -10,7 +10,12 @@ from .models import (
     ConversationEvent,
     ConversationPayload,
     ConversationCreatedPayload,
-    DispatchAction,
+    DispatchEvent,
+    DispatchPayloadType,
+    ConversationPokePayload,
+    AgentResumePayload,
+    ToolCallPayload,
+    SubAgentResultPayload,
     Action,
     Event,
     ParentToolReference,
@@ -20,13 +25,14 @@ from .models import (
     TurnQueuedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
-    InvalidDispatchAction,
+    InvalidDispatchEvent,
 )
 from .stream_utils import (
     decode_conversation_event,
-    decode_dispatch_action,
+    decode_dispatch_event,
     decode_text,
     encode_conversation_event,
+    encode_dispatch_event,
     fmt_conversation_stream,
     fmt_dispatch_stream,
 )
@@ -89,10 +95,12 @@ class DispatchStream:
     def conversation_stream(self, conversation_id: str) -> "ConversationStream":
         return ConversationStream(self, conversation_id)
 
-    def append_event(self, action_type: Action, **fields: str) -> str:
+    def append_event(
+        self, action_type: Action, payload: DispatchPayloadType
+    ) -> str:
         """Append one dispatch action and return its Redis entry ID."""
         entry_id = self.redis.xadd(
-            self.name, {**fields, "type": action_type}
+            self.name, encode_dispatch_event(action_type, payload)
         )
         return decode_text(entry_id)
 
@@ -111,7 +119,7 @@ class DispatchStream:
         *,
         count: int = 1,
         block: int | None = None,
-    ) -> list[DispatchAction | InvalidDispatchAction]:
+    ) -> list[DispatchEvent | InvalidDispatchEvent]:
         return _read_group(
             self.redis,
             self.name,
@@ -120,7 +128,7 @@ class DispatchStream:
             cursor,
             count=count,
             block=block,
-            decode_entry=decode_dispatch_action,
+            decode_entry=decode_dispatch_event,
         )
 
     def claim(
@@ -131,7 +139,7 @@ class DispatchStream:
         min_idle_time: int,
         start_id: str,
         count: int = 1,
-    ) -> tuple[str, list[DispatchAction | InvalidDispatchAction], list[str]]:
+    ) -> tuple[str, list[DispatchEvent | InvalidDispatchEvent], list[str]]:
         next_cursor, entries, deleted_ids = self.redis.xautoclaim(
             self.name,
             group,
@@ -143,7 +151,7 @@ class DispatchStream:
         return (
             decode_text(next_cursor),
             [
-                decode_dispatch_action(entry_id, fields)
+                decode_dispatch_event(entry_id, fields)
                 for entry_id, fields in entries
             ],
             [decode_text(entry_id) for entry_id in deleted_ids],
@@ -224,8 +232,10 @@ class ConversationStream:
         )
         self.dispatch.append_event(
             Action.CONVERSATION_POKE,
-            turn_id=turn_id,
-            conversation_id=self.conversation_id,
+            ConversationPokePayload(
+                turn_id=turn_id,
+                conversation_id=self.conversation_id,
+            ),
         )
         return queued_id
 
@@ -246,10 +256,12 @@ class ConversationStream:
         for tool_call_id in call_ids:
             self.dispatch.append_event(
                 Action.TOOL_CALL,
-                conversation_id=self.conversation_id,
-                turn_id=payload.turn_id,
-                step_id=payload.step_id,
-                tool_call_id=tool_call_id,
+                ToolCallPayload(
+                    conversation_id=self.conversation_id,
+                    turn_id=payload.turn_id,
+                    step_id=payload.step_id,
+                    tool_call_id=tool_call_id,
+                ),
             )
 
     def queue_subagent(
@@ -291,8 +303,10 @@ class ConversationStream:
         self.append_event(Event.TURN_SUBAGENT_REQUESTED, parent_request)
         self.dispatch.append_event(
             Action.CONVERSATION_POKE,
-            conversation_id=parent_request.child_conversation_id,
-            turn_id=parent_request.child_turn_id,
+            ConversationPokePayload(
+                conversation_id=parent_request.child_conversation_id,
+                turn_id=parent_request.child_turn_id,
+            ),
         )
         return True
 
@@ -350,9 +364,11 @@ class ConversationStream:
         if expected <= prior_results:
             self.dispatch.append_event(
                 Action.AGENT_RESUME,
-                conversation_id=self.conversation_id,
-                turn_id=payload.turn_id,
-                step_id=payload.step_id,
+                AgentResumePayload(
+                    conversation_id=self.conversation_id,
+                    turn_id=payload.turn_id,
+                    step_id=payload.step_id,
+                ),
             )
         return True
 
@@ -368,13 +384,15 @@ class ConversationStream:
         if parent is not None:
             self.dispatch.append_event(
                 Action.SUBAGENT_RESULT,
-                conversation_id=parent.conversation_id,
-                turn_id=parent.turn_id,
-                step_id=parent.step_id,
-                tool_call_id=parent.tool_call_id,
-                child_conversation_id=self.conversation_id,
-                child_turn_id=payload.turn_id,
-                child_terminal_event_id=terminal_id,
+                SubAgentResultPayload(
+                    conversation_id=parent.conversation_id,
+                    turn_id=parent.turn_id,
+                    step_id=parent.step_id,
+                    tool_call_id=parent.tool_call_id,
+                    child_conversation_id=self.conversation_id,
+                    child_turn_id=payload.turn_id,
+                    child_terminal_event_id=terminal_id,
+                ),
             )
         return True
 

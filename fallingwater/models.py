@@ -3,9 +3,9 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Any, Self, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_ai.usage import RunUsage
 
 
@@ -37,31 +37,27 @@ class Action(StrEnum):
     SUBAGENT_RESULT = "turn.subagent.result"
 
 
-class _DispatchAction(BaseModel):
+class DispatchPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    entry_id: str = Field(exclude=True, min_length=1)
     conversation_id: str = Field(min_length=1)
     turn_id: str = Field(min_length=1)
 
 
-class ConversationPokeAction(_DispatchAction):
-    type: Literal[Action.CONVERSATION_POKE]
+class ConversationPokePayload(DispatchPayload):
+    pass
 
 
-class AgentResumeAction(_DispatchAction):
-    type: Literal[Action.AGENT_RESUME]
+class AgentResumePayload(DispatchPayload):
     step_id: str = Field(min_length=1)
 
 
-class ToolCallAction(_DispatchAction):
-    type: Literal[Action.TOOL_CALL]
+class ToolCallPayload(DispatchPayload):
     step_id: str = Field(min_length=1)
     tool_call_id: str = Field(min_length=1)
 
 
-class SubAgentResultAction(_DispatchAction):
-    type: Literal[Action.SUBAGENT_RESULT]
+class SubAgentResultPayload(DispatchPayload):
     step_id: str = Field(min_length=1)
     tool_call_id: str = Field(min_length=1)
     child_conversation_id: str = Field(min_length=1)
@@ -69,15 +65,37 @@ class SubAgentResultAction(_DispatchAction):
     child_terminal_event_id: str = Field(min_length=1)
 
 
-DispatchAction: TypeAlias = Annotated[
-    ConversationPokeAction
-    | AgentResumeAction
-    | ToolCallAction
-    | SubAgentResultAction,
-    Field(discriminator="type"),
-]
+DispatchPayloadType: TypeAlias = (
+    ConversationPokePayload
+    | AgentResumePayload
+    | ToolCallPayload
+    | SubAgentResultPayload
+)
+
+DISPATCH_PAYLOAD_MODELS: dict[Action, type[DispatchPayloadType]] = {
+    Action.CONVERSATION_POKE: ConversationPokePayload,
+    Action.AGENT_RESUME: AgentResumePayload,
+    Action.TOOL_CALL: ToolCallPayload,
+    Action.SUBAGENT_RESULT: SubAgentResultPayload,
+}
+
+
+class DispatchEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    entry_id: str = Field(min_length=1)
+    type: Action
+    payload: DispatchPayloadType
+
+    @model_validator(mode="after")
+    def validate_payload_type(self) -> Self:
+        if not isinstance(self.payload, DISPATCH_PAYLOAD_MODELS[self.type]):
+            raise ValueError(f"invalid payload for dispatch event {self.type}")
+        return self
+
+
 @dataclass(frozen=True)
-class InvalidDispatchAction:
+class InvalidDispatchEvent:
     """A dispatch entry that cannot be routed or safely associated with a turn."""
 
     entry_id: str
@@ -187,3 +205,9 @@ class ConversationEvent(BaseModel):
     entry_id: str = Field(min_length=1)
     type: Event
     payload: ConversationPayloadType
+
+    @model_validator(mode="after")
+    def validate_payload_type(self) -> Self:
+        if not isinstance(self.payload, PAYLOAD_MODELS[self.type]):
+            raise ValueError(f"invalid payload for conversation event {self.type}")
+        return self

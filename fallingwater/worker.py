@@ -19,14 +19,14 @@ from .agent_proxy import (
 from .catalog import reify_agent
 from .stream import ConversationStream, DispatchStream
 from .models import (
-    AgentResumeAction,
-    ConversationPokeAction,
-    DispatchAction,
+    AgentResumePayload,
+    ConversationPokePayload,
+    DispatchEvent,
     Event,
-    InvalidDispatchAction,
-    SubAgentResultAction,
+    InvalidDispatchEvent,
+    SubAgentResultPayload,
     SubAgentRequestedPayload,
-    ToolCallAction,
+    ToolCallPayload,
     ToolRequestedPayload,
     ToolResultPayload,
     TurnCompletedPayload,
@@ -243,7 +243,7 @@ class Worker:
     def _process_subagent_result(
         self,
         cnv_stream: ConversationStream,
-        action: SubAgentResultAction,
+        action: SubAgentResultPayload,
         conversation: Conversation,
     ) -> bool:
         """Fan a child terminal event into the parent tool result or failure."""
@@ -306,16 +306,17 @@ class Worker:
 
     def process(
         self,
-        action: DispatchAction,
+        action: DispatchEvent,
         cnv_stream: ConversationStream,
         conversation: Conversation,
     ) -> bool:
         """Process one loaded dispatch action and report whether it can be acknowledged."""
         if conversation.completed or conversation.failed is not None:
             return True
-        if isinstance(action, SubAgentResultAction):
+        payload = action.payload
+        if isinstance(payload, SubAgentResultPayload):
             return self._process_subagent_result(
-                cnv_stream, action, conversation
+                cnv_stream, payload, conversation
             )
 
         agent = reify_agent(conversation.agent_path)
@@ -324,8 +325,8 @@ class Worker:
             if not conversation.deps and agent.deps_type is type(None)
             else TypeAdapter(agent.deps_type).validate_python(conversation.deps)
         )
-        match action:
-            case ConversationPokeAction():
+        match payload:
+            case ConversationPokePayload():
                 if conversation.tool_requests is not None:
                     return True
                 return self._run_agent_step(
@@ -336,8 +337,8 @@ class Worker:
                     prompt=conversation.next_prompt,
                     requests=None,
                 )
-            case AgentResumeAction():
-                step_id = action.step_id
+            case AgentResumePayload():
+                step_id = payload.step_id
                 if (
                     conversation.tool_requests is None
                     or conversation.tool_step_id != step_id
@@ -358,14 +359,14 @@ class Worker:
                     prompt=None,
                     requests=requests,
                 )
-            case ToolCallAction():
+            case ToolCallPayload():
                 return self._execute_tool_call(
                     agent=agent,
                     conversation=conversation,
                     cnv_stream=cnv_stream,
                     deps=deps,
-                    step_id=action.step_id,
-                    tool_call_id=action.tool_call_id,
+                    step_id=payload.step_id,
+                    tool_call_id=payload.tool_call_id,
                 )
 
     def run(self) -> None:
@@ -391,7 +392,7 @@ class Worker:
             if not entries:
                 continue
             action = entries[0]
-            if isinstance(action, InvalidDispatchAction):
+            if isinstance(action, InvalidDispatchEvent):
                 logger.warning(
                     "Skipping malformed dispatch fields %s: %s",
                     action.fields,
@@ -399,8 +400,8 @@ class Worker:
                 )
                 self.dsp_stream.acknowledge(self.group, action.entry_id)
                 continue
-            conversation_id = action.conversation_id
-            turn_id = action.turn_id
+            conversation_id = action.payload.conversation_id
+            turn_id = action.payload.turn_id
             logger.info(
                 "Process turn %s in conversation %s", turn_id, conversation_id
             )

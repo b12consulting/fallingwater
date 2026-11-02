@@ -74,7 +74,7 @@ explicit on stream operations.
 
 Each conversation event payload has a Pydantic model selected by its `type`.
 The stream entry stores only the text event type and a Zstandard-compressed
-JSON payload. `encode_conversation_event` compresses and validates payloads on
+JSON payload. `encode_conversation_event` serializes and compresses payloads on
 writes; `decode_conversation_event` decompresses and validates them on
 reads.
 The dispatch stream stays text based because its action entries only carry
@@ -274,8 +274,22 @@ payload model:
 The dispatch stream is text based and does not use the conversation payload
 envelope. `Event` contains only conversation event types; `Action`
 contains dispatch action types, including `conversation.poke`.
-`DispatchStream` validates its fields as a discriminated action model;
-invalid entries retain their Redis IDs so the worker can acknowledge them.
+`DispatchStream` writes an action type and a typed dispatch payload through
+`encode_dispatch_event`, retaining the existing flat text fields on Redis.
+`decode_dispatch_event` rebuilds and validates
+`DispatchEvent(entry_id, type, payload)`. Its `payload` is one of
+`DispatchPayloadType`: `ConversationPokePayload`, `AgentResumePayload`,
+`ToolCallPayload`, or `SubAgentResultPayload`. Payloads carry routing identifiers
+but no action type or Redis ID, so callers can create them before publication.
+The envelope validates that its type matches its payload. Workers route the
+payload and acknowledge the envelope's ID. Invalid entries return
+`InvalidDispatchEvent`, retaining their Redis IDs and raw fields so the worker
+can log and acknowledge them.
+Both `DispatchEvent` and `ConversationEvent` validate their type/payload pairing
+on construction and deserialization, including archive reads. Codecs do not
+repeat that check: encoders serialize the supplied type and payload, while
+decoders delegate envelope validation to the models. Wire-envelope and
+compression/JSON errors remain codec responsibilities.
 Every dispatch entry must include an explicit action type; a missing type is
 invalid and follows the worker's malformed-action acknowledgement policy.
 `conversation.poke` starts a turn; `turn.tool.call` identifies one

@@ -25,7 +25,7 @@ from fallingwater.models import (
     ConversationPayload,
     Action,
     Event,
-    InvalidDispatchAction,
+    InvalidDispatchEvent,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -34,7 +34,7 @@ from fallingwater.models import (
     ToolResultPayload,
 )
 from fallingwater.stream_utils import (
-    decode_dispatch_action,
+    decode_dispatch_event,
     decode_conversation_event,
     encode_conversation_event,
 )
@@ -118,12 +118,14 @@ def _worker(redis: MemoryRedis) -> Worker:
 
 
 def _process(worker: Worker, fields: dict[str, str]) -> bool:
-    action = decode_dispatch_action("1-0", fields)
-    assert not isinstance(action, InvalidDispatchAction)
-    cnv_stream = worker.dsp_stream.conversation_stream(action.conversation_id)
+    action = decode_dispatch_event("1-0", fields)
+    assert not isinstance(action, InvalidDispatchEvent)
+    cnv_stream = worker.dsp_stream.conversation_stream(
+        action.payload.conversation_id
+    )
     conversation = reconstruct_turn(
         cnv_stream.iter_events(),
-        action.turn_id,
+        action.payload.turn_id,
         conversation_stream=cnv_stream.name,
     )
     return worker.process(action, cnv_stream, conversation)
@@ -526,7 +528,7 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     )
     redis = MemoryRedis(_base_entries())
     worker = _worker(redis)
-    action = decode_dispatch_action(
+    action = decode_dispatch_event(
         "1-0",
         {
             "type": Action.CONVERSATION_POKE,

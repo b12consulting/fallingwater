@@ -1,17 +1,14 @@
 """Redis stream names, event codecs, and access helpers."""
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import TypeAdapter
 from zstandard import ZstdError
 
 from . import models
 from .utils import compress, decompress
-
-
-_dispatch_action_adapter = TypeAdapter(models.DispatchAction)
 
 
 def decode_text(value: str | bytes) -> str:
@@ -68,18 +65,27 @@ def decode_dispatch_fields(fields: Mapping[Any, Any]) -> dict[str, str]:
     }
 
 
-def decode_dispatch_action(
+def encode_dispatch_event(
+    action_type: models.Action, payload: models.DispatchPayloadType
+) -> dict[str, str]:
+    """Encode a typed dispatch payload using the existing flat Redis fields."""
+    return {**payload.model_dump(mode="json"), "type": action_type.value}
+
+
+def decode_dispatch_event(
     entry_id: str | bytes,
     fields: Mapping[Any, Any],
-) -> models.DispatchAction | models.InvalidDispatchAction:
+) -> models.DispatchEvent | models.InvalidDispatchEvent:
     """Decode one dispatch entry, preserving malformed entries for acknowledgement."""
     entry_id = decode_text(entry_id)
     try:
         values = decode_dispatch_fields(fields)
-        values["entry_id"] = entry_id
-        return _dispatch_action_adapter.validate_python(values)
-    except (ValueError, TypeError) as error:
-        return models.InvalidDispatchAction(
+        action_type = values.pop("type")
+        return models.DispatchEvent.model_validate(
+            {"entry_id": entry_id, "type": action_type, "payload": values}
+        )
+    except (KeyError, ValueError, TypeError) as error:
+        return models.InvalidDispatchEvent(
             entry_id=entry_id, fields=fields, error=str(error)
         )
 
@@ -87,10 +93,7 @@ def decode_dispatch_action(
 def encode_conversation_event(
     event_type: models.Event, payload: models.ConversationPayload
 ) -> dict[str, str | bytes]:
-    """Validate and encode a compressed conversation stream event."""
-    payload_model = models.PAYLOAD_MODELS.get(event_type)
-    if payload_model is None or not isinstance(payload, payload_model):
-        raise TypeError(f"invalid payload for conversation event {event_type}")
+    """Encode a compressed conversation stream event."""
     compressed_payload = compress(payload.model_dump_json().encode("utf-8"))
     return {"type": event_type.value, "payload": compressed_payload}
 
@@ -112,18 +115,19 @@ def decode_conversation_event(
             "conversation stream events must contain only type and payload"
         )
 
-    payload_model = models.PAYLOAD_MODELS.get(event_type)
-    if payload_model is None:
-        raise ValueError(f"unsupported conversation event type: {event_type}")
     if not isinstance(payload_data, bytes):
         raise ValueError("conversation event payload must be compressed bytes")
     try:
         payload_json = decompress(payload_data)
-        payload = payload_model.model_validate_json(payload_json)
+        payload = json.loads(payload_json)
     except (ValueError, ZstdError) as error:
         raise ValueError(
             f"invalid compressed payload for {event_type}"
         ) from error
-    return models.ConversationEvent(
-        entry_id=decode_text(entry_id), type=event_type, payload=payload
+    return models.ConversationEvent.model_validate(
+        {
+            "entry_id": decode_text(entry_id),
+            "type": event_type,
+            "payload": payload,
+        }
     )

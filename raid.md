@@ -393,7 +393,7 @@ revisited. Close or revise an item when the code resolves it.
   processing errors after loading, and propagates Redis errors for
   recovery. `Worker.process` handles the selected action without a
   surrounding exception handler.
-- **D48 — Typed dispatch actions (decided).** `DispatchStream` decodes
+- **D48 — Typed dispatch actions (amended by D79).** `DispatchStream` decodes
   Redis fields into a discriminated action model for each supported
   dispatch type. `Worker` receives validated identifiers and routes by
   action class instead of indexing raw fields. Invalid entries retain
@@ -501,8 +501,8 @@ revisited. Close or revise an item when the code resolves it.
   terminal events, resume actions, or model runs. Revisit these
   guarantees before depending on automatic recovery or concurrent
   worker correctness.
-- **D65 — Stream append methods (decided).** Route dispatch writes
-  through `DispatchStream.append_event(action_type, **fields)` and
+- **D65 — Stream append methods (amended by D79).** Route dispatch writes
+  through `DispatchStream.append_event(action_type, payload)` and
   conversation writes through
   `ConversationStream.append_event(event_type, payload)`. Each method
   returns the decoded Redis entry ID. This keeps stream names and
@@ -573,13 +573,17 @@ revisited. Close or revise an item when the code resolves it.
   Fallingwater's worker recovery; this does not guarantee exactly-once
   effects or close R1.
 - **D73 — Stateful turn machine (proposed).** Explore a turn machine that
-  holds its current state and accepts events through a transition method,
-  rejecting events that are invalid in that state. Replace the initial
+  holds its current state and accepts conversation payloads through a transition
+  method, rejecting payloads that are invalid in that state. Replace the initial
   reconstruction/eligibility sketch in `contrib/turn-state-machine.py` with
-  a minimal machine initially in `NotStarted`. `PromptSubmitted` transitions
-  to `AwaitingAnswer(prompt)` and returns a poke message; `AgentAnswered`
-  transitions to `Completed(prompt, answer)` and returns no messages.
-  The caller publishes returned messages; the machine performs no Redis I/O.
+  a minimal prompt-to-answer machine. D82 replaces its explicit state classes
+  with transition models holding payload endpoints. Accepting
+  `TurnQueuedPayload` returns a `ConversationPokePayload`; accepting
+  `TurnCompletedPayload` finishes the turn and returns `None`.
+  The machine rejects payloads for another turn and invalid state/payload pairs.
+  Callers pass a decoded event's payload; Redis IDs and type envelopes remain
+  outside the machine.
+  The caller publishes returned payloads; the machine performs no Redis I/O.
   Durable replay, tool and child transitions, and
   concurrent checkpoint protection remain design work; the library is unchanged.
 - **D74 — Durable parent-side child intent (decided; implementation pending).**
@@ -618,9 +622,61 @@ revisited. Close or revise an item when the code resolves it.
   Archive records now store and require the source ID; no legacy ID-free
   archive support is provided. Restore validates the archived IDs but continues
   to append events with new Redis-generated IDs. Redis payload encoding and
-  CLI/SSE output remain unchanged; dispatch action IDs remain excluded from
-  their serialization.
+  CLI/SSE output remain unchanged. D79 replaces the dispatch action model
+  with a typed payload and event envelope.
 - **D78 — Models module name (decided).** Rename `stream_models.py` to
   `models.py` and update library and test imports. Keep event and dispatch
   schemas and their payload registry together; codecs remain in
   `stream_utils.py`. The module rename does not change serialized data.
+- **D79 — Dispatch payloads and event envelopes (decided).** Separate
+  `ConversationPokePayload`, `AgentResumePayload`, `ToolCallPayload`, and
+  `SubAgentResultPayload` from Redis metadata. Their union is
+  `DispatchPayloadType`; `DispatchEvent` contains the required `entry_id`,
+  action `type`, and typed `payload`, validating the type/payload pairing.
+  State-machine transitions can return one payload or `None` without inventing
+  a Redis ID. `DispatchStream.append_event` takes the action type and payload;
+  dispatch codecs preserve the existing flat Redis wire format. Workers route
+  payloads and acknowledge event IDs. Malformed entries use
+  `InvalidDispatchEvent`. Event-envelope serialization includes the ID, while
+  dispatch payloads and Redis fields do not.
+- **D80 — Event-model payload validation (decided).** Validate type/payload
+  pairing on both `ConversationEvent` and `DispatchEvent`, including direct
+  construction and archive deserialization. Remove duplicate pairing checks
+  from encoders and explicit payload-model selection from decoders. Encoders
+  serialize the supplied type and payload; decoders rebuild the envelope and
+  delegate validation to its model. Keep wire-envelope and compression/JSON
+  checks in codecs, and preserve malformed dispatch entries for acknowledgement.
+- **D81 — Tool and child turn-machine sketch (proposed).** Add
+  `contrib/turn-state-machine2.py` with parent and child machines driven by
+  conversation payloads. Keep one dispatch payload or `None` per transition
+  by modeling sequential tool calls, not production parallel fan-out. Child
+  terminal outcomes emit a parent poke; the caller reads the saved child
+  outcome and supplies its payload to the waiting parent. This avoids requiring
+  a terminal Redis event ID inside a payload-only transition. The sketch
+  retains the current child-failure propagation policy and leaves history,
+  durable child intent (D74), replay, and concurrency outside its scope.
+  Like the base example, Pydantic transition models now hold start/stop
+  payloads, validate endpoint correlation, and implement `emit`; a TypeAdapter
+  selects the edge. Request and per-call results remain machine context across
+  edges. Child-outcome edges compare the delegated child turn ID and normalize
+  completion to a parent tool result or failure to a parent failure, so a child
+  terminal payload does not mistakenly finish its parent.
+- **D82 — Payload-instance transition models (proposed).** In
+  `contrib/turn-state-machine.py`, define Pydantic transition models with
+  narrowly typed `start` and `stop` fields holding actual payload instances.
+  The model classes define allowed edges; each instance records a particular
+  transition. A `TypeAdapter` over the model union selects and instantiates the
+  valid transition from the current and incoming payloads. Declare `None` to
+  queued, queued to completed, and completed to `None`.
+  The base transition validator compares turn IDs only when both endpoints are
+  present. The first transition has no starting turn ID to compare.
+  The machine stores the latest payload and validates incoming payloads against
+  these edges. Completion is recognized from the retained completed payload;
+  `FinishTurn` models its terminal boundary without an additional input.
+  Each transition declares
+  an `emit` method returning a dispatch payload or `None`; the machine calls
+  the matched edge's method, which can access its payloads, before updating the
+  current payload. The terminal
+  boundary remains a marker rather than an extra executed transition.
+  The tool/child sketch follows the same transition-model architecture, with
+  machine context for data spanning multiple edges.

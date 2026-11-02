@@ -33,7 +33,8 @@ This is the quick-start guide for agents working in this repository. See
 |-- contrib/                  Small component experiments
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment
-|   |-- turn-state-machine.py Minimal stateful prompt-to-answer turn example
+|   |-- turn-state-machine.py Payload-instance transition model example
+|   |-- turn-state-machine2.py Tool and child payload-transition model example
 |   |-- test-compression.py   Compression benchmark for a serialized conversation turn
 |   |-- test-conversation.py  Standalone Pydantic AI conversation history example
 |   |-- test-recursive-runner.py Generic deferred tool and subagent runner example
@@ -48,7 +49,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
-|   |-- models.py             Conversation event and dispatch action schemas
+|   |-- models.py             Conversation and dispatch event/payload schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
 |   |-- stream.py             Dispatch and conversation stream access

@@ -9,7 +9,8 @@ from redis.exceptions import ResponseError
 
 from fallingwater.stream import DispatchStream
 from fallingwater.models import (
-    ConversationPokeAction,
+    ConversationPokePayload,
+    DispatchEvent,
     ConversationEvent,
     Action,
     Event,
@@ -57,8 +58,7 @@ def test_dispatch_append_event_writes_action_fields() -> None:
 
     assert dispatch.append_event(
         Action.CONVERSATION_POKE,
-        conversation_id="abc",
-        turn_id="turn-1",
+        ConversationPokePayload(conversation_id="abc", turn_id="turn-1"),
     ) == "3-0"
     redis.xadd.assert_called_once_with(
         "fw:dispatch",
@@ -173,11 +173,12 @@ def test_dispatch_group_read_and_autoclaim_decode_entries_and_cursor() -> None:
     assert dispatch.read_group(
         "workers", "worker-1", ">", count=1, block=500
     ) == [
-        ConversationPokeAction(
+        DispatchEvent(
             entry_id="3-0",
             type=Action.CONVERSATION_POKE,
-            conversation_id="abc",
-            turn_id="turn-1",
+            payload=ConversationPokePayload(
+                conversation_id="abc", turn_id="turn-1"
+            ),
         ),
     ]
     assert dispatch.claim(
@@ -189,11 +190,12 @@ def test_dispatch_group_read_and_autoclaim_decode_entries_and_cursor() -> None:
     ) == (
         "4-0",
         [
-            ConversationPokeAction(
+            DispatchEvent(
                 entry_id="3-0",
                 type=Action.CONVERSATION_POKE,
-                conversation_id="abc",
-                turn_id="turn-1",
+                payload=ConversationPokePayload(
+                    conversation_id="abc", turn_id="turn-1"
+                ),
             ),
         ],
         ["2-0"],
