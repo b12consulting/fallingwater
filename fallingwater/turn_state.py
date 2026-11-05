@@ -386,8 +386,17 @@ class TurnStateMachine:
         self.terminal_event_id: str | None = None
 
     @property
-    def done(self) -> bool:
-        return isinstance(self.state, (TurnCompletedPayload, TurnFailedPayload))
+    def completed(self) -> bool:
+        return isinstance(self.state, TurnCompletedPayload)
+
+    @property
+    def failed(self) -> bool:
+        return isinstance(self.state, TurnFailedPayload)
+
+    @property
+    def running(self) -> bool:
+        """Nonterminal, including not-yet-started turns and waiting turns."""
+        return not (self.completed or self.failed)
 
     @property
     def prompt(self) -> str:
@@ -419,7 +428,7 @@ class TurnStateMachine:
     ) -> Literal["ready", "wait", "stale"]:
         """Stale hints are acknowledged; premature resumes remain pending."""
         if (
-            self.done
+            not self.running
             or action.conversation_id != self.conversation_id
             or action.turn_id != self.turn_id
         ):
@@ -448,7 +457,7 @@ class TurnStateMachine:
 
     def accepts_result(self, payload: ToolResultPayload) -> bool:
         return (
-            not self.done
+            self.running
             and self.request is not None
             and payload.turn_id == self.turn_id
             and payload.step_id == self.request.step_id
@@ -484,7 +493,7 @@ class TurnStateMachine:
 
     def preview(self, payload: TurnPayload) -> tuple[Emission, ...]:
         """Validate and emit without making an unpersisted fact current."""
-        if self.done:
+        if not self.running:
             raise ValueError(f"Turn is already terminal: {self.turn_id}")
         edge = transition_adapter.validate_python(
             {"start": self.state, "stop": payload}
@@ -527,7 +536,7 @@ class TurnStateMachine:
         payload = event.payload
         if isinstance(payload, ConversationCreatedPayload):
             raise ValueError("Conversation settings are not a turn payload")
-        if self.done:
+        if not self.running:
             return
         if (
             isinstance(payload, ToolResultPayload)
@@ -535,7 +544,7 @@ class TurnStateMachine:
         ):
             return
         if isinstance(payload, SubAgentRequestedPayload) and (
-            self.done
+            not self.running
             or self.request is None
             or payload.step_id != self.request.step_id
             or self.delegations.get(payload.tool_call_id) == payload
@@ -544,7 +553,7 @@ class TurnStateMachine:
         if payload == self.queued or payload == self.request:
             return
         self.transition(payload)
-        if self.done:
+        if not self.running:
             self.terminal_event_id = event.entry_id
 
 
@@ -564,10 +573,10 @@ class Conversation(BaseModel):
         payload = event.payload
         if isinstance(payload, ConversationCreatedPayload):
             raise ValueError("Conversation settings were already loaded")
-        if (
-            isinstance(payload, TurnQueuedPayload)
-            and payload.turn_id not in self.turn_state
-        ):
+
+        if payload.turn_id not in self.turn_state:
+            if not isinstance(payload, TurnQueuedPayload):
+                raise ValueError(f"No prompt found for turn: {payload.turn_id}")
             self.turn_state[payload.turn_id] = TurnStateMachine(
                 self.conversation_id,
                 payload.turn_id,
@@ -579,15 +588,10 @@ class Conversation(BaseModel):
                     else None
                 ),
             )
-        if payload.turn_id not in self.turn_state:
-            raise ValueError(f"No prompt found for turn: {payload.turn_id}")
         machine = self.turn_state[payload.turn_id]
-        was_done = machine.done
+        was_running = machine.running
         machine.replay(event)
-        if (
-            not was_done
-            and isinstance(machine.state, TurnCompletedPayload)
-        ):
+        if was_running and machine.completed:
             self._history = MessageHistory(
                 previous=self._history, messages=tuple(machine.turn_messages)
             )

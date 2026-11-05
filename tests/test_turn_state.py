@@ -190,6 +190,39 @@ def test_transition_endpoints_must_belong_to_same_turn(stop):
         transition_adapter.validate_python({"start": _queued(), "stop": stop})
 
 
+@pytest.mark.parametrize(
+    ("payloads", "running", "completed", "failed"),
+    [
+        ([], True, False, False),
+        ([_queued()], True, False, False),
+        ([_queued(), _request("call-1")], True, False, False),
+        ([_queued(), _request("call-1"), _result()], True, False, False),
+        ([_queued(), _request("call-1"), _delegation()], True, False, False),
+        ([_queued(), _completed()], False, True, False),
+        (
+            [_queued(), TurnFailedPayload(turn_id="turn-1", error="failed")],
+            False, False, True,
+        ),
+        (
+            [
+                _queued(),
+                _request("call-1", "call-2"),
+                _result(),
+                TurnFailedPayload(turn_id="turn-1", error="failed"),
+            ],
+            False, False, True,
+        ),
+    ],
+)
+def test_machine_status_properties(payloads, running, completed, failed):
+    machine = TurnStateMachine("conversation", "turn-1")
+    for payload in payloads:
+        machine.transition(payload)
+    assert machine.running is running
+    assert machine.completed is completed
+    assert machine.failed is failed
+
+
 def test_start_and_terminal_transitions():
     machine = TurnStateMachine("conversation", "turn-1")
     poke = ConversationPokePayload(
@@ -200,7 +233,8 @@ def test_start_and_terminal_transitions():
     assert machine.dispatch_status(poke) == "ready"
     answer = _completed()
     assert machine.transition(answer) == ()
-    assert machine.done
+    assert machine.completed
+    assert not machine.running
     assert machine.state == answer
     assert machine.turn_messages == ModelMessagesTypeAdapter.validate_python(
         answer.turn_messages
@@ -509,6 +543,9 @@ def test_first_persisted_terminal_wins_replay_but_transition_stays_strict(
     machine.replay(_event("4-0", later))
     assert vars(machine) == before
     assert machine.state == first
+    assert machine.completed is isinstance(first, TurnCompletedPayload)
+    assert machine.failed is isinstance(first, TurnFailedPayload)
+    assert not machine.running
     assert machine.terminal_event_id == "3-0"
     with pytest.raises(ValueError, match="already terminal"):
         machine.transition(later)
@@ -622,7 +659,9 @@ def test_child_terminal_normalization_is_pure_and_preserves_parent_ids(failed):
         )
     assert outcome is not None
     machine.transition(outcome)
-    assert machine.done is failed
+    assert machine.running is (not failed)
+    assert machine.failed is failed
+    assert not machine.completed
 
 
 @pytest.mark.parametrize(
@@ -756,8 +795,8 @@ def test_conversation_reconstructs_all_turns_with_queue_boundary_snapshots():
     assert third.usage is not fourth.usage
     assert third.usage is not first.usage
     assert first.usage is not one.usage
-    assert third.done
-    assert not fourth.done
+    assert not third.running
+    assert fourth.running
     assert fourth.prompt == "prompt turn-4"
     assert fourth.usage is not None
     fourth.usage.requests = 999
@@ -953,7 +992,7 @@ def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
     # The sibling's terminal fact is persisted but not yet in this snapshot.
     assert machine.preview(later) == ()
     assert vars(machine) == before
-    assert not machine.done
+    assert machine.running
     assert machine.terminal_event_id is None
     persisted.append(_event("4-0", later))
     for event in persisted:
@@ -1095,7 +1134,7 @@ def test_replay_does_not_execute_tools_agents_or_redis_io(monkeypatch):
         conversation_id="conversation",
     )
     machine = conversation.turn_state["turn-1"]
-    assert machine.done
+    assert machine.completed
     assert machine.parent == parent
     assert machine.terminal_event_id == "7-0"
     assert machine.tool_results == {

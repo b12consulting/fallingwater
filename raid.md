@@ -717,3 +717,11 @@ revisited. Close or revise an item when the code resolves it.
   Keep dispatch eligibility, replay filtering, and stream-envelope checks
   unchanged. The machine remains a plain Python class; this does not introduce
   Pydantic machine-wide or assignment validation.
+- **D85 — Derived turn status properties (decided and implemented).** Replace
+  `TurnStateMachine.done` with `completed`, `failed`, and `running`, derived from
+  the current payload rather than stored separately. Running is the complement
+  of completed or failed, including an unstarted machine and turns waiting for
+  tools or children; it does not indicate active worker execution. Preserve
+  terminal replay/dispatch behavior and add history only when a running turn
+  becomes successfully completed. This does not implement retries or reopen
+  failed turns.

@@ -806,7 +806,7 @@ def test_checkpoint_and_refresh_preserve_first_concurrent_terminal(
         failed if first_succeeds else completed,
         conversation.turn_state["turn-1"],
     )
-    assert not conversation.turn_state["turn-1"].done
+    assert conversation.turn_state["turn-1"].running
     stream.queue_turn("turn-2", "next prompt")
     stream.refresh(conversation)
     fresh = reconstruct_conversation(

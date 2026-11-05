@@ -426,6 +426,13 @@ messages or reset results; obsolete results and late work after termination are
 ignored. Queue-time history includes canonical completed turns in terminal-event
 order. Overlapping turns never gain answers that arrived after their submission.
 
+Machine status is derived from the current payload: `completed` identifies
+successful completion, `failed` identifies terminal failure, and `running` means
+neither. Running includes a machine before its queued payload and turns waiting
+for tools or children; it does not mean a worker is actively executing.
+Conversation history advances only when replay changes a running turn into a
+completed one, never on failure or repeated terminal events.
+
 Workers ask the machine whether an action is ready, waiting, or stale before
 loading an agent. They execute ready work, leave premature resumes pending, and
 acknowledge stale actions. Dependency/schema validation and Redis/error boundaries
