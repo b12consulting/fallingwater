@@ -61,7 +61,7 @@ conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
 `models.py` defines the event and action schemas; `stream_utils.py`
 handles naming validation and wire codecs. `Chat` and `Worker` decide when to
-acknowledge entries and resume turns.
+acknowledge entries; turn machines decide which work is enabled.
 
 `Chat.send` asks its conversation stream to write the queued event and dispatch
 poke with two successive `XADD` commands. Group and consumer names remain
@@ -110,9 +110,15 @@ the canonical delta for later turns. Deferred request payloads use
 the full conversation history.
 
 `ConversationStream.iter_events()` pages through the event stream and supplies
-decoded events to `turn_state.reconstruct_turn`. That pure function returns the
-queued `next_prompt`, fixed agent path and model, prior history, dependencies,
-current turn ID, and latest usage in a frozen Pydantic `Conversation` model.
+decoded events to `turn_state.reconstruct_conversation`. That pure function
+returns a `Conversation` containing the configuration, conversation ID, replay
+cursor, and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
+prompt, prior-history snapshot, accumulated turn messages, usage, active tool
+request, per-call results, and child delegations. History and usage are captured
+when the queued event is replayed, not when a worker later claims its action.
+Snapshots share immutable `MessageHistory` prefixes. Replay appends one completed
+message chunk at a time rather than retaining a full history copy for every
+turn; the worker materializes only its selected turn's history for execution.
 
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
@@ -314,7 +320,7 @@ the shared conversation event decoder.
 function tools and returns their requests to `Worker`. The worker stores each
 request and dispatches each call independently. Results are stored by call ID;
 the last unique result schedules the next agent run with `DeferredToolResults`.
-The reconstructed turn records its last event ID. Result fan-in checks only
+The reconstructed conversation records its last event ID. Result fan-in checks only
 events written after that snapshot, then checks the new tail after saving its
 result to include sibling results that arrived during the write.
 Synchronous and asynchronous function tools are supported; deferred requests
@@ -367,10 +373,15 @@ already-created group and propagate other Redis errors.
 registry. `stream_utils.py` contains stream key formatting and codecs; callers
 import schemas directly from `models.py`.
 
-`Chat` and `Worker` retain completion, acknowledgement, and turn-resumption
-policy. `Worker` routes child-result actions before loading an agent because
-those actions use only saved stream state. The CLI inspection commands and web
-SSE feeds keep their read-only query patterns, which include scans and
+`Chat` and `Worker` retain acknowledgement policy. Payload transitions and turn
+machines own workflow validation, completion, and turn-resumption policy.
+`ConversationStream.checkpoint` previews a transition without changing the
+snapshot, persists its payload, and publishes its emissions. Only stream replay
+advances the snapshot, so an optimistic write cannot displace an earlier
+concurrent outcome. `save_tool_result` additionally replays the concurrent
+tail before and after the write. `Worker` routes child-result actions before
+loading an agent because those actions use only saved stream state. The CLI
+inspection commands and web SSE feeds keep their read-only query patterns, which include scans and
 multi-stream reads.
 
 `recovery.py` currently contains only a no-op `recover()` and a checklist for
@@ -386,3 +397,38 @@ validates it but lets Redis generate new stream IDs when appending events.
 Archives without IDs are not supported. Archive files use only `.jsonl.zst`;
 Redis conversation event payloads
 also use Zstandard, with a separate frame for each event.
+
+## AD16 — Payload transitions and per-turn machines
+
+`turn_state.py` defines Pydantic transition models with actual payloads as their
+`start` and `stop` endpoints. A `TypeAdapter` selects the edge; endpoint validators
+check payload correlation and schemas, and `validate_context(machine)` checks
+active steps, pending calls, delegations, and agent readiness before `emit(machine)`
+constructs emissions. Both checks precede any machine mutation. Child-outcome
+normalization validates context without emitting actions. Machine context holds
+information needed across edges, so a last payload does not imply sequential execution. Request
+transitions emit a tuple of tool actions for parallel fan-out; unique result
+transitions emit an agent resume only when all calls have results. Delegations
+and ordinary results can interleave in any order.
+
+Child-outcome transitions normalize a saved child completion into a parent tool
+result, or a child failure into a parent failure. Terminal transitions emit a
+`ParentNotification` intent rather than inventing a Redis ID. The persistence
+boundary resolves it to `SubAgentResultPayload` after appending the terminal
+event, preserving direct reads of that exact child event. No stored payload or
+dispatch wire format changes.
+
+`preview()` validates and emits without mutation; strict `transition()` also
+advances the machine and rejects invalid new facts. Replay uses the same transitions
+but discards emissions, retaining the first result for each call and the first
+terminal outcome. Identical current request checkpoints do not duplicate
+messages or reset results; obsolete results and late work after termination are
+ignored. Queue-time history includes canonical completed turns in terminal-event
+order. Overlapping turns never gain answers that arrived after their submission.
+
+Workers ask the machine whether an action is ready, waiting, or stale before
+loading an agent. They execute ready work, leave premature resumes pending, and
+acknowledge stale actions. Dependency/schema validation and Redis/error boundaries
+remain outside the machine. These machines do not provide locks, atomic writes,
+exactly-once execution, or partial-write reconciliation; `recovery.py` remains
+unimplemented.

@@ -65,7 +65,8 @@ successful return confirms queuing; it does not mean the agent has completed.
 Every call submits a new turn, including repeated prompts.
 
 A worker reads dispatch through the `workers` consumer group. It reconstructs
-the selected turn from the conversation stream, loads the agent and
+the conversation's turn machines from the stream, selects the dispatched turn,
+asks its machine whether the action is enabled, then loads the agent and
 dependencies, and runs the agent with the prompt and saved message history.
 The first turn has no earlier conversation history. Concurrent workers may
 run the same turn if a dispatch action is reclaimed while its first worker
@@ -107,6 +108,8 @@ Each completed event stores the new messages for its turn, rather than a full
 conversation snapshot. The worker combines completed message deltas in stream
 order to reconstruct history for later turns. It also restores the latest
 earlier completed usage, so usage accumulates across sequential turns.
+Replay retains the first terminal outcome for each turn, so duplicate
+completions do not repeat its history.
 
 Opening `Chat` with an existing conversation ID uses its saved agent and model,
 ignoring supplied replacements. Initial dependencies remain in the creation

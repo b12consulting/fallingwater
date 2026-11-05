@@ -518,9 +518,9 @@ revisited. Close or revise an item when the code resolves it.
   model, dependencies, or prompt, so it cannot rebuild a child after a
   partial creation. D74 defines the durable child intent needed before
   relying on recovery. Replay should choose one canonical terminal outcome and
-  one result per call, ignoring later duplicates; `reconstruct_turn`
-  does not yet do this for duplicate completed-turn history or
-  repeated tool-request history.
+  one result per call, ignoring later duplicates. D83 implements canonical
+  result/terminal replay and skips identical current request checkpoints;
+  partial-write reconciliation remains unimplemented.
 - **D67 — Per-call request events (declined).** One conversation event
   per deferred tool call would pair each durable request with its
   dispatch action. The existing `turn.tool.requested` event already
@@ -531,8 +531,8 @@ revisited. Close or revise an item when the code resolves it.
   Otherwise a partially written set is indistinguishable from a
   complete one and current turn reconstruction would duplicate history
   and reset collected results. Keep one request-set event per model step.
-- **D68 — Empty deferred request sets (decided).** Reject an empty
-  `call_ids` list in `ConversationStream.queue_tool_requests` before
+- **D68 — Empty deferred request sets (decided; validation moved by D83).** Reject an empty
+  deferred call set in the `RequestTools` transition before
   writing an event. A deferred request checkpoint without calls has
   no tool work to dispatch; the former immediate resume action is
   removed.
@@ -572,7 +572,7 @@ revisited. Close or revise an item when the code resolves it.
   External-effect deduplication belongs to tools and downstream systems, not
   Fallingwater's worker recovery; this does not guarantee exactly-once
   effects or close R1.
-- **D73 — Stateful turn machine (proposed).** Explore a turn machine that
+- **D73 — Stateful turn machine (implemented by D83).** Explore a turn machine that
   holds its current state and accepts conversation payloads through a transition
   method, rejecting payloads that are invalid in that state. Replace the initial
   reconstruction/eligibility sketch in `contrib/turn-state-machine.py` with
@@ -584,8 +584,8 @@ revisited. Close or revise an item when the code resolves it.
   Callers pass a decoded event's payload; Redis IDs and type envelopes remain
   outside the machine.
   The caller publishes returned payloads; the machine performs no Redis I/O.
-  Durable replay, tool and child transitions, and
-  concurrent checkpoint protection remain design work; the library is unchanged.
+  D83 integrates durable replay and parallel tool/child transitions.
+  Concurrent checkpoint protection remains design work.
 - **D74 — Durable parent-side child intent (decided; implementation pending).**
   Persist the full child delegation intent in the parent conversation stream
   before creating or dispatching the child. Include the child conversation
@@ -680,3 +680,40 @@ revisited. Close or revise an item when the code resolves it.
   boundary remains a marker rather than an extra executed transition.
   The tool/child sketch follows the same transition-model architecture, with
   machine context for data spanning multiple edges.
+- **D83 — Production payload-transition machines (decided and implemented).**
+  Integrate the transition-model architecture into `turn_state.py`, preserving
+  production parallel fan-out and exact-ID child-result dispatch rather than
+  the sequential scheduling and parent pokes of D81. `Conversation` stores its
+  settings, ID, replay cursor, and `turn_state: dict[str, TurnStateMachine]`;
+  per-turn prompt/history/usage, requests, results, and delegations live on the
+  machines. Replay builds every turn and snapshots earlier completed history
+  and usage at each queued event, including overlapping turns. History snapshots
+  share immutable prefixes so replay does not retain quadratic full-history
+  copies. Conversation-private replay accumulators index the latest prefix
+  and completed turn without duplicating message contents or usage values.
+  Transition `emit()` methods return tuples for zero, one, or many actions.
+  A parent notification intent is bound to the generated Redis terminal ID
+  after the terminal write. Stream helpers handle persistence and concurrent
+  tail refreshes; workers ask machines for ready/waiting/stale eligibility,
+  execute enabled work, and checkpoint its payload.
+  Checkpoint helpers preview transitions without changing their reconstructed
+  snapshot; only stream replay advances it. This prevents a just-written outcome
+  from hiding an earlier concurrently persisted result or terminal event.
+  Keep strict validation for new transitions but use the first persisted result
+  per call and the first terminal outcome during replay. Ignore identical
+  current request checkpoints without repeating messages or resetting results,
+  obsolete results, and late work after a terminal outcome. Child results are
+  normalized through child transitions without importing the parent's agent.
+  No Redis transaction, lock, recovery implementation, or wire-schema change
+  is introduced. D64, D71, D72, and D74 still apply. A future recovery pass
+  should enumerate enabled actions from machines and reconcile missing writes;
+  atomic checkpoint bundles or compare-and-set protection remain to be designed.
+- **D84 — Transition context validation (decided and implemented).** Add
+  `Transition.validate_context(machine)` and move agent-readiness, pending-call,
+  repeated-step, and delegation guards out of `emit()` into that hook. Shared
+  readiness and pending-call helpers belong to the base transition rather than
+  `TurnStateMachine`. `preview()` validates context before constructing emissions;
+  child-outcome normalization validates context without emitting unused actions.
+  Keep dispatch eligibility, replay filtering, and stream-envelope checks
+  unchanged. The machine remains a plain Python class; this does not introduce
+  Pydantic machine-wide or assignment validation.

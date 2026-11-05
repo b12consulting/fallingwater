@@ -7,24 +7,19 @@ from redis import Redis
 from redis.exceptions import ResponseError
 
 from .models import (
+    Action,
     ConversationEvent,
     ConversationPayload,
     ConversationCreatedPayload,
     DispatchEvent,
     DispatchPayloadType,
-    ConversationPokePayload,
-    AgentResumePayload,
-    ToolCallPayload,
-    SubAgentResultPayload,
-    Action,
+    DISPATCH_PAYLOAD_MODELS,
     Event,
+    PAYLOAD_MODELS,
     ParentToolReference,
     SubAgentRequestedPayload,
-    ToolRequestedPayload,
     ToolResultPayload,
     TurnQueuedPayload,
-    TurnCompletedPayload,
-    TurnFailedPayload,
     InvalidDispatchEvent,
 )
 from .stream_utils import (
@@ -37,7 +32,13 @@ from .stream_utils import (
     fmt_dispatch_stream,
 )
 from .utils import logger
-from .turn_state import Conversation
+from .turn_state import (
+    Conversation,
+    Emission,
+    ParentNotification,
+    TurnPayload,
+    TurnStateMachine,
+)
 
 
 GroupEntry = TypeVar("GroupEntry")
@@ -226,43 +227,41 @@ class ConversationStream:
         prompt: str,
     ) -> str:
         """Append a queued prompt, then dispatch its turn."""
-        queued_id = self.append_event(
-            Event.TURN_QUEUED,
+        return self.checkpoint(
             TurnQueuedPayload(turn_id=turn_id, message=prompt),
+            TurnStateMachine(self.conversation_id, turn_id),
         )
-        self.dispatch.append_event(
-            Action.CONVERSATION_POKE,
-            ConversationPokePayload(
-                turn_id=turn_id,
-                conversation_id=self.conversation_id,
-            ),
-        )
-        return queued_id
 
-    def queue_tool_requests(
-        self,
-        payload: ToolRequestedPayload,
-        call_ids: list[str],
-    ) -> None:
-        """Persist one deferred request set and fan out one dispatch per call."""
-        if not call_ids:
-            raise ValueError("deferred tool request set must contain a call")
-        if len(call_ids) != len(set(call_ids)):
-            raise ValueError("deferred tool call IDs must be unique")
-        self.append_event(Event.TURN_TOOL_REQUESTED, payload)
-        from pprint import pprint
-        print("tool requested payload")
-        pprint(payload.requests)
-        for tool_call_id in call_ids:
-            self.dispatch.append_event(
-                Action.TOOL_CALL,
-                ToolCallPayload(
-                    conversation_id=self.conversation_id,
-                    turn_id=payload.turn_id,
-                    step_id=payload.step_id,
-                    tool_call_id=tool_call_id,
-                ),
+    def publish(self, actions: tuple[Emission, ...], entry_id: str) -> None:
+        """Publish machine emissions, binding terminal IDs after persistence."""
+        for emission in actions:
+            payload = (
+                emission.dispatch(entry_id)
+                if isinstance(emission, ParentNotification)
+                else emission
             )
+            self.dispatch.append_event(
+                next(
+                    action
+                    for action, model in DISPATCH_PAYLOAD_MODELS.items()
+                    if isinstance(payload, model)
+                ),
+                payload,
+            )
+
+    def checkpoint(
+        self, payload: TurnPayload, machine: TurnStateMachine
+    ) -> str:
+        """Persist a validated fact and emissions; refresh snapshots by replay."""
+        actions = machine.preview(payload)
+        event_type = next(
+            event
+            for event, model in PAYLOAD_MODELS.items()
+            if isinstance(payload, model)
+        )
+        entry_id = self.append_event(event_type, payload)
+        self.publish(actions, entry_id)
+        return entry_id
 
     def queue_subagent(
         self,
@@ -272,8 +271,10 @@ class ConversationStream:
         child_model: str,
         child_deps: dict[str, Any],
         child_prompt: str,
+        machine: TurnStateMachine,
     ) -> bool:
         """Record a child request and queue its first turn."""
+        actions = machine.preview(parent_request)
         child_stream = self.dispatch.conversation_stream(
             parent_request.child_conversation_id
         )
@@ -300,100 +301,32 @@ class ConversationStream:
                 message=child_prompt,
             ),
         )
-        self.append_event(Event.TURN_SUBAGENT_REQUESTED, parent_request)
-        self.dispatch.append_event(
-            Action.CONVERSATION_POKE,
-            ConversationPokePayload(
-                conversation_id=parent_request.child_conversation_id,
-                turn_id=parent_request.child_turn_id,
-            ),
+        entry_id = self.append_event(
+            Event.TURN_SUBAGENT_REQUESTED, parent_request
         )
+        self.publish(actions, entry_id)
         return True
+
+    def refresh(self, conversation: Conversation) -> None:
+        """Fold the tail into an existing snapshot without publishing actions."""
+        for event in self.iter_events(after_id=conversation.last_event_id):
+            conversation.apply(event)
 
     def save_tool_result(
         self,
         payload: ToolResultPayload,
-        expected_call_ids: list[str],
         conversation: Conversation,
     ) -> bool:
-        """Save a unique call result and queue one resume after the final result."""
-        expected = set(expected_call_ids)
-        if payload.tool_call_id not in expected:
-            raise ValueError(
-                "tool result is not part of the deferred request set"
-            )
-
-        if (
-            conversation.current_turn_id != payload.turn_id
-            or conversation.tool_step_id != payload.step_id
-            or conversation.tool_requests is None
-        ):
-            raise ValueError("tool result has no matching request step")
-        if conversation.completed or conversation.failed is not None:
+        """Reconcile concurrent facts before saving a result and emitting fan-in."""
+        self.refresh(conversation)
+        machine = conversation.turn_state[payload.turn_id]
+        if not machine.accepts_result(payload):
             return False
-
-        prior_results = set(conversation.tool_results)
-        if payload.tool_call_id in prior_results:
-            return False
-        cursor = conversation.last_event_id
-        for event in self.iter_events(after_id=cursor):
-            cursor = event.entry_id
-            if getattr(event.payload, "turn_id", None) != payload.turn_id:
-                continue
-            if event.type == Event.TURN_TOOL_RESULT:
-                if event.payload.step_id == payload.step_id:
-                    prior_results.add(event.payload.tool_call_id)
-            elif event.type in (Event.TURN_COMPLETED, Event.TURN_FAILED):
-                return False
-            elif event.type == Event.TURN_TOOL_REQUESTED:
-                return False
-
-        if payload.tool_call_id in prior_results:
-            return False
-
-        self.append_event(Event.TURN_TOOL_RESULT, payload)
-        prior_results.add(payload.tool_call_id)
-        for event in self.iter_events(after_id=cursor):
-            if (
-                event.type == Event.TURN_TOOL_RESULT
-                and event.payload.turn_id == payload.turn_id
-                and event.payload.step_id == payload.step_id
-            ):
-                prior_results.add(event.payload.tool_call_id)
-        # All requested results are available; resume the agent.
-        if expected <= prior_results:
-            self.dispatch.append_event(
-                Action.AGENT_RESUME,
-                AgentResumePayload(
-                    conversation_id=self.conversation_id,
-                    turn_id=payload.turn_id,
-                    step_id=payload.step_id,
-                ),
-            )
-        return True
-
-    def finish_turn(
-        self,
-        event_type: Event,
-        payload: TurnCompletedPayload | TurnFailedPayload,
-        *,
-        parent: ParentToolReference | None,
-    ) -> bool:
-        """Persist a terminal event and notify its parent."""
-        terminal_id = self.append_event(event_type, payload)
-        if parent is not None:
-            self.dispatch.append_event(
-                Action.SUBAGENT_RESULT,
-                SubAgentResultPayload(
-                    conversation_id=parent.conversation_id,
-                    turn_id=parent.turn_id,
-                    step_id=parent.step_id,
-                    tool_call_id=parent.tool_call_id,
-                    child_conversation_id=self.conversation_id,
-                    child_turn_id=payload.turn_id,
-                    child_terminal_event_id=terminal_id,
-                ),
-            )
+        machine.preview(payload)
+        entry_id = self.append_event(Event.TURN_TOOL_RESULT, payload)
+        # Do not advance to our write's ID: a sibling may precede it in the tail.
+        self.refresh(conversation)
+        self.publish(machine.resume_actions(payload.step_id), entry_id)
         return True
 
     def create_group(self, group: str, *, id: str = "0") -> None:

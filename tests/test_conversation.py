@@ -3,6 +3,9 @@
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import TypeAdapter
+from pydantic_ai import DeferredToolRequests
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -22,6 +25,13 @@ from fallingwater.stream_utils import (
     decode_conversation_event,
     encode_conversation_event,
 )
+from fallingwater.turn_state import TurnStateMachine
+
+
+def _machine() -> TurnStateMachine:
+    machine = TurnStateMachine("parent", "parent-turn")
+    machine.transition(TurnQueuedPayload(turn_id="parent-turn", message="hello"))
+    return machine
 
 
 def test_append_and_read_event_use_the_conversation_codec() -> None:
@@ -70,7 +80,7 @@ def test_dispatch_append_event_writes_action_fields() -> None:
     )
 
 
-def test_queue_tool_requests_rejects_empty_set_without_writing() -> None:
+def test_checkpoint_rejects_empty_tool_request_set_without_writing() -> None:
     redis = MagicMock(spec=Redis)
     conversation = DispatchStream(redis).conversation_stream("abc")
     payload = ToolRequestedPayload(
@@ -82,7 +92,9 @@ def test_queue_tool_requests_rejects_empty_set_without_writing() -> None:
     )
 
     with pytest.raises(ValueError, match="must contain a call"):
-        conversation.queue_tool_requests(payload, [])
+        machine = TurnStateMachine("abc", "turn-1")
+        machine.transition(TurnQueuedPayload(turn_id="turn-1", message="hello"))
+        conversation.checkpoint(payload, machine)
 
     redis.xadd.assert_not_called()
 
@@ -98,6 +110,21 @@ def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None
         child_conversation_id="child",
         child_turn_id="child-turn",
     )
+    machine = _machine()
+    machine.transition(
+        ToolRequestedPayload(
+            turn_id="parent-turn",
+            step_id="step-1",
+            requests=TypeAdapter(DeferredToolRequests).dump_python(
+                DeferredToolRequests(
+                    calls=[ToolCallPart("child", {}, tool_call_id="call-1")]
+                ),
+                mode="json",
+            ),
+            step_messages=[],
+            usage=RunUsage(),
+        )
+    )
 
     assert parent.queue_subagent(
         parent_request=request,
@@ -105,6 +132,7 @@ def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None
         child_model="test",
         child_deps={},
         child_prompt="hello",
+        machine=machine,
     )
 
     calls = redis.xadd.call_args_list

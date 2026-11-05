@@ -13,6 +13,7 @@ This is the quick-start guide for agents working in this repository. See
 |-- README.md                 Project overview and local development
 |-- Makefile                  Compile D2 diagrams to SVGs beside their sources
 |-- architecture.md           Architecture decisions and conventions
+|-- memory.md                 Durable repository implementation notes
 |-- pyproject.toml            Package, dependencies, CLI entry point, pytest setup
 |-- compose.yaml              Local Redis service
 |-- raid.md                   Technical risks, issues, assumptions, decisions
@@ -52,16 +53,16 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- models.py             Conversation and dispatch event/payload schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
-|   |-- stream.py             Dispatch and conversation stream access
+|   |-- stream.py             Stream access and transition checkpoint persistence
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
-|   |-- turn_state.py         Pure reconstruction of one turn from events
+|   |-- turn_state.py         Payload transitions, turn machines, conversation replay
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page
 |   |   |-- __init__.py       Web exports
 |   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
 |   |   `-- templates/
 |   |       `-- monitor.html  Read-only recent conversation monitor
-|   |-- worker.py             Dispatch action processing
+|   |-- worker.py             Machine-enabled agent, tool, and child action execution
 |   |-- worker_pool.py        Worker threads and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
@@ -76,6 +77,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_conversation.py  Dispatch and conversation stream checks
     |-- test_jeopardy.py      Jeopardy child-agent request checks
     |-- test_streams.py       Conversation event codec and naming checks
+    |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks
     `-- test_worker.py        Parallel tool and child-turn dispatch checks
 ```

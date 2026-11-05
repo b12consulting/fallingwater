@@ -58,6 +58,8 @@ The worker writes one `turn.tool.requested` event containing the full request
 set, the run's new message history, and usage. It assigns the request set a
 `step_id`. Following writes append one `turn.tool.call` dispatch action
 per requested call, carrying the conversation, turn, step, and tool-call IDs.
+The `RequestTools` transition validates the set and emits these parallel
+actions; the stream checkpoint persists the request before publishing them.
 
 The worker acknowledges the agent action and becomes available for other work.
 Another available worker, or the same worker on a later action, processes each
@@ -108,6 +110,9 @@ turn.tool.result [A] <-------------------------------------+  |
 
 The request event and per-call dispatch entries are separate writes.
 Result collection compares unique tool-call IDs against the saved request set.
+Each turn machine keeps the active request and collected results. Transitions
+validate incoming facts, and the machine rejects stale actions or defers a
+resume while any result is missing. Replay keeps the first result for each call.
 After saving the final missing result, the worker queues one resume action.
 Earlier results do not queue a resume. No worker stays blocked waiting for
 sibling calls; after saving its own result, it acknowledges its action and

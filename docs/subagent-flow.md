@@ -93,6 +93,10 @@ terminal event ID. Its receiving worker reads that event directly and records
 the child's answer message
 as a `turn.tool.result` in the parent conversation. The child's full message
 history and usage stay in the child stream.
+Child-outcome transitions validate the saved delegation and normalize the
+terminal payload into the parent's result or failure. Terminal transitions emit
+a notification intent; the stream checkpoint binds the child's actual Redis
+event ID after persistence. Child-result handling does not load the parent agent.
 
 If all calls in the parent's deferred request set now have results, the
 worker saving the final result then dispatches `turn.agent.resume`.
