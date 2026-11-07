@@ -33,6 +33,8 @@ This is the quick-start guide for agents working in this repository. See
 |-- contrib/                  Small component experiments
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment
+|   |-- turn-state-machine.py Payload-instance transition model example
+|   |-- turn-state-machine2.py Tool and child payload-transition model example
 |   |-- test-compression.py   Compression benchmark for a serialized conversation turn
 |   |-- test-conversation.py  Standalone Pydantic AI conversation history example
 |   |-- test-recursive-runner.py Generic deferred tool and subagent runner example
@@ -47,18 +49,19 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
+|   |-- models.py             Conversation and dispatch event/payload schemas
 |   |-- names.py              Words and generator for CLI conversation names
-|   |-- stream.py             Dispatch and conversation streams and run leases
-|   |-- stream_models.py      Conversation event and dispatch action schemas
+|   |-- recovery.py           Recovery work checklist and placeholder
+|   |-- stream.py             Stream access and transition checkpoint persistence
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
-|   |-- turn_state.py         Pure reconstruction of one turn from events
+|   |-- turn_state.py         Payload transitions, turn machines, conversation replay
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page
 |   |   |-- __init__.py       Web exports
 |   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
 |   |   `-- templates/
 |   |       `-- monitor.html  Read-only recent conversation monitor
-|   |-- worker.py             Dispatch action processing
+|   |-- worker.py             Machine-enabled agent, tool, and child action execution
 |   |-- worker_pool.py        Worker threads and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
@@ -73,6 +76,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_conversation.py  Dispatch and conversation stream checks
     |-- test_jeopardy.py      Jeopardy child-agent request checks
     |-- test_streams.py       Conversation event codec and naming checks
+    |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks
     `-- test_worker.py        Parallel tool and child-turn dispatch checks
 ```

@@ -7,7 +7,7 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 
 from fallingwater.chat import Chat
-from fallingwater.stream_models import (
+from fallingwater.models import (
     ConversationCreatedPayload,
     Action,
     Event,
@@ -39,7 +39,7 @@ def _completed(turn_id: str, message: str):
     return encode_conversation_event(
         Event.TURN_COMPLETED,
         TurnCompletedPayload(
-            turn_id=turn_id, message=message, history=[], usage=RunUsage()
+            turn_id=turn_id, message=message, turn_messages=[], usage=RunUsage()
         ),
     )
 
@@ -68,33 +68,31 @@ def _end_input(_prompt: str) -> str:
 def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
     redis = MagicMock(spec=Redis)
     chat = _empty_chat(redis)
-    pipeline = redis.pipeline.return_value.__enter__.return_value
-    pipeline.execute.return_value = ("2-0", "1-0")
+    redis.xadd.return_value = "2-0"
 
     turn_id, cursor = chat.send("hello")
 
     assert cursor == "2-0"
-    queued_stream, queued_fields = pipeline.xadd.call_args_list[0].args
-    queued = decode_conversation_event(queued_fields)
+    queued_stream, queued_fields = redis.xadd.call_args_list[-2].args
+    queued = decode_conversation_event(cursor, queued_fields)
     assert queued_stream == "fw:conversation:abc:events"
     assert queued.type == Event.TURN_QUEUED
     assert queued.payload.turn_id == turn_id
     assert queued.payload.message == "hello"
-    dispatch_stream, dispatch_fields = pipeline.xadd.call_args_list[1].args
+    dispatch_stream, dispatch_fields = redis.xadd.call_args_list[-1].args
     assert dispatch_stream == "fw:dispatch"
     assert dispatch_fields == {
         "type": Action.CONVERSATION_POKE,
         "turn_id": turn_id,
         "conversation_id": "abc",
     }
-    redis.pipeline.assert_called_once_with(transaction=True)
+    redis.pipeline.assert_not_called()
 
 
 def test_send_queues_repeated_prompts_as_distinct_turns() -> None:
     redis = MagicMock(spec=Redis)
     chat = _empty_chat(redis)
-    pipeline = redis.pipeline.return_value.__enter__.return_value
-    pipeline.execute.side_effect = [("2-0", "1-0"), ("3-0", "2-0")]
+    redis.xadd.side_effect = ["2-0", "1-0", "3-0", "2-0"]
 
     first_turn, first_cursor = chat.send("hello")
     second_turn, second_cursor = chat.send("hello")
@@ -102,8 +100,10 @@ def test_send_queues_repeated_prompts_as_distinct_turns() -> None:
     assert first_turn != second_turn
     assert (first_cursor, second_cursor) == ("2-0", "3-0")
     queued = [
-        decode_conversation_event(call.args[1]).payload
-        for call in pipeline.xadd.call_args_list[::2]
+        decode_conversation_event(cursor, call.args[1]).payload
+        for cursor, call in zip(
+            (first_cursor, second_cursor), redis.xadd.call_args_list[-4::2]
+        )
     ]
     assert queued == [
         TurnQueuedPayload(turn_id=first_turn, message="hello"),
@@ -124,7 +124,7 @@ def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
     assert chat.conversation_id == "test"
     assert (chat.agent_path, chat.model) == ("pydantic_ai:Agent", "test")
     _stream, fields = redis.xadd.call_args.args
-    created = decode_conversation_event(fields)
+    created = decode_conversation_event("1-0", fields)
     assert created.type == Event.CONVERSATION_CREATED
     assert created.payload.agent == "pydantic_ai:Agent"
     assert created.payload.model == "test"

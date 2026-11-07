@@ -5,12 +5,11 @@ from typing import cast
 from uuid import uuid4
 
 from redis import Redis
-from redis.exceptions import ResponseError
 
 from .stream import DispatchStream
-from .stream_models import (
+from .models import (
     ConversationCreatedPayload,
-    ConversationStreamEvent,
+    ConversationEvent,
     Event,
     TurnCompletedPayload,
     TurnFailedPayload,
@@ -76,20 +75,7 @@ class Chat:
                     deps=dict(deps or {}),
                 ),
             )
-        self._create_group()
-
-    def _create_group(self) -> None:
-        """Ensure the terminal reader group exists for this conversation."""
-        try:
-            self.stream.create_group(self.group, id="0")
-        except ResponseError as error:
-            if not str(error).startswith("BUSYGROUP"):
-                raise
-            logger.debug(
-                "Consumer group %s already exists on %s",
-                self.group,
-                self.events,
-            )
+        self.stream.create_group(self.group, id="0")
 
     def send(self, prompt: str) -> tuple[str, str]:
         """Queue a prompt as a new turn and return its ID and event cursor."""
@@ -126,7 +112,7 @@ class Chat:
         """Submit a new turn and wait for its result."""
         return self.receive(*self.send(prompt))
 
-    def _handle_group_event(self, event: ConversationStreamEvent) -> str | None:
+    def _handle_group_event(self, event: ConversationEvent) -> str | None:
         event_type = event.type
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)

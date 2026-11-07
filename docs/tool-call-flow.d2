@@ -14,7 +14,7 @@ success: Successful tool call {
   dispatch -> workers: Claim conversation.poke
   conversation -> workers: Load turn
   workers -> workers: Run agent and receive deferred tool requests
-  request: "Save request + jobs: atomic transaction" {
+  request: "Save request, then queue jobs" {
     workers -> conversation: Save request set
     conversation.requested: turn.tool.requested
     workers -> dispatch: Queue tool action
@@ -24,7 +24,7 @@ success: Successful tool call {
 
   dispatch -> workers: Claim turn.tool.call
   workers -> workers: Execute tool and receive result
-  result: "Save result + resume: atomic transaction" {
+  result: "Save result, then queue resume" {
     workers -> conversation: Save tool result
     conversation.tool_result: turn.tool.result
     workers -> dispatch: Queue resume action
@@ -63,7 +63,7 @@ parallel: Parallel tool calls {
   conversation.wait_a: Waiting for A
   workers -> dispatch: "Worker 3 acknowledges turn.tool.call [C]"
 
-  final_result: "Worker 1 saves final result + resume: atomic transaction" {
+  final_result: "Worker 1 saves final result, then queues resume" {
     workers -> conversation: Save A
     conversation.result_a: "turn.tool.result [A]"
     workers -> dispatch: Queue resume action

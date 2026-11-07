@@ -1,53 +1,67 @@
-"""Redis access and coordination for Fallingwater conversations."""
+"""Redis stream access for Fallingwater conversations."""
 
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass
-from threading import Event as ThreadEvent, Thread
 from typing import Any, TypeVar
 
 from redis import Redis
-from redis.exceptions import LockError, RedisError, WatchError
+from redis.exceptions import ResponseError
 
-from .stream_models import (
-    ConversationStreamEvent,
+from .models import (
+    Action,
+    ConversationEvent,
     ConversationPayload,
     ConversationCreatedPayload,
-    DispatchAction,
-    Action,
+    DispatchEvent,
+    DispatchPayloadType,
+    DISPATCH_PAYLOAD_MODELS,
     Event,
+    PAYLOAD_MODELS,
     ParentToolReference,
     SubAgentRequestedPayload,
-    ToolRequestedPayload,
     ToolResultPayload,
     TurnQueuedPayload,
-    TurnCompletedPayload,
-    TurnFailedPayload,
-    InvalidDispatchAction,
+    InvalidDispatchEvent,
 )
 from .stream_utils import (
     decode_conversation_event,
-    decode_conversation_stream_event,
-    decode_dispatch_action,
+    decode_dispatch_event,
     decode_text,
     encode_conversation_event,
+    encode_dispatch_event,
     fmt_conversation_stream,
     fmt_dispatch_stream,
+)
+from .utils import logger
+from .turn_state import (
+    Conversation,
+    Emission,
+    ParentNotification,
+    TurnPayload,
+    TurnStateMachine,
 )
 
 
 GroupEntry = TypeVar("GroupEntry")
 
 
-@dataclass(frozen=True)
-class AgentRunLease:
-    """Report whether a renewable agent-run lock was lost."""
-
-    lost: ThreadEvent
-
-    def ensure_held(self) -> None:
-        if self.lost.is_set():
-            raise RedisError("agent run lease was lost while running")
+def _create_group(
+    redis: Redis,
+    stream: str,
+    group: str,
+    *,
+    id: str,
+    mkstream: bool | None = None,
+) -> None:
+    try:
+        if mkstream is None:
+            redis.xgroup_create(stream, group, id=id)
+        else:
+            redis.xgroup_create(stream, group, id=id, mkstream=mkstream)
+    except ResponseError as error:
+        if not str(error).startswith("BUSYGROUP"):
+            logger.exception("Could not create consumer group for %s", stream)
+            raise
+        logger.debug("Consumer group %s already exists on %s", group, stream)
 
 
 def _read_group(
@@ -82,10 +96,21 @@ class DispatchStream:
     def conversation_stream(self, conversation_id: str) -> "ConversationStream":
         return ConversationStream(self, conversation_id)
 
+    def append_event(
+        self, action_type: Action, payload: DispatchPayloadType
+    ) -> str:
+        """Append one dispatch action and return its Redis entry ID."""
+        entry_id = self.redis.xadd(
+            self.name, encode_dispatch_event(action_type, payload)
+        )
+        return decode_text(entry_id)
+
     def create_group(
         self, group: str, *, id: str = "0", mkstream: bool = False
     ) -> None:
-        self.redis.xgroup_create(self.name, group, id=id, mkstream=mkstream)
+        _create_group(
+            self.redis, self.name, group, id=id, mkstream=mkstream
+        )
 
     def read_group(
         self,
@@ -95,7 +120,7 @@ class DispatchStream:
         *,
         count: int = 1,
         block: int | None = None,
-    ) -> list[DispatchAction | InvalidDispatchAction]:
+    ) -> list[DispatchEvent | InvalidDispatchEvent]:
         return _read_group(
             self.redis,
             self.name,
@@ -104,7 +129,7 @@ class DispatchStream:
             cursor,
             count=count,
             block=block,
-            decode_entry=decode_dispatch_action,
+            decode_entry=decode_dispatch_event,
         )
 
     def claim(
@@ -115,7 +140,7 @@ class DispatchStream:
         min_idle_time: int,
         start_id: str,
         count: int = 1,
-    ) -> tuple[str, list[DispatchAction | InvalidDispatchAction], list[str]]:
+    ) -> tuple[str, list[DispatchEvent | InvalidDispatchEvent], list[str]]:
         next_cursor, entries, deleted_ids = self.redis.xautoclaim(
             self.name,
             group,
@@ -127,7 +152,7 @@ class DispatchStream:
         return (
             decode_text(next_cursor),
             [
-                decode_dispatch_action(entry_id, fields)
+                decode_dispatch_event(entry_id, fields)
                 for entry_id, fields in entries
             ],
             [decode_text(entry_id) for entry_id in deleted_ids],
@@ -138,7 +163,7 @@ class DispatchStream:
 
 
 class ConversationStream:
-    """Access one conversation's events and atomically dispatch its actions."""
+    """Access one conversation's events and dispatch its actions."""
 
     def __init__(self, dispatch: DispatchStream, conversation_id: str) -> None:
         self.dispatch = dispatch
@@ -146,71 +171,23 @@ class ConversationStream:
         self.conversation_id = conversation_id
         self.name = fmt_conversation_stream(dispatch.namespace, conversation_id)
 
-    @contextmanager
-    def lock_agent_run(
-        self, turn_id: str, step_id: str, *, lease_seconds: float
-    ) -> Iterator[AgentRunLease | None]:
-        """Hold a renewable per-step lease for the duration of one agent run."""
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be positive")
-        lock_name = (
-            f"{self.dispatch.namespace}:agent-run:"
-            f"{self.conversation_id}:{turn_id}:{step_id}"
-        )
-        lock = self.redis.lock(
-            lock_name,
-            timeout=lease_seconds,
-            blocking=False,
-            thread_local=False,
-        )
-        if not lock.acquire(blocking=False):
-            yield None
-            return
-
-        stop_heartbeat = ThreadEvent()
-        lost = ThreadEvent()
-
-        def renew() -> None:
-            while not stop_heartbeat.wait(lease_seconds / 3):
-                try:
-                    if not lock.extend(lease_seconds, replace_ttl=True):
-                        lost.set()
-                        return
-                except RedisError:
-                    lost.set()
-                    return
-
-        heartbeat = Thread(target=renew, daemon=True)
-        try:
-            heartbeat.start()
-            try:
-                yield AgentRunLease(lost)
-            finally:
-                stop_heartbeat.set()
-                heartbeat.join()
-        finally:
-            try:
-                lock.release()
-            except LockError:
-                pass
-
     def read_conversation_range(
         self, *, min: str = "-", count: int = 100
-    ) -> list[ConversationStreamEvent]:
+    ) -> list[ConversationEvent]:
         """Read and decode a range of conversation events."""
         entries = self.redis.xrange(self.name, min=min, count=count)
         return [
-            decode_conversation_stream_event(entry_id, fields)
+            decode_conversation_event(entry_id, fields)
             for entry_id, fields in entries
         ]
 
     def iter_events(
-        self, *, page_size: int = 100
-    ) -> Iterator[ConversationStreamEvent]:
-        """Yield all conversation events across successive Redis range pages."""
+        self, *, after_id: str = "0-0", page_size: int = 100
+    ) -> Iterator[ConversationEvent]:
+        """Yield conversation events after an ID across Redis range pages."""
         if page_size < 1:
             raise ValueError("page_size must be positive")
-        cursor = "-"
+        cursor = f"({after_id}"
         while entries := self.read_conversation_range(
             min=cursor, count=page_size
         ):
@@ -223,14 +200,14 @@ class ConversationStream:
         *,
         count: int | None = None,
         block: int | None = None,
-    ) -> list[ConversationStreamEvent]:
+    ) -> list[ConversationEvent]:
         """Read and decode new conversation events after a cursor."""
         options: dict[str, Any] = {"block": block}
         if count is not None:
             options["count"] = count
         batches = self.redis.xread({self.name: cursor}, **options)
         return [
-            decode_conversation_stream_event(entry_id, fields)
+            decode_conversation_event(entry_id, fields)
             for _stream_name, entries in batches
             for entry_id, fields in entries
         ]
@@ -249,63 +226,42 @@ class ConversationStream:
         turn_id: str,
         prompt: str,
     ) -> str:
-        """Atomically append a queued prompt and its dispatch poke."""
-        with self.redis.pipeline(transaction=True) as pipeline:
-            pipeline.xadd(
-                self.name,
-                encode_conversation_event(
-                    Event.TURN_QUEUED,
-                    TurnQueuedPayload(turn_id=turn_id, message=prompt),
-                ),
-            )
-            pipeline.xadd(
-                self.dispatch.name,
-                {
-                    "type": Action.CONVERSATION_POKE,
-                    "turn_id": turn_id,
-                    "conversation_id": self.conversation_id,
-                },
-            )
-            queued_id, _dispatch_id = pipeline.execute()
-        return decode_text(queued_id)
+        """Append a queued prompt, then dispatch its turn."""
+        return self.checkpoint(
+            TurnQueuedPayload(turn_id=turn_id, message=prompt),
+            TurnStateMachine(self.conversation_id, turn_id),
+        )
 
-    def queue_tool_requests(
-        self,
-        payload: ToolRequestedPayload,
-        call_ids: list[str],
-    ) -> None:
-        """Persist one deferred request set and fan out one dispatch per call."""
-        if len(call_ids) != len(set(call_ids)):
-            raise ValueError("deferred tool call IDs must be unique")
-        with self.redis.pipeline(transaction=True) as pipeline:
-            pipeline.xadd(
-                self.name,
-                encode_conversation_event(
-                    Event.TURN_TOOL_REQUESTED, payload
-                ),
+    def publish(self, actions: tuple[Emission, ...], entry_id: str) -> None:
+        """Publish machine emissions, binding terminal IDs after persistence."""
+        for emission in actions:
+            payload = (
+                emission.dispatch(entry_id)
+                if isinstance(emission, ParentNotification)
+                else emission
             )
-            for tool_call_id in call_ids:
-                pipeline.xadd(
-                    self.dispatch.name,
-                    {
-                        "type": Action.TOOL_CALL,
-                        "conversation_id": self.conversation_id,
-                        "turn_id": payload.turn_id,
-                        "step_id": payload.step_id,
-                        "tool_call_id": tool_call_id,
-                    },
-                )
-            if not call_ids:
-                pipeline.xadd(
-                    self.dispatch.name,
-                    {
-                        "type": Action.AGENT_RESUME,
-                        "conversation_id": self.conversation_id,
-                        "turn_id": payload.turn_id,
-                        "step_id": payload.step_id,
-                    },
-                )
-            pipeline.execute()
+            self.dispatch.append_event(
+                next(
+                    action
+                    for action, model in DISPATCH_PAYLOAD_MODELS.items()
+                    if isinstance(payload, model)
+                ),
+                payload,
+            )
+
+    def checkpoint(
+        self, payload: TurnPayload, machine: TurnStateMachine
+    ) -> str:
+        """Persist a validated fact and emissions; refresh snapshots by replay."""
+        actions = machine.preview(payload)
+        event_type = next(
+            event
+            for event, model in PAYLOAD_MODELS.items()
+            if isinstance(payload, model)
+        )
+        entry_id = self.append_event(event_type, payload)
+        self.publish(actions, entry_id)
+        return entry_id
 
     def queue_subagent(
         self,
@@ -315,198 +271,66 @@ class ConversationStream:
         child_model: str,
         child_deps: dict[str, Any],
         child_prompt: str,
+        machine: TurnStateMachine,
     ) -> bool:
-        """Atomically record a child request and queue its first turn."""
-        parent_stream = self.name
+        """Record a child request and queue its first turn."""
+        actions = machine.preview(parent_request)
         child_stream = self.dispatch.conversation_stream(
-            parent_request.conversation_id
-        ).name
+            parent_request.child_conversation_id
+        )
         reference = ParentToolReference(
             conversation_id=self.conversation_id,
             turn_id=parent_request.turn_id,
             step_id=parent_request.step_id,
             tool_call_id=parent_request.tool_call_id,
         )
-        child_turn_id = parent_request.child_turn_id
-        while True:
-            with self.redis.pipeline() as pipeline:
-                try:
-                    pipeline.watch(parent_stream)
-                    parent_entries = pipeline.xrange(parent_stream)
-                    if any(
-                        event.type == Event.TURN_SUBAGENT_REQUESTED
-                        and event.payload.turn_id == parent_request.turn_id
-                        and event.payload.step_id == parent_request.step_id
-                        and event.payload.tool_call_id
-                        == parent_request.tool_call_id
-                        for _entry_id, fields in parent_entries
-                        for event in [decode_conversation_event(fields)]
-                    ):
-                        pipeline.unwatch()
-                        return False
-                    pipeline.multi()
-                    pipeline.xadd(
-                        parent_stream,
-                        encode_conversation_event(
-                            Event.TURN_SUBAGENT_REQUESTED, parent_request
-                        ),
-                    )
-                    pipeline.xadd(
-                        child_stream,
-                        encode_conversation_event(
-                            Event.CONVERSATION_CREATED,
-                            ConversationCreatedPayload(
-                                agent=child_agent,
-                                model=child_model,
-                                deps=child_deps,
-                                parent=reference,
-                            ),
-                        ),
-                    )
-                    pipeline.xadd(
-                        child_stream,
-                        encode_conversation_event(
-                            Event.TURN_QUEUED,
-                            TurnQueuedPayload(
-                                turn_id=child_turn_id, message=child_prompt
-                            ),
-                        ),
-                    )
-                    pipeline.xadd(
-                        self.dispatch.name,
-                        {
-                            "type": Action.CONVERSATION_POKE,
-                            "conversation_id": parent_request.conversation_id,
-                            "turn_id": child_turn_id,
-                        },
-                    )
-                    pipeline.execute()
-                    return True
-                except WatchError:
-                    continue
+        # A queued child can reconstruct its parent request during recovery.
+        child_stream.append_event(
+            Event.CONVERSATION_CREATED,
+            ConversationCreatedPayload(
+                agent=child_agent,
+                model=child_model,
+                deps=child_deps,
+                parent=reference,
+            ),
+        )
+        child_stream.append_event(
+            Event.TURN_QUEUED,
+            TurnQueuedPayload(
+                turn_id=parent_request.child_turn_id,
+                message=child_prompt,
+            ),
+        )
+        entry_id = self.append_event(
+            Event.TURN_SUBAGENT_REQUESTED, parent_request
+        )
+        self.publish(actions, entry_id)
+        return True
+
+    def refresh(self, conversation: Conversation) -> None:
+        """Fold the tail into an existing snapshot without publishing actions."""
+        for event in self.iter_events(after_id=conversation.last_event_id):
+            conversation.apply(event)
 
     def save_tool_result(
         self,
         payload: ToolResultPayload,
-        expected_call_ids: list[str],
+        conversation: Conversation,
     ) -> bool:
-        """Save a unique call result and queue one resume after the final result."""
-        stream = self.name
-        expected = set(expected_call_ids)
-        if payload.tool_call_id not in expected:
-            raise ValueError(
-                "tool result is not part of the deferred request set"
-            )
-
-        while True:
-            with self.redis.pipeline() as pipeline:
-                try:
-                    pipeline.watch(stream)
-                    entries = pipeline.xrange(stream)
-                    prior_results: set[str] = set()
-                    request_found = False
-                    terminal = False
-                    for _entry_id, fields in entries:
-                        event = decode_conversation_event(fields)
-                        if (
-                            getattr(event.payload, "turn_id", None)
-                            != payload.turn_id
-                        ):
-                            continue
-                        if event.type == Event.TURN_TOOL_REQUESTED:
-                            requested = event.payload
-                            if requested.step_id == payload.step_id:
-                                request_found = True
-                        elif event.type == Event.TURN_TOOL_RESULT:
-                            result = event.payload
-                            if result.step_id == payload.step_id:
-                                prior_results.add(result.tool_call_id)
-                        elif event.type in (
-                            Event.TURN_COMPLETED,
-                            Event.TURN_FAILED,
-                        ):
-                            terminal = True
-
-                    if terminal or payload.tool_call_id in prior_results:
-                        pipeline.unwatch()
-                        return False
-                    if not request_found:
-                        raise ValueError(
-                            "tool result has no matching request step"
-                        )
-
-                    all_results = prior_results | {payload.tool_call_id}
-                    pipeline.multi()
-                    pipeline.xadd(
-                        stream,
-                        encode_conversation_event(
-                            Event.TURN_TOOL_RESULT, payload
-                        ),
-                    )
-                    if expected <= all_results:
-                        pipeline.xadd(
-                            self.dispatch.name,
-                            {
-                                "type": Action.AGENT_RESUME,
-                                "conversation_id": self.conversation_id,
-                                "turn_id": payload.turn_id,
-                                "step_id": payload.step_id,
-                            },
-                        )
-                    pipeline.execute()
-                    return True
-                except WatchError:
-                    continue
-
-    def finish_turn(
-        self,
-        event_type: Event,
-        payload: TurnCompletedPayload | TurnFailedPayload,
-        *,
-        parent: ParentToolReference | None,
-    ) -> bool:
-        """Persist one terminal event and notify its parent in the same transaction."""
-        stream = self.name
-        notification = None
-        if parent is not None:
-            notification = {
-                "type": Action.SUBAGENT_RESULT,
-                "conversation_id": parent.conversation_id,
-                "turn_id": parent.turn_id,
-                "step_id": parent.step_id,
-                "tool_call_id": parent.tool_call_id,
-                "child_conversation_id": self.conversation_id,
-                "child_turn_id": payload.turn_id,
-            }
-
-        while True:
-            with self.redis.pipeline() as pipeline:
-                try:
-                    pipeline.watch(stream)
-                    entries = pipeline.xrange(stream)
-                    if any(
-                        event.type
-                        in (Event.TURN_COMPLETED, Event.TURN_FAILED)
-                        and getattr(event.payload, "turn_id", None)
-                        == payload.turn_id
-                        for _entry_id, fields in entries
-                        for event in [decode_conversation_event(fields)]
-                    ):
-                        pipeline.unwatch()
-                        return False
-                    pipeline.multi()
-                    pipeline.xadd(
-                        stream, encode_conversation_event(event_type, payload)
-                    )
-                    if notification is not None:
-                        pipeline.xadd(self.dispatch.name, notification)
-                    pipeline.execute()
-                    return True
-                except WatchError:
-                    continue
+        """Reconcile concurrent facts before saving a result and emitting fan-in."""
+        self.refresh(conversation)
+        machine = conversation.turn_state[payload.turn_id]
+        if not machine.accepts_result(payload):
+            return False
+        machine.preview(payload)
+        entry_id = self.append_event(Event.TURN_TOOL_RESULT, payload)
+        # Do not advance to our write's ID: a sibling may precede it in the tail.
+        self.refresh(conversation)
+        self.publish(machine.resume_actions(payload.step_id), entry_id)
+        return True
 
     def create_group(self, group: str, *, id: str = "0") -> None:
-        self.redis.xgroup_create(self.name, group, id=id)
+        _create_group(self.redis, self.name, group, id=id)
 
     def read_group(
         self,
@@ -516,7 +340,7 @@ class ConversationStream:
         *,
         count: int = 100,
         block: int | None = None,
-    ) -> list[ConversationStreamEvent]:
+    ) -> list[ConversationEvent]:
         """Read and decode conversation events through a consumer group."""
         return _read_group(
             self.redis,
@@ -526,7 +350,7 @@ class ConversationStream:
             cursor,
             count=count,
             block=block,
-            decode_entry=decode_conversation_stream_event,
+            decode_entry=decode_conversation_event,
         )
 
     def acknowledge(self, group: str, *entry_ids: str) -> None:

@@ -11,7 +11,7 @@ creation: Creation and first turn {
 
   client -> conversation: Create Chat
   conversation.created: "conversation.created\nagent, model, deps"
-  submission: "send(prompt): atomic transaction" {
+  submission: "send(prompt): successive writes" {
     client -> conversation: Queue prompt
     conversation.queued: "turn.queued\nnew turn_id and prompt"
     client -> dispatch: Queue action

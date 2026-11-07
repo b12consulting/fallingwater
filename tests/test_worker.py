@@ -1,12 +1,10 @@
 """Checks fan-out, fan-in, and nonblocking child turns."""
 
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
-from threading import Barrier, RLock
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
 from pydantic import TypeAdapter
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.messages import (
@@ -19,18 +17,17 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from redis import Redis
-from redis.exceptions import WatchError
+from redis.exceptions import RedisError
 
 from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, SubAgentRequest
-from fallingwater.stream import ConversationStream
-from fallingwater.turn_state import reconstruct_turn
-from fallingwater.stream_models import (
+from fallingwater.turn_state import reconstruct_conversation
+from fallingwater.models import (
     ConversationCreatedPayload,
     ConversationPayload,
     Action,
     Event,
-    InvalidDispatchAction,
+    InvalidDispatchEvent,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -39,86 +36,19 @@ from fallingwater.stream_models import (
     ToolResultPayload,
 )
 from fallingwater.stream_utils import (
-    decode_dispatch_action,
+    decode_dispatch_event,
     decode_conversation_event,
     encode_conversation_event,
 )
 
 
-class MemoryPipeline:
-    def __init__(
-        self, redis: "MemoryRedis", *, transaction: bool = False
-    ) -> None:
-        self.redis = redis
-        self.watched: dict[str, int] = {}
-        self.commands: list[tuple[str, Mapping[Any, Any]]] = []
-        self.in_multi = transaction
-        self.barrier: Barrier | None = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.watched.clear()
-
-    def watch(self, *streams: str):
-        self.watched = {
-            stream: self.redis.versions.get(stream, 0) for stream in streams
-        }
-        with self.redis.guard:
-            if (
-                self.redis.watch_barrier is not None
-                and self.redis.barrier_watch_count < 2
-            ):
-                self.redis.barrier_watch_count += 1
-                self.barrier = self.redis.watch_barrier
-
-    def unwatch(self):
-        self.watched.clear()
-
-    def xrange(self, stream: str, min: str = "-", count: int = 100):
-        entries = self.redis.xrange(stream, min=min, count=count)
-        if self.barrier is not None:
-            self.barrier.wait(timeout=2)
-            self.barrier = None
-        return entries
-
-    def multi(self):
-        self.in_multi = True
-
-    def xadd(self, stream: str, fields: Mapping[Any, Any]):
-        if self.in_multi:
-            self.commands.append((stream, fields))
-            return self
-        return self.redis.xadd(stream, fields)
-
-    def execute(self):
-        with self.redis.guard:
-            if any(
-                self.redis.versions.get(stream, 0) != version
-                for stream, version in self.watched.items()
-            ):
-                raise WatchError
-            result = [
-                self.redis.xadd(stream, fields)
-                for stream, fields in self.commands
-            ]
-        self.commands.clear()
-        self.in_multi = False
-        return result
-
-
 class MemoryRedis(Redis):
-    """Small multi-stream fake with transactional writes and WATCH checks."""
+    """Small multi-stream fake for worker tests."""
 
     def __init__(self, entries: list[tuple[str, Mapping[Any, Any]]]):
         self.streams: dict[str, list[tuple[str, Mapping[Any, Any]]]] = {
             "fw:conversation:abc:events": list(entries)
         }
-        self.versions: dict[str, int] = {}
-        self.guard = RLock()
-        self.watch_barrier: Barrier | None = None
-        self.barrier_watch_count = 0
 
     def xrange(self, stream: str, min: str = "-", count: int = 100):
         entries = self.streams.get(stream, [])
@@ -133,15 +63,10 @@ class MemoryRedis(Redis):
         return selected[:count]
 
     def xadd(self, stream: str, fields: Mapping[Any, Any]):
-        with self.guard:
-            entries = self.streams.setdefault(stream, [])
-            entry_id = f"{len(entries) + 1}-0"
-            entries.append((entry_id, dict(fields)))
-            self.versions[stream] = self.versions.get(stream, 0) + 1
-            return entry_id
-
-    def pipeline(self, *, transaction: bool = False, **_kwargs):
-        return MemoryPipeline(self, transaction=transaction)
+        entries = self.streams.setdefault(stream, [])
+        entry_id = f"{len(entries) + 1}-0"
+        entries.append((entry_id, dict(fields)))
+        return entry_id
 
 
 def _entry(entry_id: str, event_type: Event, payload: ConversationPayload):
@@ -185,29 +110,24 @@ def _tool_request(calls: list[ToolCallPart], *, step_id: str = "step-1"):
         requests=TypeAdapter(DeferredToolRequests).dump_python(
             requests, mode="json"
         ),
-        history=ModelMessagesTypeAdapter.dump_python(messages, mode="json"),
+        step_messages=ModelMessagesTypeAdapter.dump_python(messages, mode="json"),
         usage=RunUsage(),
     )
 
 
-def _worker(redis: MemoryRedis, monkeypatch) -> Worker:
-    worker = Worker(redis)
-    monkeypatch.setattr(
-        ConversationStream,
-        "lock_agent_run",
-        lambda *_args, **_kwargs: nullcontext(Mock()),
-    )
-    return worker
+def _worker(redis: MemoryRedis) -> Worker:
+    return Worker(redis)
 
 
 def _process(worker: Worker, fields: dict[str, str]) -> bool:
-    action = decode_dispatch_action("1-0", fields)
-    assert not isinstance(action, InvalidDispatchAction)
-    cnv_stream = worker.dsp_stream.conversation_stream(action.conversation_id)
-    conversation = reconstruct_turn(
+    action = decode_dispatch_event("1-0", fields)
+    assert not isinstance(action, InvalidDispatchEvent)
+    cnv_stream = worker.dsp_stream.conversation_stream(
+        action.payload.conversation_id
+    )
+    conversation = reconstruct_conversation(
         cnv_stream.iter_events(),
-        action.turn_id,
-        conversation_stream=cnv_stream.name,
+        conversation_id=action.payload.conversation_id,
     )
     return worker.process(action, cnv_stream, conversation)
 
@@ -215,7 +135,8 @@ def _process(worker: Worker, fields: dict[str, str]) -> bool:
 def _events(redis: MemoryRedis, conversation_id: str = "abc"):
     stream = f"fw:conversation:{conversation_id}:events"
     return [
-        decode_conversation_event(fields) for _, fields in redis.streams[stream]
+        decode_conversation_event(entry_id, fields)
+        for entry_id, fields in redis.streams[stream]
     ]
 
 
@@ -235,7 +156,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
                 TurnCompletedPayload(
                     turn_id="turn-1",
                     message="previous answer",
-                    history=ModelMessagesTypeAdapter.dump_python(
+                    turn_messages=ModelMessagesTypeAdapter.dump_python(
                         history, mode="json"
                     ),
                     usage=previous_usage,
@@ -249,11 +170,11 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
         ]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_turn(
-        stream.iter_events(), "turn-2", conversation_stream=stream.name
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
     )
-    assert conversation.history == history
-    assert conversation.usage == previous_usage
+    assert conversation.turn_state["turn-2"].history == history
+    assert conversation.turn_state["turn-2"].usage == previous_usage
 
     current_usage = RunUsage(requests=5, input_tokens=120)
     request = _tool_request(
@@ -261,11 +182,11 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
     ).model_copy(update={"turn_id": "turn-2", "usage": current_usage})
     stream.append_event(Event.TURN_TOOL_REQUESTED, request)
 
-    resumed = reconstruct_turn(
-        stream.iter_events(), "turn-2", conversation_stream=stream.name
+    resumed = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
     )
-    assert resumed.history == history
-    assert resumed.usage == current_usage
+    assert resumed.turn_state["turn-2"].history == history
+    assert resumed.turn_state["turn-2"].usage == current_usage
 
 
 def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
@@ -307,7 +228,7 @@ def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
     monkeypatch.setattr("fallingwater.worker.run", run_agent)
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -392,7 +313,7 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
         ]
     )
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -410,55 +331,59 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
     assert _dispatch(redis)[-1]["type"] == Action.AGENT_RESUME
 
 
-def test_concurrent_tool_results_queue_one_resume() -> None:
+def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
     request = _tool_request(
         [
             ToolCallPart("unused", {}, tool_call_id="call-1"),
             ToolCallPart("unused", {}, tool_call_id="call-2"),
         ]
     )
-    redis = MemoryRedis(_base_entries())
-    redis.xadd(
-        "fw:conversation:abc:events",
-        encode_conversation_event(Event.TURN_TOOL_REQUESTED, request),
+    redis = MemoryRedis(
+        [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
-    redis.watch_barrier = Barrier(2)
-    streams = [
-        Worker(redis).dsp_stream.conversation_stream("abc") for _ in range(2)
-    ]
-    payloads = [
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    append_event = stream.append_event
+
+    def append_with_sibling(event_type, payload):
+        entry_id = append_event(event_type, payload)
+        append_event(
+            Event.TURN_TOOL_RESULT,
+            ToolResultPayload(
+                turn_id="turn-1",
+                step_id="step-1",
+                tool_call_id="call-2",
+                result="second",
+            ),
+        )
+        return entry_id
+
+    monkeypatch.setattr(stream, "append_event", append_with_sibling)
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    assert conversation.last_event_id == "3-0"
+    iter_events = stream.iter_events
+    after_ids: list[str] = []
+
+    def tracked_events(*, after_id="0-0", page_size=100):
+        after_ids.append(after_id)
+        yield from iter_events(after_id=after_id, page_size=page_size)
+
+    monkeypatch.setattr(stream, "iter_events", tracked_events)
+
+    assert stream.save_tool_result(
         ToolResultPayload(
             turn_id="turn-1",
             step_id="step-1",
-            tool_call_id=call_id,
-            result=call_id,
-        )
-        for call_id in ("call-1", "call-2")
+            tool_call_id="call-1",
+            result="first",
+        ),
+        conversation,
+    )
+    assert after_ids == ["3-0", "3-0"]
+    assert [entry["type"] for entry in _dispatch(redis)] == [
+        Action.AGENT_RESUME
     ]
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        saved = list(
-            executor.map(
-                lambda args: args[0].save_tool_result(
-                    args[1],
-                    ["call-1", "call-2"],
-                ),
-                zip(streams, payloads, strict=True),
-            )
-        )
-
-    assert all(saved)
-    dispatch = _dispatch(redis)
-    assert [entry["type"] for entry in dispatch] == [Action.AGENT_RESUME]
-    results = [
-        event
-        for event in _events(redis)
-        if event.type == Event.TURN_TOOL_RESULT
-    ]
-    assert {event.payload.tool_call_id for event in results} == {
-        "call-1",
-        "call-2",
-    }
 
 
 def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
@@ -510,7 +435,7 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
     )
     monkeypatch.setattr("fallingwater.worker.run", runs)
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -533,14 +458,24 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
         for action in _dispatch(redis)
         if action["type"] == Action.CONVERSATION_POKE
     )
-    assert child_poke["conversation_id"] == subagent.conversation_id
+    assert child_poke["conversation_id"] == subagent.child_conversation_id
     assert _process(worker, child_poke)
-    child_events = _events(redis, subagent.conversation_id)
+    child_events = _events(redis, subagent.child_conversation_id)
     assert child_events[-1].type == Event.TURN_COMPLETED
     parent_notify = _dispatch(redis)[-1]
     assert parent_notify["type"] == Action.SUBAGENT_RESULT
+    child_entries = redis.xrange(
+        worker.dsp_stream.conversation_stream(
+            subagent.child_conversation_id
+        ).name
+    )
+    assert parent_notify["child_terminal_event_id"] == child_entries[-1][0]
 
-    assert _process(worker, parent_notify)
+    with monkeypatch.context() as context:
+        load_agent = Mock(side_effect=ModuleNotFoundError("unavailable agent"))
+        context.setattr("fallingwater.worker.reify_agent", load_agent)
+        assert _process(worker, parent_notify)
+        load_agent.assert_not_called()
     resume = _dispatch(redis)[-1]
     assert resume["type"] == Action.AGENT_RESUME
     assert _process(worker, resume)
@@ -560,7 +495,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
                 TurnCompletedPayload(
                     turn_id="turn-1",
                     message="already done",
-                    history=ModelMessagesTypeAdapter.dump_python(
+                    turn_messages=ModelMessagesTypeAdapter.dump_python(
                         _messages("already done"), mode="json"
                     ),
                     usage=RunUsage(),
@@ -573,7 +508,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
         "fallingwater.worker.reify_agent", lambda _path: object()
     )
     monkeypatch.setattr("fallingwater.worker.run", run_agent)
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
 
     assert _process(
         worker,
@@ -596,8 +531,8 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
         ),
     )
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
-    action = decode_dispatch_action(
+    worker = _worker(redis)
+    action = decode_dispatch_event(
         "1-0",
         {
             "type": Action.CONVERSATION_POKE,
@@ -628,36 +563,10 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     acknowledge.assert_called_once_with(worker.group, "1-0")
 
 
-def test_duplicate_agent_resume_waits_for_existing_run_lease(
-    monkeypatch,
-) -> None:
-    agent = Agent(TestModel(), name="leased-agent")
-    run_agent = Mock()
-    monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
-    redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
-    monkeypatch.setattr(
-        ConversationStream,
-        "lock_agent_run",
-        lambda *_args, **_kwargs: nullcontext(None),
-    )
-
-    assert not _process(
-        worker,
-        {
-            "type": Action.CONVERSATION_POKE,
-            "turn_id": "turn-1",
-            "conversation_id": "abc",
-        },
-    )
-    run_agent.assert_not_called()
-
-
 def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     parent_agent = Agent(TestModel(), name="parent")
     redis = MemoryRedis(_base_entries())
-    worker = _worker(redis, monkeypatch)
+    worker = _worker(redis)
     parent_stream = worker.dsp_stream.conversation_stream("abc")
     request = _tool_request(
         [ToolCallPart("delegate", {"prompt": "child"}, tool_call_id="call-1")]
@@ -670,7 +579,7 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
         turn_id="turn-1",
         step_id="step-1",
         tool_call_id="call-1",
-        conversation_id="child-conversation",
+        child_conversation_id="child-conversation",
         child_turn_id="child-turn",
     )
     assert parent_stream.queue_subagent(
@@ -679,16 +588,18 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
         child_model="test",
         child_deps={},
         child_prompt="child",
+        machine=reconstruct_conversation(
+            parent_stream.iter_events(), conversation_id="abc"
+        ).turn_state["turn-1"],
     )
     child_stream = worker.dsp_stream.conversation_stream("child-conversation")
-    child_created = decode_conversation_event(
-        redis.xrange(child_stream.name)[0][1]
-    ).payload
-    assert child_created.parent is not None
-    child_stream.finish_turn(
-        Event.TURN_FAILED,
+    child_conversation = reconstruct_conversation(
+        child_stream.iter_events(), conversation_id="child-conversation"
+    )
+    assert child_conversation.settings.parent is not None
+    child_stream.checkpoint(
         TurnFailedPayload(turn_id="child-turn", error="child failed"),
-        parent=child_created.parent,
+        child_conversation.turn_state["child-turn"],
     )
     monkeypatch.setattr(
         "fallingwater.worker.reify_agent", lambda _path: parent_agent
@@ -699,3 +610,356 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     failed = _events(redis)[-1].payload
     assert isinstance(failed, TurnFailedPayload)
     assert failed.error == "Subagent failed: child failed"
+
+
+@pytest.mark.parametrize(
+    ("fields", "acknowledge"),
+    [
+        ({"type": Action.CONVERSATION_POKE}, True),
+        ({"type": Action.AGENT_RESUME, "step_id": "step-1"}, False),
+        ({"type": Action.AGENT_RESUME, "step_id": "old-step"}, True),
+        (
+            {
+                "type": Action.TOOL_CALL,
+                "step_id": "old-step",
+                "tool_call_id": "call-1",
+            },
+            True,
+        ),
+        (
+            {
+                "type": Action.TOOL_CALL,
+                "step_id": "step-1",
+                "tool_call_id": "unknown-call",
+            },
+            True,
+        ),
+    ],
+)
+def test_ineligible_actions_do_not_load_agent(
+    monkeypatch, fields, acknowledge
+) -> None:
+    request = _tool_request(
+        [ToolCallPart("unused", {}, tool_call_id="call-1")]
+    )
+    redis = MemoryRedis(
+        [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
+    )
+    load_agent = Mock(side_effect=ModuleNotFoundError("unavailable agent"))
+    monkeypatch.setattr("fallingwater.worker.reify_agent", load_agent)
+
+    assert _process(
+        Worker(redis),
+        {"conversation_id": "abc", "turn_id": "turn-1", **fields},
+    ) is acknowledge
+    load_agent.assert_not_called()
+    assert len(_events(redis)) == 3
+    assert _dispatch(redis) == []
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_result_save_refreshes_before_writing(terminal) -> None:
+    request = _tool_request(
+        [ToolCallPart("unused", {}, tool_call_id="call-1")]
+    )
+    redis = MemoryRedis(
+        [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
+    )
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    result = ToolResultPayload(
+        turn_id="turn-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        result="answer",
+    )
+    if terminal:
+        stream.append_event(
+            Event.TURN_FAILED,
+            TurnFailedPayload(turn_id="turn-1", error="sibling failed"),
+        )
+    else:
+        stream.append_event(Event.TURN_TOOL_RESULT, result)
+
+    assert not stream.save_tool_result(result, conversation)
+    assert len(_events(redis)) == 4
+    assert _dispatch(redis) == []
+
+
+@pytest.mark.parametrize("next_step", [False, True])
+def test_result_save_does_not_resume_obsolete_step(
+    monkeypatch, next_step
+) -> None:
+    request = _tool_request(
+        [ToolCallPart("unused", {}, tool_call_id="call-1")]
+    )
+    redis = MemoryRedis(
+        [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
+    )
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    append_event = stream.append_event
+
+    def append_with_new_state(event_type, payload):
+        entry_id = append_event(event_type, payload)
+        if next_step:
+            append_event(
+                Event.TURN_TOOL_REQUESTED,
+                _tool_request(
+                    [ToolCallPart("unused", {}, tool_call_id="call-2")],
+                    step_id="step-2",
+                ),
+            )
+        else:
+            append_event(
+                Event.TURN_FAILED,
+                TurnFailedPayload(turn_id="turn-1", error="sibling failed"),
+            )
+        return entry_id
+
+    monkeypatch.setattr(stream, "append_event", append_with_new_state)
+    assert stream.save_tool_result(
+        ToolResultPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            tool_call_id="call-1",
+            result="answer",
+        ),
+        conversation,
+    )
+    assert _dispatch(redis) == []
+
+
+def test_result_save_keeps_first_persisted_value_during_race(
+    monkeypatch,
+) -> None:
+    request = _tool_request(
+        [ToolCallPart("unused", {}, tool_call_id="call-1")]
+    )
+    redis = MemoryRedis(
+        [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
+    )
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    append_event = stream.append_event
+
+    def append_with_earlier_result(event_type, payload):
+        append_event(
+            Event.TURN_TOOL_RESULT,
+            payload.model_copy(update={"result": "earlier result"}),
+        )
+        return append_event(event_type, payload)
+
+    monkeypatch.setattr(stream, "append_event", append_with_earlier_result)
+    assert stream.save_tool_result(
+        ToolResultPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            tool_call_id="call-1",
+            result="later result",
+        ),
+        conversation,
+    )
+    fresh = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    assert conversation.turn_state["turn-1"].tool_results == {
+        "call-1": "earlier result"
+    }
+    assert fresh.turn_state["turn-1"].tool_results == (
+        conversation.turn_state["turn-1"].tool_results
+    )
+    assert [action["type"] for action in _dispatch(redis)] == [
+        Action.AGENT_RESUME
+    ]
+
+
+@pytest.mark.parametrize("first_succeeds", [False, True])
+def test_checkpoint_and_refresh_preserve_first_concurrent_terminal(
+    first_succeeds,
+) -> None:
+    redis = MemoryRedis(_base_entries())
+    stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    completed = TurnCompletedPayload(
+        turn_id="turn-1",
+        message="answer",
+        turn_messages=ModelMessagesTypeAdapter.dump_python(
+            _messages("answer"), mode="json"
+        ),
+        usage=RunUsage(requests=3),
+    )
+    failed = TurnFailedPayload(turn_id="turn-1", error="failed")
+    stream.append_event(
+        Event.TURN_COMPLETED if first_succeeds else Event.TURN_FAILED,
+        completed if first_succeeds else failed,
+    )
+    stream.checkpoint(
+        failed if first_succeeds else completed,
+        conversation.turn_state["turn-1"],
+    )
+    assert conversation.turn_state["turn-1"].running
+    stream.queue_turn("turn-2", "next prompt")
+    stream.refresh(conversation)
+    fresh = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+
+    assert conversation.turn_state["turn-1"].state == (
+        completed if first_succeeds else failed
+    )
+    assert conversation.turn_state["turn-2"].history == (
+        ModelMessagesTypeAdapter.validate_python(completed.turn_messages)
+        if first_succeeds
+        else []
+    )
+    assert conversation.turn_state["turn-2"].usage == (
+        completed.usage if first_succeeds else None
+    )
+    assert fresh.turn_state["turn-2"].history == (
+        conversation.turn_state["turn-2"].history
+    )
+    assert fresh.turn_state["turn-2"].usage == (
+        conversation.turn_state["turn-2"].usage
+    )
+
+
+def test_redis_failure_leaves_dispatch_pending(monkeypatch) -> None:
+    redis = MemoryRedis(_base_entries())
+    worker = Worker(redis)
+    action = decode_dispatch_event(
+        "1-0",
+        {
+            "type": Action.CONVERSATION_POKE,
+            "turn_id": "turn-1",
+            "conversation_id": "abc",
+        },
+    )
+    monkeypatch.setattr(
+        worker.dsp_stream, "create_group", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        worker.dsp_stream,
+        "claim",
+        lambda *_args, **_kwargs: ("0-0", [action], []),
+    )
+    monkeypatch.setattr(
+        "fallingwater.worker.reify_agent",
+        lambda _path: Agent(TestModel()),
+    )
+    monkeypatch.setattr(
+        "fallingwater.worker.run",
+        Mock(side_effect=RedisError("connection lost")),
+    )
+    acknowledge = Mock()
+    monkeypatch.setattr(worker.dsp_stream, "acknowledge", acknowledge)
+
+    with pytest.raises(RedisError, match="connection lost"):
+        worker.run()
+    acknowledge.assert_not_called()
+    assert len(_events(redis)) == 2
+
+
+def test_agent_resume_preserves_history_messages_and_usage_across_steps(
+    monkeypatch,
+) -> None:
+    agent = Agent(TestModel(), name="multi-step-agent")
+
+    @agent.tool_plain
+    def echo(value: str) -> str:
+        return value
+
+    prior_messages = _messages("previous answer")
+    prior_usage = RunUsage(requests=4, input_tokens=100)
+    step_messages = [
+        _tool_request(
+            [ToolCallPart("echo", {"value": value}, tool_call_id=call_id)]
+        )
+        for value, call_id in [("first", "call-1"), ("second", "call-2")]
+    ]
+    steps = [
+        AgentRunResult(
+            output=TypeAdapter(DeferredToolRequests).validate_python(
+                request.requests
+            ),
+            usage=RunUsage(requests=5 + index, input_tokens=120 + index),
+            new_messages=ModelMessagesTypeAdapter.validate_python(
+                request.step_messages
+            ),
+            tool_contexts={},
+        )
+        for index, request in enumerate(step_messages)
+    ]
+    final = AgentRunResult(
+        output="final answer",
+        usage=RunUsage(requests=7, input_tokens=150),
+        new_messages=_messages("final answer"),
+        tool_contexts={},
+    )
+    run_agent = Mock(side_effect=[*steps, final])
+    monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
+    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    redis = MemoryRedis(
+        [
+            *_base_entries(turn_id="turn-0"),
+            _entry(
+                "3-0",
+                Event.TURN_COMPLETED,
+                TurnCompletedPayload(
+                    turn_id="turn-0",
+                    message="previous answer",
+                    turn_messages=ModelMessagesTypeAdapter.dump_python(
+                        prior_messages, mode="json"
+                    ),
+                    usage=prior_usage,
+                ),
+            ),
+            _entry(
+                "4-0",
+                Event.TURN_QUEUED,
+                TurnQueuedPayload(turn_id="turn-1", message="next question"),
+            ),
+        ]
+    )
+    worker = Worker(redis)
+    assert _process(
+        worker,
+        {
+            "type": Action.CONVERSATION_POKE,
+            "conversation_id": "abc",
+            "turn_id": "turn-1",
+        },
+    )
+    for _step in steps:
+        assert _dispatch(redis)[-1]["type"] == Action.TOOL_CALL
+        assert _process(worker, _dispatch(redis)[-1])
+        assert _dispatch(redis)[-1]["type"] == Action.AGENT_RESUME
+        assert _process(worker, _dispatch(redis)[-1])
+
+    expected_history = list(prior_messages)
+    for call, usage, messages in zip(
+        run_agent.call_args_list,
+        [prior_usage, steps[0].usage, steps[1].usage],
+        [steps[0].new_messages, steps[1].new_messages, final.new_messages],
+    ):
+        assert call.kwargs["message_history"] == expected_history
+        assert call.kwargs["usage"] == usage
+        expected_history.extend(messages)
+    assert run_agent.call_args_list[0].args[1] == "next question"
+    assert all(call.args[1] is None for call in run_agent.call_args_list[1:])
+    completed = _events(redis)[-1].payload
+    assert isinstance(completed, TurnCompletedPayload)
+    assert ModelMessagesTypeAdapter.validate_python(completed.turn_messages) == [
+        *steps[0].new_messages,
+        *steps[1].new_messages,
+        *final.new_messages,
+    ]
+    assert completed.usage == final.usage

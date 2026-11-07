@@ -22,7 +22,7 @@ Parent conversation        Child conversation         Shared dispatch           
 
 turn.queued                                           conversation.poke [parent] -> Run parent agent
                                                                                    Save request + job
-                                                                                   (atomic transaction)
+                                                                                   (successive writes)
 turn.tool.requested <--------------------------------------------------------------+  |
                                                       turn.tool.call <---------------+
                                                       conversation.poke [parent] <- Acknowledge action
@@ -30,16 +30,16 @@ turn.tool.requested <-----------------------------------------------------------
                                                       turn.tool.call -------------> Execute parent tool
                                                                                    Get SubAgentRequest
                                                                                    Create child work
-                                                                                   (atomic transaction)
-turn.subagent.requested <----------------------------------------------------------+  |
-                           conversation.created <------------------------------------+
+                                                                                   (successive writes)
+                           conversation.created <------------------------------------+  |
                            turn.queued <---------------------------------------------+
+turn.subagent.requested <----------------------------------------------------------+
                                                       conversation.poke [child] <----+
                                                       turn.tool.call <------------- Acknowledge action
 
                                                       conversation.poke [child] ---> Run child agent
                                                                                    Save answer + notify
-                                                                                   (atomic transaction)
+                                                                                   (successive writes)
                            turn.completed <---------------------------------------+  |
                                                       turn.subagent.result <---------+
                                                       conversation.poke [child] <-- Acknowledge action
@@ -47,7 +47,7 @@ turn.subagent.requested <-------------------------------------------------------
                                                       turn.subagent.result -------> Read child answer
                                                                                    All results ready:
                                                                                    save result + resume
-                                                                                   (atomic transaction)
+                                                                                   (successive writes)
 turn.tool.result <-----------------------------------------------------------------+  |
                                                       turn.agent.resume <------------+
                                                       turn.subagent.result <------- Acknowledge action
@@ -58,39 +58,48 @@ turn.completed <----------------------------------------------------------------
 ```
 
 The parent prompt is recorded as `turn.queued`, and a `conversation.poke`
-action is appended to dispatch in the same Redis transaction. A worker runs
+action is appended to dispatch in a following write. A worker runs
 the parent agent. When the model requests tools, Fallingwater records one
 `turn.tool.requested` event containing the full request set, message delta,
-and usage. The same transaction dispatches one `turn.tool.call` per call.
+and usage. Following writes dispatch one `turn.tool.call` per call.
 
 A subagent request starts as an ordinary deferred tool call. When a worker
-executes the tool and receives a `SubAgentRequest`, it writes four entries in
-one transaction:
+executes the tool and receives a `SubAgentRequest`, it writes four entries
+in order:
 
-1. Parent: `turn.subagent.requested`, containing the child conversation and
-   turn IDs, together with the parent turn, step, and tool-call IDs.
-2. Child: `conversation.created`, containing its agent, model, dependencies,
+1. Child: `conversation.created`, containing its agent, model, dependencies,
    and a reference back to the parent tool call.
-3. Child: `turn.queued`, containing its prompt and turn ID.
+2. Child: `turn.queued`, containing its prompt and turn ID.
+3. Parent: `turn.subagent.requested`, containing the child conversation and
+   turn IDs, together with the parent turn, step, and tool-call IDs.
 4. Dispatch: `conversation.poke`, targeting the child conversation and turn.
 
 The worker acknowledges the parent tool action and becomes available for
 other work. No worker stays blocked waiting for the child. Child IDs are
-deterministic for the parent tool call, and a saved subagent request prevents
-recovery from creating the same child again.
+deterministic for the parent tool call. A recovered action skips a saved
+subagent request, but concurrent workers can still create duplicate child work.
+If the worker stops after only `conversation.created`, the child prompt is not
+saved and that orphan needs cleanup before the parent tool action is replayed.
+Once `turn.queued` is saved, recovery can reconstruct a missing parent request
+from the child's parent reference and queued turn, then add a missing poke.
 
 Another available worker, or the same worker on a later action, runs the child.
 The child can use tools and request further subagents through the same flow.
 When it completes, its `turn.completed` event and the parent-directed
-`turn.subagent.result` dispatch action are written atomically.
+`turn.subagent.result` dispatch action are separate writes.
 
-The `turn.subagent.result` action contains routing identifiers. Its receiving
-worker reads the child's terminal event and records the child's answer message
+The `turn.subagent.result` action contains routing identifiers and the child's
+terminal event ID. Its receiving worker reads that event directly and records
+the child's answer message
 as a `turn.tool.result` in the parent conversation. The child's full message
 history and usage stay in the child stream.
+Child-outcome transitions validate the saved delegation and normalize the
+terminal payload into the parent's result or failure. Terminal transitions emit
+a notification intent; the stream checkpoint binds the child's actual Redis
+event ID after persistence. Child-result handling does not load the parent agent.
 
 If all calls in the parent's deferred request set now have results, the
-transaction saving the final result also dispatches `turn.agent.resume`.
+worker saving the final result then dispatches `turn.agent.resume`.
 Otherwise, the parent waits for the remaining sibling tool or subagent
 results. A worker resumes the parent agent with those results, and the parent
 can complete or request more tools.
@@ -104,7 +113,7 @@ Parent conversation        Child conversation         Shared dispatch           
                                                       conversation.poke [child] ---> Run child agent
                                                                                    Processing fails
                                                                                    Save failure + notify
-                                                                                   (atomic transaction)
+                                                                                   (successive writes)
                            turn.failed <------------------------------------------+  |
                                                       turn.subagent.result <---------+
                                                       conversation.poke [child] <-- Acknowledge action
@@ -114,8 +123,8 @@ turn.failed <-------------------------------------------------------------------
                                                       turn.subagent.result <------- Acknowledge action
 ```
 
-A failed child writes `turn.failed` and dispatches `turn.subagent.result` in
-one transaction. Under the current failure policy, the receiving worker fails
+A failed child writes `turn.failed` and then dispatches `turn.subagent.result`.
+Under the current failure policy, the receiving worker fails
 the parent with a `turn.failed` event. It does not save an ordinary tool result
 or schedule an agent resume for that failure. Later sibling results are
 ignored once the parent has a terminal event. If the parent is itself a child,
