@@ -80,7 +80,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_streams.py       Conversation event codec and naming checks
     |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks
-    `-- test_worker.py        Parallel tool and child-turn dispatch checks
+    `-- test_worker.py        Dispatch and isolated Redis concurrency checks
 ```
 
 `roadmap.md` tracks high-level features and decisions visible to users or

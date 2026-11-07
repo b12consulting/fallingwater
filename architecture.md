@@ -321,9 +321,10 @@ the shared conversation event decoder.
 function tools and returns their requests to `Worker`. The worker stores each
 request and dispatches each call independently. Results are stored by call ID;
 the last unique result schedules the next agent run with `DeferredToolResults`.
-The reconstructed conversation records its last event ID. Result fan-in checks only
-events written after that snapshot, then checks the new tail after saving its
-result to include sibling results that arrived during the write.
+The reconstructed conversation records its last replayed event ID. Result
+fan-in replays newer events and uses a cursor-checked append, retrying after
+conflicts. Resumption is decided through the successfully appended result's
+event ID, without incorporating later writes.
 Synchronous and asynchronous function tools are supported; deferred requests
 and results must be JSON serializable. `agent_proxy.execute_tool` resolves the
 attached callable, decodes arguments, and rebuilds basic `RunContext` fields
@@ -392,11 +393,18 @@ history or optimistically adding them to canonical state.
 
 `Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
 Worker checkpointing prepares a fact, persists it, then publishes its actions.
-Only applying persisted events advances the snapshot, so an optimistic write
-cannot displace an earlier concurrent outcome. Worker result saving replays
-the concurrent tail before checking eligibility and validating, writes the
-result, then replays from the old cursor again before asking `Conversation`
-for resume actions. Child creation and queueing remain before the parent
+Only applying persisted events advances replayed conversation state, so an
+optimistic write cannot displace an earlier concurrent outcome. Worker result
+saving refreshes before checking eligibility and validating, then uses
+`ConversationStream.append_if_current` to atomically check for unseen events
+and append through a single-key Lua script. A stale cursor returns up to 100
+unseen events without writing; Worker replays them, revalidates, and retries
+while the result remains eligible. A successful append returns only its new
+event. Worker replays through that event ID and asks `Conversation` for resume
+actions without reading later writes, so only the result completing the tool
+set emits a resume. Lua handles stream operations and opaque encoded payloads,
+not domain decisions. Dispatch publication remains a separate write.
+Child creation and queueing remain before the parent
 request write and dispatch. `Worker` routes child-result actions before
 loading an agent because those actions use only saved stream state. The CLI
 inspection commands and web SSE feeds keep their read-only query patterns,

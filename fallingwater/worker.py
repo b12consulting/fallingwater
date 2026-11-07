@@ -19,6 +19,7 @@ from .models import (
     ConversationPokePayload,
     DispatchPayloadType,
     DispatchEvent,
+    Event,
     InvalidDispatchEvent,
     SubAgentResultPayload,
     SubAgentRequestedPayload,
@@ -98,14 +99,23 @@ class Worker:
         payload: ToolResultPayload,
     ) -> bool:
         self.refresh(cnv_stream, conversation)
-        if not conversation.accepts_result(payload):
-            return False
-        prepared = conversation.prepare(payload)
-        cnv_stream.append_payload(prepared.payload)
-        # Replay from the old cursor so a preceding sibling write is included.
-        self.refresh(cnv_stream, conversation)
-        self.publish(cnv_stream, conversation.resume_actions(payload))
-        return True
+        while conversation.accepts_result(payload):
+            prepared = conversation.prepare(payload)
+            entry_id, events = cnv_stream.append_if_current(
+                Event.TURN_TOOL_RESULT,
+                prepared.payload,
+                after_id=conversation.last_event_id,
+            )
+            for event in events:
+                # Resume the conversation state on new events
+                conversation.apply(event)
+            if entry_id is not None:
+                # We received an entry, so our result was appended.
+                # Check readiness without reading later writes, which
+                # could cause duplicate resumes.
+                self.publish(cnv_stream, conversation.resume_actions(payload))
+                return True
+        return False
 
     def queue_subagent(
         self,

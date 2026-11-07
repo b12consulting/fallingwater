@@ -90,8 +90,8 @@ conversations and dispatch entries remain available.
 Repair missing dispatch actions and partial child setup after failures between
 separate writes. `recover()` is currently a placeholder; pending-action
 reclamation alone does not repair every saved event missing its next action.
-Add real-Redis restart and recovery tests alongside the current in-memory and
-mocked worker tests.
+Extend real-Redis coverage to worker restart and recovery; current isolated
+Redis tests cover concurrent result saves alongside in-memory and mocked tests.
 
 ### Decision
 
@@ -139,10 +139,12 @@ stream operations, including consumer-group reads and acknowledgements.
 `Chat` and `Worker` use these classes. Related conversation and dispatch
 writes are separate Redis commands.
 
-Pure turn state machines validate transitions, track pending tool calls and
-delegations, and reconstruct all turns from persisted events. Replay keeps the
-first result per call and first terminal outcome; queue-time history snapshots
-share immutable message prefixes.
+Pure `Conversation` logic coordinates turn-state decisions and reconstructs
+all turns from persisted events. Turn state machines validate transitions and
+track pending tool calls and delegations. `Chat` and `Worker` coordinate I/O;
+stream classes do not construct workflow payloads or call domain machines.
+Replay keeps the first result per call and first terminal outcome; queue-time
+history snapshots share immutable message prefixes.
 
 ### Remaining
 
@@ -161,16 +163,24 @@ stream operations. Worker pool startup removes consumers with no pending entries
 and preserves consumers that still have pending work.
 
 
-## 5. Worker concurrency correctness — open
+## 5. Worker concurrency correctness — partial
+
+### Available
+
+Concurrent tool-result saves publish one resume for a completed request batch.
+A cursor-checked append rejects stale writes; workers replay newer events and
+revalidate before retrying. Resumption is decided through the successfully
+appended result's event ID, without reading later writes. Duplicate saves for
+the same call are rejected after replaying the winning result. This shared
+result-saving path also handles successful child-agent outcomes.
+
+Isolated real-Redis tests reproduce simultaneous completion of distinct calls
+and duplicate saves, verifying one resume publication. Result persistence and
+dispatch publication remain separate writes; this does not close the crash
+recovery gap or provide exactly-once external effects.
 
 ### Issues
 
-- **Duplicate resume publication during result fan-in.** Concurrent
-  `ToolResultPayload` saves can each publish `turn.agent.resume` for the same
-  conversation, turn, and step after observing a complete request batch. This
-  happens with ordinary tools, distinct subagents, or mixed batches during normal
-  parallel execution, without prior duplicate work. Distinct resume entries can
-  then run the same agent continuation concurrently.
 - **Premature reclamation of active dispatch actions.** `XAUTOCLAIM` can reassign
   an action while its original worker is still processing it. The idle threshold
   defaults to five minutes and is configurable with `--claim-idle-ms`; workers
@@ -179,10 +189,10 @@ and preserves consumers that still have pending work.
 
 ### Remaining
 
-Prevent duplicate resume publication for a completed request batch and prevent
-concurrent execution caused by reclaiming active work, while preserving recovery
-of genuinely abandoned actions. Choose the mechanisms in `raid.md`. These issues
-are tracked by RAID R1 and R5.
+Prevent concurrent execution caused by reclaiming active work, while preserving
+recovery of genuinely abandoned actions. Choose the mechanism in `raid.md` and
+add real-Redis active-action reclamation tests. RAID R1 and R5 remain open;
+D88 records the implemented result fan-in fix.
 
 ### Done when
 

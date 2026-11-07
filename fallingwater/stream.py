@@ -32,6 +32,15 @@ from .utils import logger
 
 GroupEntry = TypeVar("GroupEntry")
 
+_APPEND_IF_CURRENT = """
+local events = redis.call('XRANGE', KEYS[1], '(' .. ARGV[1], '+', 'COUNT', 100)
+if #events > 0 then
+    return {false, events}
+end
+local id = redis.call('XADD', KEYS[1], '*', 'type', ARGV[2], 'payload', ARGV[3])
+return {id, {{id, {'type', ARGV[2], 'payload', ARGV[3]}}}}
+"""
+
 
 def _create_group(
     redis: Redis,
@@ -228,6 +237,34 @@ class ConversationStream:
                 if isinstance(payload, model)
             ),
             payload,
+        )
+
+    def append_if_current(
+        self,
+        event_type: Event,
+        payload: ConversationPayload,
+        *,
+        after_id: str,
+    ) -> tuple[str | None, list[ConversationEvent]]:
+        """Append at the replay cursor, or return up to 100 unseen events."""
+        fields = encode_conversation_event(event_type, payload)
+        entry_id, entries = self.redis.eval(
+            _APPEND_IF_CURRENT,
+            1,
+            self.name,
+            after_id,
+            fields["type"],
+            fields["payload"],
+        )
+        return (
+            decode_text(entry_id) if entry_id is not None else None,
+            [
+                decode_conversation_event(
+                    event_id,
+                    dict(zip(values[::2], values[1::2], strict=True)),
+                )
+                for event_id, values in entries
+            ],
         )
 
     def create_group(self, group: str, *, id: str = "0") -> None:

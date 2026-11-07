@@ -9,10 +9,11 @@ revisited. Close or revise an item when the code resolves it.
 ## Risks
 
 - **R1 — Duplicate external effects (open).** Workers skip results already
-  visible when they load a turn, and `save_tool_result` checks for a
-  saved call result before appending another. These reads are not
-  atomic with the writes, so concurrent workers can still duplicate
-  model runs, results, terminal events, or dispatch actions. A crash
+  visible when they load a turn, and `save_tool_result` uses a cursor-checked
+  Lua append to reject concurrently saved results and avoid duplicate fan-in
+  actions from concurrent tool-result saves. Other checkpoints and external
+  execution remain unguarded, so concurrent workers can still duplicate
+  model runs, tool effects, terminal events, or other dispatch actions. A crash
   after a tool's external side effect but before saving its result can
   also run the tool again. Attached tools need their own idempotency
   strategy for effects that must occur once; D72 defines the execution
@@ -750,3 +751,18 @@ revisited. Close or revise an item when the code resolves it.
   depends on turn state, never the reverse; both remain I/O-free and streams
   depend on neither. Update callers and import-boundary checks without
   compatibility re-exports or behavior changes.
+- **D88 — Cursor-checked tool-result append (implemented).**
+  `ConversationStream.append_if_current` uses a single-key Lua script to check
+  for events after the caller's replay cursor. If stale, return up to 100
+  events without writing; otherwise append the supplied encoded payload and
+  return that exact event. Worker replays returned events and revalidates
+  eligibility before retrying. On success, decide resumption from turn state
+  replayed through this append's ID, without refreshing later events. This
+  replaces D86's post-write tail refresh: two concurrent result savers cannot
+  both observe the completed tool set at their own append boundary, and a
+  duplicate saver rejects its result after replaying the winning write.
+  Lua remains domain-agnostic and event wire formats do not change. Isolated
+  real-Redis tests cover Lua responses, bounded conflicts, errors, simultaneous
+  distinct results, and duplicate calls. Result/dispatch writes remain separate,
+  external effects are not exactly-once, and retries can contend under sustained
+  conversation traffic; R1 and R8 remain open.

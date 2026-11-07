@@ -1,6 +1,13 @@
 """Checks fan-out, fan-in, and nonblocking child turns."""
 
-from collections.abc import Mapping
+import shutil
+import subprocess
+from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Barrier
+from time import monotonic, sleep
 from typing import Any
 from unittest.mock import MagicMock, Mock
 
@@ -17,7 +24,11 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from redis import Redis
-from redis.exceptions import RedisError
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    RedisError,
+    ResponseError,
+)
 
 from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, SubAgentRequest
@@ -67,6 +78,68 @@ class MemoryRedis(Redis):
         entry_id = f"{len(entries) + 1}-0"
         entries.append((entry_id, dict(fields)))
         return entry_id
+
+    def eval(self, script, numkeys, stream, after_id, event_type, payload):
+        events = self.xrange(stream, min=f"({after_id}", count=100)
+        entry_id = None
+        if not events:
+            fields = {"type": event_type, "payload": payload}
+            entry_id = self.xadd(stream, fields)
+            events = [(entry_id, fields)]
+        return [
+            entry_id,
+            [
+                [event_id, [value for pair in fields.items() for value in pair]]
+                for event_id, fields in events
+            ],
+        ]
+
+
+@pytest.fixture
+def isolated_redis(tmp_path: Path) -> Iterator[Redis]:
+    executable = shutil.which("redis-server")
+    if executable is None:
+        pytest.skip("redis-server is required for Lua integration tests")
+    log = tmp_path / "redis.log"
+    with TemporaryDirectory(prefix="fw-") as directory, subprocess.Popen(
+        [
+            executable,
+            "--port",
+            "0",
+            "--unixsocket",
+            str(Path(directory) / "redis.sock"),
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+            "--logfile",
+            str(log),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    ) as process:
+        redis = Redis(unix_socket_path=str(Path(directory) / "redis.sock"))
+        try:
+            deadline = monotonic() + 5
+            while True:
+                if process.poll() is not None:
+                    raise RuntimeError(log.read_text())
+                try:
+                    redis.ping()
+                    break
+                except RedisConnectionError:
+                    if monotonic() >= deadline:
+                        raise
+                    sleep(0.01)
+            yield redis
+        finally:
+            redis.close()
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def _entry(entry_id: str, event_type: Event, payload: ConversationPayload):
@@ -439,25 +512,32 @@ def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    append_event = stream.append_event
-
-    def append_with_sibling(event_type, payload):
-        entry_id = append_event(event_type, payload)
-        append_event(
-            Event.TURN_TOOL_RESULT,
-            ToolResultPayload(
-                turn_id="turn-1",
-                step_id="step-1",
-                tool_call_id="call-2",
-                result="second",
-            ),
-        )
-        return entry_id
-
-    monkeypatch.setattr(stream, "append_event", append_with_sibling)
     conversation = reconstruct_conversation(
         stream.iter_events(), conversation_id="abc"
     )
+    sibling_stream = Worker(redis).dsp_stream.conversation_stream("abc")
+    sibling_conversation = reconstruct_conversation(
+        sibling_stream.iter_events(), conversation_id="abc"
+    )
+    append_if_current = stream.append_if_current
+    attempts = []
+
+    def append_with_sibling(event_type, payload, *, after_id):
+        attempts.append(after_id)
+        if len(attempts) == 1:
+            assert Worker(redis).save_tool_result(
+                sibling_stream,
+                sibling_conversation,
+                ToolResultPayload(
+                    turn_id="turn-1",
+                    step_id="step-1",
+                    tool_call_id="call-2",
+                    result="second",
+                ),
+            )
+        return append_if_current(event_type, payload, after_id=after_id)
+
+    monkeypatch.setattr(stream, "append_if_current", append_with_sibling)
     assert conversation.last_event_id == "3-0"
     iter_events = stream.iter_events
     after_ids: list[str] = []
@@ -478,10 +558,142 @@ def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
             result="first",
         ),
     )
-    assert after_ids == ["3-0", "3-0"]
+    assert after_ids == ["3-0"]
+    assert attempts == ["3-0", "4-0"]
     assert [entry["type"] for entry in _dispatch(redis)] == [
         Action.AGENT_RESUME
     ]
+
+
+def test_optimistic_append_returns_bounded_unseen_events(
+    isolated_redis,
+) -> None:
+    stream = Worker(isolated_redis).dsp_stream.conversation_stream("abc")
+    cursor = stream.append_payload(
+        ConversationCreatedPayload(agent="example:agent")
+    )
+    queued = [
+        TurnQueuedPayload(turn_id=f"turn-{index}", message="hello")
+        for index in range(105)
+    ]
+    for payload in queued:
+        stream.append_payload(payload)
+    result = TurnQueuedPayload(turn_id="new-turn", message="new prompt")
+
+    entry_id, events = stream.append_if_current(
+        Event.TURN_QUEUED, result, after_id=cursor
+    )
+    assert entry_id is None
+    assert [event.payload for event in events] == queued[:100]
+    assert isolated_redis.xlen(stream.name) == 106
+
+    entry_id, tail = stream.append_if_current(
+        Event.TURN_QUEUED, result, after_id=events[-1].entry_id
+    )
+    assert entry_id is None
+    assert [event.payload for event in tail] == queued[100:]
+
+    entry_id, written = stream.append_if_current(
+        Event.TURN_QUEUED, result, after_id=tail[-1].entry_id
+    )
+    assert entry_id is not None
+    assert [event.payload for event in written] == [result]
+    assert written[0].entry_id == entry_id
+    assert isolated_redis.xlen(stream.name) == 107
+
+
+def test_optimistic_append_propagates_redis_errors(isolated_redis) -> None:
+    stream = Worker(isolated_redis).dsp_stream.conversation_stream("abc")
+    isolated_redis.set(stream.name, "not a stream")
+
+    with pytest.raises(ResponseError, match="WRONGTYPE"):
+        stream.append_if_current(
+            Event.TURN_QUEUED,
+            TurnQueuedPayload(turn_id="turn-1", message="hello"),
+            after_id="0-0",
+        )
+
+    assert isolated_redis.get(stream.name) == b"not a stream"
+
+
+@pytest.mark.parametrize("same_call", [False, True])
+def test_concurrent_result_saves_emit_one_resume(
+    isolated_redis, monkeypatch, same_call
+) -> None:
+    calls = ["call-1"] if same_call else ["call-1", "call-2"]
+    request = _tool_request(
+        [ToolCallPart("unused", {}, tool_call_id=call_id) for call_id in calls]
+    )
+    worker = Worker(isolated_redis)
+    stream = worker.dsp_stream.conversation_stream("abc")
+    for _, fields in [
+        *_base_entries(),
+        _entry("3-0", Event.TURN_TOOL_REQUESTED, request),
+    ]:
+        isolated_redis.xadd(stream.name, fields)
+    streams = [worker.dsp_stream.conversation_stream("abc") for _ in range(2)]
+    conversations = [
+        reconstruct_conversation(item.iter_events(), conversation_id="abc")
+        for item in streams
+    ]
+    first_attempt = Barrier(2)
+    committed = Barrier(2)
+    attempts = [0, 0]
+
+    def wrap_append(index):
+        append_if_current = streams[index].append_if_current
+
+        def append(event_type, payload, *, after_id):
+            attempts[index] += 1
+            if attempts[index] == 1:
+                first_attempt.wait(timeout=5)
+            result = append_if_current(event_type, payload, after_id=after_id)
+            if result[0] is not None and not same_call:
+                # Both writes precede either worker's resumption decision.
+                committed.wait(timeout=5)
+            return result
+
+        return append
+
+    for index in range(2):
+        monkeypatch.setattr(
+            streams[index], "append_if_current", wrap_append(index)
+        )
+
+    def save(index):
+        return Worker(isolated_redis).save_tool_result(
+            streams[index],
+            conversations[index],
+            ToolResultPayload(
+                turn_id="turn-1",
+                step_id="step-1",
+                tool_call_id="call-1" if same_call else f"call-{index + 1}",
+                result=f"result-{index}",
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        saved = list(executor.map(save, range(2)))
+
+    assert sorted(saved) == ([False, True] if same_call else [True, True])
+    assert sorted(attempts) == ([1, 1] if same_call else [1, 2])
+    results = [
+        event.payload
+        for event in stream.iter_events()
+        if isinstance(event.payload, ToolResultPayload)
+    ]
+    assert len(results) == len(calls)
+    actions = worker.dsp_stream.redis.xrange(worker.dsp_stream.name)
+    assert len(actions) == 1
+    entry_id, fields = actions[0]
+    action = decode_dispatch_event(entry_id, fields)
+    assert not isinstance(action, InvalidDispatchEvent)
+    assert action.type == Action.AGENT_RESUME
+    if not same_call:
+        assert sorted(
+            len(conversation.turn_state["turn-1"].results)
+            for conversation in conversations
+        ) == [1, 2]
 
 
 def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
@@ -787,7 +999,7 @@ def test_result_save_refreshes_before_writing(terminal) -> None:
 
 
 @pytest.mark.parametrize("next_step", [False, True])
-def test_result_save_does_not_resume_obsolete_step(
+def test_result_save_rejects_obsolete_result_before_append(
     monkeypatch, next_step
 ) -> None:
     request = _tool_request([ToolCallPart("unused", {}, tool_call_id="call-1")])
@@ -798,12 +1010,12 @@ def test_result_save_does_not_resume_obsolete_step(
     conversation = reconstruct_conversation(
         stream.iter_events(), conversation_id="abc"
     )
-    append_event = stream.append_event
+    append_if_current = stream.append_if_current
 
-    def append_with_new_state(event_type, payload):
-        entry_id = append_event(event_type, payload)
+    def append_with_new_state(event_type, payload, *, after_id):
         if next_step:
-            append_event(
+            stream.append_event(Event.TURN_TOOL_RESULT, payload)
+            stream.append_event(
                 Event.TURN_TOOL_REQUESTED,
                 _tool_request(
                     [ToolCallPart("unused", {}, tool_call_id="call-2")],
@@ -811,14 +1023,14 @@ def test_result_save_does_not_resume_obsolete_step(
                 ),
             )
         else:
-            append_event(
+            stream.append_event(
                 Event.TURN_FAILED,
                 TurnFailedPayload(turn_id="turn-1", error="sibling failed"),
             )
-        return entry_id
+        return append_if_current(event_type, payload, after_id=after_id)
 
-    monkeypatch.setattr(stream, "append_event", append_with_new_state)
-    assert Worker(redis).save_tool_result(
+    monkeypatch.setattr(stream, "append_if_current", append_with_new_state)
+    assert not Worker(redis).save_tool_result(
         stream,
         conversation,
         ToolResultPayload(
@@ -829,6 +1041,7 @@ def test_result_save_does_not_resume_obsolete_step(
         ),
     )
     assert _dispatch(redis) == []
+    assert len(_events(redis)) == (5 if next_step else 4)
 
 
 def test_result_save_keeps_first_persisted_value_during_race(
@@ -842,17 +1055,17 @@ def test_result_save_keeps_first_persisted_value_during_race(
     conversation = reconstruct_conversation(
         stream.iter_events(), conversation_id="abc"
     )
-    append_event = stream.append_event
+    append_if_current = stream.append_if_current
 
-    def append_with_earlier_result(event_type, payload):
-        append_event(
+    def append_with_earlier_result(event_type, payload, *, after_id):
+        stream.append_event(
             Event.TURN_TOOL_RESULT,
             payload.model_copy(update={"result": "earlier result"}),
         )
-        return append_event(event_type, payload)
+        return append_if_current(event_type, payload, after_id=after_id)
 
-    monkeypatch.setattr(stream, "append_event", append_with_earlier_result)
-    assert Worker(redis).save_tool_result(
+    monkeypatch.setattr(stream, "append_if_current", append_with_earlier_result)
+    assert not Worker(redis).save_tool_result(
         stream,
         conversation,
         ToolResultPayload(
@@ -871,9 +1084,8 @@ def test_result_save_keeps_first_persisted_value_during_race(
     assert fresh.turn_state["turn-1"].tool_results == (
         conversation.turn_state["turn-1"].tool_results
     )
-    assert [action["type"] for action in _dispatch(redis)] == [
-        Action.AGENT_RESUME
-    ]
+    assert len(_events(redis)) == 4
+    assert _dispatch(redis) == []
 
 
 @pytest.mark.parametrize("first_succeeds", [False, True])
