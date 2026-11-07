@@ -57,16 +57,16 @@ class Conversation(BaseModel):
 
     def prepare(self, payload: TurnPayload) -> PreparedEvent:
         """Validate a proposed fact without registering or advancing a turn."""
-        machine = self.turn_state.get(payload.turn_id)
-        if machine is None:
+        turn = self.turn_state.get(payload.turn_id)
+        if turn is None:
             if not isinstance(payload, TurnQueuedPayload):
                 raise ValueError(f"No prompt found for turn: {payload.turn_id}")
-            machine = TurnStateMachine(
+            turn = TurnStateMachine(
                 self.conversation_id,
                 payload.turn_id,
                 parent=self.settings.parent,
             )
-        return PreparedEvent(payload, machine.preview(payload))
+        return PreparedEvent(payload, turn.preview(payload))
 
     def dispatch_status(
         self, action: DispatchPayloadType
@@ -132,14 +132,14 @@ class Conversation(BaseModel):
                     else None
                 ),
             )
-        machine = self.turn_state[payload.turn_id]
-        was_running = machine.running
-        machine.replay(event)
-        if was_running and machine.completed:
+        turn = self.turn_state[payload.turn_id]
+        was_running = turn.running
+        turn.replay(event)
+        if was_running and turn.completed:
             self._history = MessageHistory(
-                previous=self._history, messages=tuple(machine.turn_messages)
+                previous=self._history, messages=tuple(turn.turn_messages)
             )
-            self._latest_completed = machine
+            self._latest_completed = turn
         self.last_event_id = event.entry_id
 
 

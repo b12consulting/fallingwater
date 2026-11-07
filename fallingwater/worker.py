@@ -135,31 +135,31 @@ class Worker:
         *,
         agent: Any,
         conversation: Conversation,
-        machine: TurnStateMachine,
+        turn: TurnStateMachine,
         cnv_stream: ConversationStream,
         deps: Any,
         prompt: str | None,
     ) -> None:
-        requests = machine.requests
+        requests = turn.requests
         result = run(
             agent,
             prompt,
-            message_history=[*machine.history, *machine.turn_messages],
+            message_history=[*turn.history, *turn.turn_messages],
             deferred_tool_results=(
                 requests.build_results(
-                    calls=machine.tool_results, metadata=requests.metadata
+                    calls=turn.tool_results, metadata=requests.metadata
                 )
                 if requests is not None
                 else None
             ),
             deps=deps,
             model=conversation.settings.model or None,
-            usage=machine.usage,
+            usage=turn.usage,
             conversation_id=cnv_stream.conversation_id,
         )
         if isinstance(result.output, DeferredToolRequests):
             payload = ToolRequestedPayload(
-                turn_id=machine.turn_id,
+                turn_id=turn.turn_id,
                 step_id=str(uuid4()),
                 requests=requests_adapter.dump_python(
                     result.output, mode="json"
@@ -176,17 +176,17 @@ class Worker:
             cnv_stream,
             conversation,
             TurnCompletedPayload(
-                turn_id=machine.turn_id,
+                turn_id=turn.turn_id,
                 message=str(result.output),
                 turn_messages=ModelMessagesTypeAdapter.dump_python(
-                    [*machine.turn_messages, *result.new_messages], mode="json"
+                    [*turn.turn_messages, *result.new_messages], mode="json"
                 ),
                 usage=result.usage,
             ),
         )
         logger.info(
             "Sent response for turn %s in conversation %s",
-            machine.turn_id,
+            turn.turn_id,
             cnv_stream.conversation_id,
         )
 
@@ -195,26 +195,26 @@ class Worker:
         *,
         agent: Any,
         conversation: Conversation,
-        machine: TurnStateMachine,
+        turn: TurnStateMachine,
         cnv_stream: ConversationStream,
         deps: Any,
         action: ToolCallPayload,
     ) -> None:
         value = execute_tool(
             agent,
-            machine.calls[action.tool_call_id],
+            turn.calls[action.tool_call_id],
             deps=deps,
-            prompt=machine.prompt,
-            messages=[*machine.history, *machine.turn_messages],
+            prompt=turn.prompt,
+            messages=[*turn.history, *turn.turn_messages],
             model=conversation.settings.model or None,
-            usage=machine.usage or RunUsage(),
+            usage=turn.usage or RunUsage(),
             conversation_id=cnv_stream.conversation_id,
         )
         if isinstance(value, SubAgentRequest):
             child_conversation_id = str(
                 uuid5(
                     NAMESPACE_URL,
-                    f"fallingwater:{cnv_stream.conversation_id}:{machine.turn_id}:{action.step_id}:{action.tool_call_id}",
+                    f"fallingwater:{cnv_stream.conversation_id}:{turn.turn_id}:{action.step_id}:{action.tool_call_id}",
                 )
             )
             child_turn_id = str(
@@ -227,7 +227,7 @@ class Worker:
                 cnv_stream,
                 conversation,
                 SubAgentRequestedPayload(
-                    turn_id=machine.turn_id,
+                    turn_id=turn.turn_id,
                     step_id=action.step_id,
                     tool_call_id=action.tool_call_id,
                     child_conversation_id=child_conversation_id,
@@ -244,7 +244,7 @@ class Worker:
             cnv_stream,
             conversation,
             ToolResultPayload(
-                turn_id=machine.turn_id,
+                turn_id=turn.turn_id,
                 step_id=action.step_id,
                 tool_call_id=action.tool_call_id,
                 result=result,
@@ -280,7 +280,7 @@ class Worker:
     ) -> bool:
         """Execute ready hints, acknowledge stale ones, and defer waiting ones."""
         payload = action.payload
-        machine = conversation.turn_state[payload.turn_id]
+        turn = conversation.turn_state[payload.turn_id]
         match conversation.dispatch_status(payload):
             case "stale":
                 return True
@@ -302,7 +302,7 @@ class Worker:
             self.execute_tool_call(
                 agent=agent,
                 conversation=conversation,
-                machine=machine,
+                turn=turn,
                 cnv_stream=cnv_stream,
                 deps=deps,
                 action=payload,
@@ -311,11 +311,11 @@ class Worker:
             self.run_agent_step(
                 agent=agent,
                 conversation=conversation,
-                machine=machine,
+                turn=turn,
                 cnv_stream=cnv_stream,
                 deps=deps,
                 prompt=(
-                    machine.prompt
+                    turn.prompt
                     if isinstance(payload, ConversationPokePayload)
                     else None
                 ),
