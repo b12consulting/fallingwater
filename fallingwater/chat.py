@@ -7,6 +7,7 @@ from uuid import uuid4
 from redis import Redis
 
 from .stream import DispatchStream
+from .conversation import Conversation
 from .models import (
     ConversationCreatedPayload,
     ConversationEvent,
@@ -67,21 +68,27 @@ class Chat:
 
         check_agent(self.agent_path, self.model)
         if not record:
-            self.stream.append_event(
-                Event.CONVERSATION_CREATED,
-                ConversationCreatedPayload(
-                    agent=self.agent_path,
-                    model=self.model,
-                    deps=dict(deps or {}),
-                ),
+            created = ConversationCreatedPayload(
+                agent=self.agent_path,
+                model=self.model,
+                deps=dict(deps or {}),
             )
+            self.stream.append_payload(created)
+        self.conversation = Conversation(
+            conversation_id=self.conversation_id, settings=created
+        )
         self.stream.create_group(self.group, id="0")
 
     def send(self, prompt: str) -> tuple[str, str]:
         """Queue a prompt as a new turn and return its ID and event cursor."""
         turn_id = str(uuid4())
         logger.debug("SEND (stream: %s): %.20s", self.events, prompt)
-        queued_id = self.stream.queue_turn(turn_id, prompt)
+        prepared = self.conversation.prepare(
+            TurnQueuedPayload(turn_id=turn_id, message=prompt)
+        )
+        queued_id = self.stream.append_payload(prepared.payload)
+        for action in prepared.dispatch(queued_id):
+            self.stream.dispatch.append_payload(action)
         return turn_id, queued_id
 
     def receive(self, turn_id: str, cursor: str) -> str:

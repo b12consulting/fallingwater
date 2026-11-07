@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from pydantic import TypeAdapter
@@ -21,7 +21,7 @@ from redis.exceptions import RedisError
 
 from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, SubAgentRequest
-from fallingwater.turn_state import reconstruct_conversation
+from fallingwater.conversation import Conversation, reconstruct_conversation
 from fallingwater.models import (
     ConversationCreatedPayload,
     ConversationPayload,
@@ -110,7 +110,9 @@ def _tool_request(calls: list[ToolCallPart], *, step_id: str = "step-1"):
         requests=TypeAdapter(DeferredToolRequests).dump_python(
             requests, mode="json"
         ),
-        step_messages=ModelMessagesTypeAdapter.dump_python(messages, mode="json"),
+        step_messages=ModelMessagesTypeAdapter.dump_python(
+            messages, mode="json"
+        ),
         usage=RunUsage(),
     )
 
@@ -142,6 +144,99 @@ def _events(redis: MemoryRedis, conversation_id: str = "abc"):
 
 def _dispatch(redis: MemoryRedis):
     return [fields for _, fields in redis.streams.get("fw:dispatch", [])]
+
+
+def test_checkpoint_rejects_empty_tool_request_set_without_writing() -> None:
+    redis = MemoryRedis(_base_entries())
+    worker = Worker(redis)
+    stream = worker.dsp_stream.conversation_stream("abc")
+    conversation = reconstruct_conversation(
+        stream.iter_events(), conversation_id="abc"
+    )
+    payload = ToolRequestedPayload(
+        turn_id="turn-1",
+        step_id="step-1",
+        requests={},
+        step_messages=[],
+        usage=RunUsage(),
+    )
+
+    with pytest.raises(ValueError, match="must contain a call"):
+        worker.checkpoint(stream, conversation, payload)
+
+    assert len(_events(redis)) == 2
+    assert _dispatch(redis) == []
+
+
+def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.xadd.return_value = b"1-0"
+    worker = Worker(redis)
+    stream = worker.dsp_stream.conversation_stream("parent")
+    conversation = Conversation(
+        conversation_id="parent",
+        settings=ConversationCreatedPayload(
+            agent="example:parent", model="test"
+        ),
+    )
+    conversation.apply(
+        decode_conversation_event(
+            "1-0",
+            encode_conversation_event(
+                Event.TURN_QUEUED,
+                TurnQueuedPayload(turn_id="turn-1", message="hello"),
+            ),
+        )
+    )
+    conversation.apply(
+        decode_conversation_event(
+            "2-0",
+            encode_conversation_event(
+                Event.TURN_TOOL_REQUESTED,
+                _tool_request(
+                    [ToolCallPart("child", {}, tool_call_id="call-1")]
+                ),
+            ),
+        )
+    )
+    request = SubAgentRequestedPayload(
+        turn_id="turn-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        child_conversation_id="child",
+        child_turn_id="child-turn",
+    )
+
+    worker.queue_subagent(
+        stream,
+        conversation,
+        request,
+        SubAgentRequest(
+            agent_path="example:child", model="test", prompt="hello"
+        ),
+    )
+
+    calls = redis.xadd.call_args_list
+    assert [call.args[0] for call in calls] == [
+        "fw:conversation:child:events",
+        "fw:conversation:child:events",
+        "fw:conversation:parent:events",
+        "fw:dispatch",
+    ]
+    assert [
+        decode_conversation_event("1-0", call.args[1]).type
+        for call in calls[:3]
+    ] == [
+        Event.CONVERSATION_CREATED,
+        Event.TURN_QUEUED,
+        Event.TURN_SUBAGENT_REQUESTED,
+    ]
+    assert calls[-1].args[1] == {
+        "conversation_id": "child",
+        "turn_id": "child-turn",
+        "type": Action.CONVERSATION_POKE,
+    }
+    assert conversation.turn_state["turn-1"].delegations == {}
 
 
 def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
@@ -178,7 +273,11 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
 
     current_usage = RunUsage(requests=5, input_tokens=120)
     request = _tool_request(
-        [ToolCallPart("multiply", {"left": 2, "right": 3}, tool_call_id="call-1")]
+        [
+            ToolCallPart(
+                "multiply", {"left": 2, "right": 3}, tool_call_id="call-1"
+            )
+        ]
     ).model_copy(update={"turn_id": "turn-2", "usage": current_usage})
     stream.append_event(Event.TURN_TOOL_REQUESTED, request)
 
@@ -239,9 +338,7 @@ def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
         },
     )
     actions = _dispatch(redis)
-    assert [action["type"] for action in actions] == [
-        Action.TOOL_CALL
-    ] * 2
+    assert [action["type"] for action in actions] == [Action.TOOL_CALL] * 2
     assert {action["tool_call_id"] for action in actions} == {
         "call-1",
         "call-2",
@@ -371,14 +468,15 @@ def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
 
     monkeypatch.setattr(stream, "iter_events", tracked_events)
 
-    assert stream.save_tool_result(
+    assert Worker(redis).save_tool_result(
+        stream,
+        conversation,
         ToolResultPayload(
             turn_id="turn-1",
             step_id="step-1",
             tool_call_id="call-1",
             result="first",
         ),
-        conversation,
     )
     assert after_ids == ["3-0", "3-0"]
     assert [entry["type"] for entry in _dispatch(redis)] == [
@@ -582,24 +680,25 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
         child_conversation_id="child-conversation",
         child_turn_id="child-turn",
     )
-    assert parent_stream.queue_subagent(
-        parent_request=parent_request,
-        child_agent="example:child",
-        child_model="test",
-        child_deps={},
-        child_prompt="child",
-        machine=reconstruct_conversation(
+    worker.queue_subagent(
+        parent_stream,
+        reconstruct_conversation(
             parent_stream.iter_events(), conversation_id="abc"
-        ).turn_state["turn-1"],
+        ),
+        parent_request,
+        SubAgentRequest(
+            agent_path="example:child", model="test", prompt="child"
+        ),
     )
     child_stream = worker.dsp_stream.conversation_stream("child-conversation")
     child_conversation = reconstruct_conversation(
         child_stream.iter_events(), conversation_id="child-conversation"
     )
     assert child_conversation.settings.parent is not None
-    child_stream.checkpoint(
+    worker.checkpoint(
+        child_stream,
+        child_conversation,
         TurnFailedPayload(turn_id="child-turn", error="child failed"),
-        child_conversation.turn_state["child-turn"],
     )
     monkeypatch.setattr(
         "fallingwater.worker.reify_agent", lambda _path: parent_agent
@@ -639,19 +738,20 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
 def test_ineligible_actions_do_not_load_agent(
     monkeypatch, fields, acknowledge
 ) -> None:
-    request = _tool_request(
-        [ToolCallPart("unused", {}, tool_call_id="call-1")]
-    )
+    request = _tool_request([ToolCallPart("unused", {}, tool_call_id="call-1")])
     redis = MemoryRedis(
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
     load_agent = Mock(side_effect=ModuleNotFoundError("unavailable agent"))
     monkeypatch.setattr("fallingwater.worker.reify_agent", load_agent)
 
-    assert _process(
-        Worker(redis),
-        {"conversation_id": "abc", "turn_id": "turn-1", **fields},
-    ) is acknowledge
+    assert (
+        _process(
+            Worker(redis),
+            {"conversation_id": "abc", "turn_id": "turn-1", **fields},
+        )
+        is acknowledge
+    )
     load_agent.assert_not_called()
     assert len(_events(redis)) == 3
     assert _dispatch(redis) == []
@@ -659,9 +759,7 @@ def test_ineligible_actions_do_not_load_agent(
 
 @pytest.mark.parametrize("terminal", [False, True])
 def test_result_save_refreshes_before_writing(terminal) -> None:
-    request = _tool_request(
-        [ToolCallPart("unused", {}, tool_call_id="call-1")]
-    )
+    request = _tool_request([ToolCallPart("unused", {}, tool_call_id="call-1")])
     redis = MemoryRedis(
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
@@ -683,7 +781,7 @@ def test_result_save_refreshes_before_writing(terminal) -> None:
     else:
         stream.append_event(Event.TURN_TOOL_RESULT, result)
 
-    assert not stream.save_tool_result(result, conversation)
+    assert not Worker(redis).save_tool_result(stream, conversation, result)
     assert len(_events(redis)) == 4
     assert _dispatch(redis) == []
 
@@ -692,9 +790,7 @@ def test_result_save_refreshes_before_writing(terminal) -> None:
 def test_result_save_does_not_resume_obsolete_step(
     monkeypatch, next_step
 ) -> None:
-    request = _tool_request(
-        [ToolCallPart("unused", {}, tool_call_id="call-1")]
-    )
+    request = _tool_request([ToolCallPart("unused", {}, tool_call_id="call-1")])
     redis = MemoryRedis(
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
@@ -722,14 +818,15 @@ def test_result_save_does_not_resume_obsolete_step(
         return entry_id
 
     monkeypatch.setattr(stream, "append_event", append_with_new_state)
-    assert stream.save_tool_result(
+    assert Worker(redis).save_tool_result(
+        stream,
+        conversation,
         ToolResultPayload(
             turn_id="turn-1",
             step_id="step-1",
             tool_call_id="call-1",
             result="answer",
         ),
-        conversation,
     )
     assert _dispatch(redis) == []
 
@@ -737,9 +834,7 @@ def test_result_save_does_not_resume_obsolete_step(
 def test_result_save_keeps_first_persisted_value_during_race(
     monkeypatch,
 ) -> None:
-    request = _tool_request(
-        [ToolCallPart("unused", {}, tool_call_id="call-1")]
-    )
+    request = _tool_request([ToolCallPart("unused", {}, tool_call_id="call-1")])
     redis = MemoryRedis(
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
@@ -757,14 +852,15 @@ def test_result_save_keeps_first_persisted_value_during_race(
         return append_event(event_type, payload)
 
     monkeypatch.setattr(stream, "append_event", append_with_earlier_result)
-    assert stream.save_tool_result(
+    assert Worker(redis).save_tool_result(
+        stream,
+        conversation,
         ToolResultPayload(
             turn_id="turn-1",
             step_id="step-1",
             tool_call_id="call-1",
             result="later result",
         ),
-        conversation,
     )
     fresh = reconstruct_conversation(
         stream.iter_events(), conversation_id="abc"
@@ -802,13 +898,19 @@ def test_checkpoint_and_refresh_preserve_first_concurrent_terminal(
         Event.TURN_COMPLETED if first_succeeds else Event.TURN_FAILED,
         completed if first_succeeds else failed,
     )
-    stream.checkpoint(
+    worker = Worker(redis)
+    worker.checkpoint(
+        stream,
+        conversation,
         failed if first_succeeds else completed,
-        conversation.turn_state["turn-1"],
     )
     assert conversation.turn_state["turn-1"].running
-    stream.queue_turn("turn-2", "next prompt")
-    stream.refresh(conversation)
+    worker.checkpoint(
+        stream,
+        conversation,
+        TurnQueuedPayload(turn_id="turn-2", message="next prompt"),
+    )
+    worker.refresh(stream, conversation)
     fresh = reconstruct_conversation(
         stream.iter_events(), conversation_id="abc"
     )
@@ -957,7 +1059,9 @@ def test_agent_resume_preserves_history_messages_and_usage_across_steps(
     assert all(call.args[1] is None for call in run_agent.call_args_list[1:])
     completed = _events(redis)[-1].payload
     assert isinstance(completed, TurnCompletedPayload)
-    assert ModelMessagesTypeAdapter.validate_python(completed.turn_messages) == [
+    assert ModelMessagesTypeAdapter.validate_python(
+        completed.turn_messages
+    ) == [
         *steps[0].new_messages,
         *steps[1].new_messages,
         *final.new_messages,

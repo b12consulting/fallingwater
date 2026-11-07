@@ -3,10 +3,6 @@
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import TypeAdapter
-from pydantic_ai import DeferredToolRequests
-from pydantic_ai.messages import ToolCallPart
-from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import ResponseError
 
@@ -17,21 +13,12 @@ from fallingwater.models import (
     ConversationEvent,
     Action,
     Event,
-    SubAgentRequestedPayload,
-    ToolRequestedPayload,
     TurnQueuedPayload,
 )
 from fallingwater.stream_utils import (
     decode_conversation_event,
     encode_conversation_event,
 )
-from fallingwater.turn_state import TurnStateMachine
-
-
-def _machine() -> TurnStateMachine:
-    machine = TurnStateMachine("parent", "parent-turn")
-    machine.transition(TurnQueuedPayload(turn_id="parent-turn", message="hello"))
-    return machine
 
 
 def test_append_and_read_event_use_the_conversation_codec() -> None:
@@ -66,10 +53,13 @@ def test_dispatch_append_event_writes_action_fields() -> None:
     redis.xadd.return_value = b"3-0"
     dispatch = DispatchStream(redis)
 
-    assert dispatch.append_event(
-        Action.CONVERSATION_POKE,
-        ConversationPokePayload(conversation_id="abc", turn_id="turn-1"),
-    ) == "3-0"
+    assert (
+        dispatch.append_event(
+            Action.CONVERSATION_POKE,
+            ConversationPokePayload(conversation_id="abc", turn_id="turn-1"),
+        )
+        == "3-0"
+    )
     redis.xadd.assert_called_once_with(
         "fw:dispatch",
         {
@@ -78,83 +68,6 @@ def test_dispatch_append_event_writes_action_fields() -> None:
             "turn_id": "turn-1",
         },
     )
-
-
-def test_checkpoint_rejects_empty_tool_request_set_without_writing() -> None:
-    redis = MagicMock(spec=Redis)
-    conversation = DispatchStream(redis).conversation_stream("abc")
-    payload = ToolRequestedPayload(
-        turn_id="turn-1",
-        step_id="step-1",
-        requests={},
-        step_messages=[],
-        usage=RunUsage(),
-    )
-
-    with pytest.raises(ValueError, match="must contain a call"):
-        machine = TurnStateMachine("abc", "turn-1")
-        machine.transition(TurnQueuedPayload(turn_id="turn-1", message="hello"))
-        conversation.checkpoint(payload, machine)
-
-    redis.xadd.assert_not_called()
-
-
-def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None:
-    redis = MagicMock(spec=Redis)
-    redis.xadd.return_value = b"1-0"
-    parent = DispatchStream(redis).conversation_stream("parent")
-    request = SubAgentRequestedPayload(
-        turn_id="parent-turn",
-        step_id="step-1",
-        tool_call_id="call-1",
-        child_conversation_id="child",
-        child_turn_id="child-turn",
-    )
-    machine = _machine()
-    machine.transition(
-        ToolRequestedPayload(
-            turn_id="parent-turn",
-            step_id="step-1",
-            requests=TypeAdapter(DeferredToolRequests).dump_python(
-                DeferredToolRequests(
-                    calls=[ToolCallPart("child", {}, tool_call_id="call-1")]
-                ),
-                mode="json",
-            ),
-            step_messages=[],
-            usage=RunUsage(),
-        )
-    )
-
-    assert parent.queue_subagent(
-        parent_request=request,
-        child_agent="example:child",
-        child_model="test",
-        child_deps={},
-        child_prompt="hello",
-        machine=machine,
-    )
-
-    calls = redis.xadd.call_args_list
-    assert [call.args[0] for call in calls] == [
-        "fw:conversation:child:events",
-        "fw:conversation:child:events",
-        "fw:conversation:parent:events",
-        "fw:dispatch",
-    ]
-    assert [
-        decode_conversation_event("1-0", call.args[1]).type
-        for call in calls[:3]
-    ] == [
-        Event.CONVERSATION_CREATED,
-        Event.TURN_QUEUED,
-        Event.TURN_SUBAGENT_REQUESTED,
-    ]
-    assert calls[-1].args[1] == {
-        "conversation_id": "child",
-        "turn_id": "child-turn",
-        "type": Action.CONVERSATION_POKE,
-    }
 
 
 def test_group_operations_keep_stream_group_and_consumer_explicit() -> None:

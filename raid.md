@@ -725,3 +725,28 @@ revisited. Close or revise an item when the code resolves it.
   terminal replay/dispatch behavior and add history only when a running turn
   becomes successfully completed. This does not implement retries or reopen
   failed turns.
+- **D86 — Pure conversation decisions and low-level streams (implemented).**
+  Move workflow decisions behind `Conversation`, shared by `Chat` and `Worker`,
+  while retaining turn-specific validation on its machines. `prepare` returns
+  a validated payload and dispatch intents without advancing canonical state.
+  New-turn preparation does not register a machine; only replay captures its
+  history and usage. Parent notification intents bind the actual persisted
+  terminal ID outside Redis access. Streams accept supplied payloads and handle
+  wire types, codecs, reads, writes, groups, claims, and acknowledgements; they
+  no longer construct workflow payloads or call domain machines.
+  Worker owns checkpoint and child-write sequencing, including result replay
+  before validation and after persistence before deciding fan-in. Chat uses
+  the same preparation abstraction for submission without loading full history.
+  Import-boundary and no-I/O preparation tests guard the separation; existing
+  race and write-order tests retain consistency coverage. This supersedes
+  D83's stream-owned orchestration without changing wire schemas or public
+  Chat behavior. Former high-level `ConversationStream` workflow helpers are
+  removed; low-level `append_event` remains available. No atomicity,
+  exactly-once execution, or recovery guarantees are added.
+- **D87 — Separate conversation and turn-state modules (implemented).**
+  Extract `Conversation`, `PreparedEvent`, and `reconstruct_conversation` to
+  `conversation.py`. Keep payload transitions, notification intents, shared
+  message prefixes, and per-turn machines in `turn_state.py`. Conversation
+  depends on turn state, never the reverse; both remain I/O-free and streams
+  depend on neither. Update callers and import-boundary checks without
+  compatibility re-exports or behavior changes.

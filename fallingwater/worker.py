@@ -13,9 +13,11 @@ from redis.exceptions import RedisError
 
 from .agent_proxy import SubAgentRequest, execute_tool, run
 from .catalog import reify_agent
+from .conversation import Conversation, reconstruct_conversation
 from .stream import ConversationStream, DispatchStream
 from .models import (
     ConversationPokePayload,
+    DispatchPayloadType,
     DispatchEvent,
     InvalidDispatchEvent,
     SubAgentResultPayload,
@@ -27,9 +29,8 @@ from .models import (
     TurnFailedPayload,
 )
 from .turn_state import (
-    Conversation,
+    TurnPayload,
     TurnStateMachine,
-    reconstruct_conversation,
     requests_adapter,
 )
 from .utils import logger
@@ -62,7 +63,74 @@ class Worker:
         """Stop reading more actions after the active action is checkpointed."""
         self.stop_event.set()
 
-    def _run_agent_step(
+    @staticmethod
+    def refresh(
+        cnv_stream: ConversationStream, conversation: Conversation
+    ) -> None:
+        for event in cnv_stream.iter_events(
+            after_id=conversation.last_event_id
+        ):
+            conversation.apply(event)
+
+    @staticmethod
+    def publish(
+        cnv_stream: ConversationStream,
+        actions: tuple[DispatchPayloadType, ...],
+    ) -> None:
+        for payload in actions:
+            cnv_stream.dispatch.append_payload(payload)
+
+    def checkpoint(
+        self,
+        cnv_stream: ConversationStream,
+        conversation: Conversation,
+        payload: TurnPayload,
+    ) -> str:
+        prepared = conversation.prepare(payload)
+        entry_id = cnv_stream.append_payload(prepared.payload)
+        self.publish(cnv_stream, prepared.dispatch(entry_id))
+        return entry_id
+
+    def save_tool_result(
+        self,
+        cnv_stream: ConversationStream,
+        conversation: Conversation,
+        payload: ToolResultPayload,
+    ) -> bool:
+        self.refresh(cnv_stream, conversation)
+        if not conversation.accepts_result(payload):
+            return False
+        prepared = conversation.prepare(payload)
+        cnv_stream.append_payload(prepared.payload)
+        # Replay from the old cursor so a preceding sibling write is included.
+        self.refresh(cnv_stream, conversation)
+        self.publish(cnv_stream, conversation.resume_actions(payload))
+        return True
+
+    def queue_subagent(
+        self,
+        cnv_stream: ConversationStream,
+        conversation: Conversation,
+        request: SubAgentRequestedPayload,
+        child: SubAgentRequest,
+    ) -> None:
+        settings, queued, prepared = conversation.prepare_subagent(
+            request,
+            agent=child.agent_path,
+            model=child.model or conversation.settings.model,
+            deps=child.deps,
+            prompt=child.prompt,
+        )
+        child_stream = cnv_stream.dispatch.conversation_stream(
+            request.child_conversation_id
+        )
+        # A queued child can reconstruct its parent request during recovery.
+        child_stream.append_payload(settings)
+        child_stream.append_payload(queued)
+        entry_id = cnv_stream.append_payload(prepared.payload)
+        self.publish(cnv_stream, prepared.dispatch(entry_id))
+
+    def run_agent_step(
         self,
         *,
         agent: Any,
@@ -101,10 +169,12 @@ class Worker:
                 ),
                 usage=result.usage,
             )
-            cnv_stream.checkpoint(payload, machine)
+            self.checkpoint(cnv_stream, conversation, payload)
             return
 
-        cnv_stream.checkpoint(
+        self.checkpoint(
+            cnv_stream,
+            conversation,
             TurnCompletedPayload(
                 turn_id=machine.turn_id,
                 message=str(result.output),
@@ -113,7 +183,6 @@ class Worker:
                 ),
                 usage=result.usage,
             ),
-            machine,
         )
         logger.info(
             "Sent response for turn %s in conversation %s",
@@ -121,7 +190,7 @@ class Worker:
             cnv_stream.conversation_id,
         )
 
-    def _execute_tool_call(
+    def execute_tool_call(
         self,
         *,
         agent: Any,
@@ -154,41 +223,39 @@ class Worker:
                     f"fallingwater:{child_conversation_id}:turn:{action.tool_call_id}",
                 )
             )
-            cnv_stream.queue_subagent(
-                parent_request=SubAgentRequestedPayload(
+            self.queue_subagent(
+                cnv_stream,
+                conversation,
+                SubAgentRequestedPayload(
                     turn_id=machine.turn_id,
                     step_id=action.step_id,
                     tool_call_id=action.tool_call_id,
                     child_conversation_id=child_conversation_id,
                     child_turn_id=child_turn_id,
                 ),
-                child_agent=value.agent_path,
-                child_model=value.model or conversation.settings.model,
-                child_deps=value.deps,
-                child_prompt=value.prompt,
-                machine=machine,
+                value,
             )
             return
 
         result = _json_value_adapter.validate_json(
             _json_value_adapter.dump_json(value)
         )
-        cnv_stream.save_tool_result(
+        self.save_tool_result(
+            cnv_stream,
+            conversation,
             ToolResultPayload(
                 turn_id=machine.turn_id,
                 step_id=action.step_id,
                 tool_call_id=action.tool_call_id,
                 result=result,
             ),
-            conversation,
         )
 
-    def _process_subagent_result(
+    def process_subagent_result(
         self,
         cnv_stream: ConversationStream,
         action: SubAgentResultPayload,
         conversation: Conversation,
-        machine: TurnStateMachine,
     ) -> bool:
         child_stream = self.dsp_stream.conversation_stream(
             action.child_conversation_id
@@ -198,11 +265,11 @@ class Worker:
         )
         if not events or events[0].entry_id != action.child_terminal_event_id:
             return False
-        payload = machine.child_outcome(action, events[0])
+        payload = conversation.child_outcome(action, events[0])
         if isinstance(payload, ToolResultPayload):
-            cnv_stream.save_tool_result(payload, conversation)
+            self.save_tool_result(cnv_stream, conversation, payload)
         elif isinstance(payload, TurnFailedPayload):
-            cnv_stream.checkpoint(payload, machine)
+            self.checkpoint(cnv_stream, conversation, payload)
         return True
 
     def process(
@@ -214,14 +281,14 @@ class Worker:
         """Execute ready hints, acknowledge stale ones, and defer waiting ones."""
         payload = action.payload
         machine = conversation.turn_state[payload.turn_id]
-        match machine.dispatch_status(payload):
+        match conversation.dispatch_status(payload):
             case "stale":
                 return True
             case "wait":
                 return False
         if isinstance(payload, SubAgentResultPayload):
-            return self._process_subagent_result(
-                cnv_stream, payload, conversation, machine
+            return self.process_subagent_result(
+                cnv_stream, payload, conversation
             )
 
         settings = conversation.settings
@@ -232,7 +299,7 @@ class Worker:
             else TypeAdapter(agent.deps_type).validate_python(settings.deps)
         )
         if isinstance(payload, ToolCallPayload):
-            self._execute_tool_call(
+            self.execute_tool_call(
                 agent=agent,
                 conversation=conversation,
                 machine=machine,
@@ -241,7 +308,7 @@ class Worker:
                 action=payload,
             )
         else:
-            self._run_agent_step(
+            self.run_agent_step(
                 agent=agent,
                 conversation=conversation,
                 machine=machine,
@@ -312,9 +379,10 @@ class Worker:
                     turn_id,
                     conversation_id,
                 )
-                cnv_stream.checkpoint(
+                self.checkpoint(
+                    cnv_stream,
+                    conversation,
                     TurnFailedPayload(turn_id=turn_id, error=str(error)),
-                    conversation.turn_state[turn_id],
                 )
                 processed = True
             if processed:

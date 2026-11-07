@@ -56,16 +56,17 @@ the same stream.
 and acknowledgements. It decodes each dispatch entry into a typed action or an
 invalid-entry value that the worker acknowledges. It creates a
 `ConversationStream` bound to an ID; that object owns typed event reads and
-writes, its reader groups, and writes to both streams. `Chat` keeps one bound
+writes and its reader groups. `Chat` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
 `models.py` defines the event and action schemas; `stream_utils.py`
 handles naming validation and wire codecs. `Chat` and `Worker` decide when to
-acknowledge entries; turn machines decide which work is enabled.
+acknowledge entries; `Conversation` and its turn machines decide which work
+is enabled.
 
-`Chat.send` asks its conversation stream to write the queued event and dispatch
-poke with two successive `XADD` commands. Group and consumer names remain
-explicit on stream operations.
+`Chat.send` prepares a queued event through `Conversation`, then writes the
+event and dispatch poke through the two stream objects with successive `XADD`
+commands. Group and consumer names remain explicit on stream operations.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -110,7 +111,7 @@ the canonical delta for later turns. Deferred request payloads use
 the full conversation history.
 
 `ConversationStream.iter_events()` pages through the event stream and supplies
-decoded events to `turn_state.reconstruct_conversation`. That pure function
+decoded events to `conversation.reconstruct_conversation`. That pure function
 returns a `Conversation` containing the configuration, conversation ID, replay
 cursor, and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
 prompt, prior-history snapshot, accumulated turn messages, usage, active tool
@@ -373,16 +374,33 @@ already-created group and propagate other Redis errors.
 registry. `stream_utils.py` contains stream key formatting and codecs; callers
 import schemas directly from `models.py`.
 
-`Chat` and `Worker` retain acknowledgement policy. Payload transitions and turn
-machines own workflow validation, completion, and turn-resumption policy.
-`ConversationStream.checkpoint` previews a transition without changing the
-snapshot, persists its payload, and publishes its emissions. Only stream replay
-advances the snapshot, so an optimistic write cannot displace an earlier
-concurrent outcome. `save_tool_result` additionally replays the concurrent
-tail before and after the write. `Worker` routes child-result actions before
+Streams accept supplied payloads and provide only typed Redis access.
+`append_payload` selects the registered wire type without constructing a new
+workflow payload; `append_event` retains explicit type/payload writes.
+`stream.py` has no dependency on `Conversation`, turn machines, or notification
+intents.
+
+`conversation.py` defines `Conversation`, `PreparedEvent`, and
+`reconstruct_conversation`, depending only on payload models and the pure
+turn-state module. `Conversation` exposes pure preparation, dispatch eligibility, result
+eligibility, child-outcome normalization, and post-replay resumption decisions.
+`prepare` returns a `PreparedEvent` containing the validated payload and
+emissions without advancing state. Its `dispatch(entry_id)` binds terminal
+notification intents to the actual persisted event ID. New-turn preparation
+uses an unregistered machine, allowing `Chat` to submit turns without replaying
+history or optimistically adding them to canonical state.
+
+`Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
+Worker checkpointing prepares a fact, persists it, then publishes its actions.
+Only applying persisted events advances the snapshot, so an optimistic write
+cannot displace an earlier concurrent outcome. Worker result saving replays
+the concurrent tail before checking eligibility and validating, writes the
+result, then replays from the old cursor again before asking `Conversation`
+for resume actions. Child creation and queueing remain before the parent
+request write and dispatch. `Worker` routes child-result actions before
 loading an agent because those actions use only saved stream state. The CLI
-inspection commands and web SSE feeds keep their read-only query patterns, which include scans and
-multi-stream reads.
+inspection commands and web SSE feeds keep their read-only query patterns,
+including scans and multi-stream reads.
 
 `recovery.py` currently contains only a no-op `recover()` and a checklist for
 future reconciliation of partial writes. It does not repair streams yet.
@@ -433,8 +451,9 @@ for tools or children; it does not mean a worker is actively executing.
 Conversation history advances only when replay changes a running turn into a
 completed one, never on failure or repeated terminal events.
 
-Workers ask the machine whether an action is ready, waiting, or stale before
-loading an agent. They execute ready work, leave premature resumes pending, and
+Workers ask `Conversation` whether an action is ready, waiting, or stale;
+the conversation delegates turn-specific rules to its machines. They execute
+ready work, leave premature resumes pending, and
 acknowledge stale actions. Dependency/schema validation and Redis/error boundaries
 remain outside the machine. These machines do not provide locks, atomic writes,
 exactly-once execution, or partial-write reconciliation; `recovery.py` remains

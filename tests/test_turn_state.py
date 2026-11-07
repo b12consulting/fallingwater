@@ -1,7 +1,9 @@
 """Pure production turn transitions, parallel dispatch, and conversation replay."""
 
+import ast
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -18,6 +20,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.usage import RunUsage
 from redis import Redis
 
+from fallingwater.conversation import Conversation, reconstruct_conversation
 from fallingwater.models import (
     AgentResumePayload,
     ConversationCreatedPayload,
@@ -39,7 +42,6 @@ from fallingwater.turn_state import (
     AnswerTurn,
     ChildCompleted,
     ChildFailed,
-    Conversation,
     DelegateTool,
     FailTurn,
     FinishTurn,
@@ -50,7 +52,6 @@ from fallingwater.turn_state import (
     StartTurn,
     TurnStateMachine,
     child_transition_adapter,
-    reconstruct_conversation,
     transition_adapter,
 )
 
@@ -103,7 +104,9 @@ def _completed(turn_id="turn-1", *, requests=2):
         message=f"answer {turn_id}",
         turn_messages=ModelMessagesTypeAdapter.dump_python(
             [
-                ModelRequest(parts=[UserPromptPart(content=f"prompt {turn_id}")]),
+                ModelRequest(
+                    parts=[UserPromptPart(content=f"prompt {turn_id}")]
+                ),
                 ModelResponse(parts=[TextPart(content=f"answer {turn_id}")]),
             ],
             mode="json",
@@ -114,9 +117,13 @@ def _completed(turn_id="turn-1", *, requests=2):
 
 def _event(entry_id, payload: ConversationPayloadType):
     event_type = next(
-        kind for kind, model in PAYLOAD_MODELS.items() if isinstance(payload, model)
+        kind
+        for kind, model in PAYLOAD_MODELS.items()
+        if isinstance(payload, model)
     )
-    return ConversationEvent(entry_id=entry_id, type=event_type, payload=payload)
+    return ConversationEvent(
+        entry_id=entry_id, type=event_type, payload=payload
+    )
 
 
 def _machine(*call_ids):
@@ -168,7 +175,9 @@ def test_type_adapter_selects_transition_from_serialized_endpoints(
     assert isinstance(transition_adapter, TypeAdapter)
     edge = transition_adapter.validate_python(
         {
-            "start": start.model_dump(mode="json") if start is not None else None,
+            "start": start.model_dump(mode="json")
+            if start is not None
+            else None,
             "stop": stop.model_dump(mode="json") if stop is not None else None,
         }
     )
@@ -201,7 +210,9 @@ def test_transition_endpoints_must_belong_to_same_turn(stop):
         ([_queued(), _completed()], False, True, False),
         (
             [_queued(), TurnFailedPayload(turn_id="turn-1", error="failed")],
-            False, False, True,
+            False,
+            False,
+            True,
         ),
         (
             [
@@ -210,7 +221,9 @@ def test_transition_endpoints_must_belong_to_same_turn(stop):
                 _result(),
                 TurnFailedPayload(turn_id="turn-1", error="failed"),
             ],
-            False, False, True,
+            False,
+            False,
+            True,
         ),
     ],
 )
@@ -255,7 +268,9 @@ def test_start_and_terminal_transitions():
         (
             _request(
                 "call-1",
-                approvals=[ToolCallPart("approve", {}, tool_call_id="approval")],
+                approvals=[
+                    ToolCallPart("approve", {}, tool_call_id="approval")
+                ],
             ),
             "approvals",
         ),
@@ -289,8 +304,12 @@ def test_request_validation_is_atomic(payload, message):
         _result(step_id="old-step"),
         _result(turn_id="other-turn"),
         _completed(),
-        _completed().model_copy(update={"turn_messages": [{"kind": "invalid"}]}),
-        _delegation().model_copy(update={"child_conversation_id": "conversation"}),
+        _completed().model_copy(
+            update={"turn_messages": [{"kind": "invalid"}]}
+        ),
+        _delegation().model_copy(
+            update={"child_conversation_id": "conversation"}
+        ),
         _delegation().model_copy(update={"child_turn_id": "turn-1"}),
     ],
 )
@@ -387,9 +406,10 @@ def test_child_outcome_validates_context_without_emitting(monkeypatch, failed):
     monkeypatch.setattr(edge_type, "validate_context", validate)
     monkeypatch.setattr(edge_type, "emit", emit)
 
-    assert machine.child_outcome(
-        _child_action(), _event("42-7", terminal)
-    ) is not None
+    assert (
+        machine.child_outcome(_child_action(), _event("42-7", terminal))
+        is not None
+    )
     assert contexts == [machine]
     emit.assert_not_called()
     assert vars(machine) == before
@@ -409,9 +429,9 @@ def test_parallel_fanout_out_of_order_results_and_interleaved_delegation():
         for call_id in ("call-1", "call-2", "call-3", "call-4")
     )
     assert machine.request == request
-    assert machine.requests == TypeAdapter(DeferredToolRequests).validate_python(
-        request.requests
-    )
+    assert machine.requests == TypeAdapter(
+        DeferredToolRequests
+    ).validate_python(request.requests)
     assert list(machine.calls) == ["call-1", "call-2", "call-3", "call-4"]
     assert all(machine.dispatch_status(action) == "ready" for action in actions)
     resume = AgentResumePayload(
@@ -465,7 +485,9 @@ def test_multiple_tool_rounds_reset_pending_state_and_stale_dispatch():
         first_request.step_messages + second_request.step_messages
     )
     for action in (
-        ConversationPokePayload(conversation_id="conversation", turn_id="turn-1"),
+        ConversationPokePayload(
+            conversation_id="conversation", turn_id="turn-1"
+        ),
         AgentResumePayload(
             conversation_id="conversation", turn_id="turn-1", step_id="step-1"
         ),
@@ -522,11 +544,19 @@ def test_duplicate_and_stale_replay_does_not_change_results_or_terminal_id():
 @pytest.mark.parametrize(
     ("first", "later"),
     [
-        (_completed(), TurnFailedPayload(turn_id="turn-1", error="late failure")),
-        (TurnFailedPayload(turn_id="turn-1", error="first failure"), _completed()),
+        (
+            _completed(),
+            TurnFailedPayload(turn_id="turn-1", error="late failure"),
+        ),
+        (
+            TurnFailedPayload(turn_id="turn-1", error="first failure"),
+            _completed(),
+        ),
         (
             _completed(requests=2),
-            _completed(requests=9).model_copy(update={"message": "late answer"}),
+            _completed(requests=9).model_copy(
+                update={"message": "late answer"}
+            ),
         ),
         (
             TurnFailedPayload(turn_id="turn-1", error="first failure"),
@@ -604,7 +634,7 @@ def test_late_request_result_and_delegation_after_terminal_are_ignored(
 
 @pytest.mark.parametrize("resolved_count", [0, 1, 2])
 def test_duplicate_current_request_preserves_messages_results_and_delegations(
-    resolved_count
+    resolved_count,
 ):
     machine = _machine()
     request = _request("call-1", "call-2")
@@ -775,7 +805,10 @@ def test_conversation_reconstructs_all_turns_with_queue_boundary_snapshots():
     assert conversation.conversation_id == "conversation"
     assert conversation.last_event_id == "12-0"
     assert set(conversation.turn_state) == {
-        "turn-1", "turn-2", "turn-3", "turn-4"
+        "turn-1",
+        "turn-2",
+        "turn-3",
+        "turn-4",
     }
     assert all(
         isinstance(key, str) and isinstance(machine, TurnStateMachine)
@@ -881,9 +914,7 @@ def test_many_sequential_turns_share_linear_history_storage():
     for index in range(count):
         turn_id = f"turn-{index}"
         conversation.apply(_event(f"{2 * index + 2}-0", _queued(turn_id)))
-        conversation.apply(
-            _event(f"{2 * index + 3}-0", _completed(turn_id))
-        )
+        conversation.apply(_event(f"{2 * index + 3}-0", _completed(turn_id)))
     conversation.apply(_event("1000-0", _queued("next-turn")))
     machines = [
         conversation.turn_state[f"turn-{index}"] for index in range(count)
@@ -972,7 +1003,7 @@ def test_apply_canonical_terminal_after_checkpoint_updates_history_prefix():
 
 @pytest.mark.parametrize("first_succeeded", [False, True])
 def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
-    first_succeeded
+    first_succeeded,
 ):
     base = [
         _event("1-0", ConversationCreatedPayload(agent="example:agent")),
@@ -984,9 +1015,7 @@ def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
     machine = conversation.turn_state["turn-1"]
     success = _completed(requests=7)
     failure = TurnFailedPayload(turn_id="turn-1", error="concurrent failure")
-    first, later = (
-        (success, failure) if first_succeeded else (failure, success)
-    )
+    first, later = (success, failure) if first_succeeded else (failure, success)
     persisted = [_event("3-0", first)]
     before = deepcopy(vars(machine))
     # The sibling's terminal fact is persisted but not yet in this snapshot.
@@ -1025,7 +1054,7 @@ def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
 
 @pytest.mark.parametrize("same_entry_id", [False, True])
 def test_duplicate_canonical_terminal_does_not_append_history_twice(
-    same_entry_id
+    same_entry_id,
 ):
     terminal = _event("3-0", _completed())
     conversation = reconstruct_conversation(
@@ -1141,4 +1170,165 @@ def test_replay_does_not_execute_tools_agents_or_redis_io(monkeypatch):
         "call-2": {"value": "call-2"},
         "call-1": {"value": "call-1"},
     }
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("module", "allowed_dependencies"),
+    [
+        ("turn_state", {"models"}),
+        ("conversation", {"models", "turn_state"}),
+        ("stream", {"models", "stream_utils", "utils"}),
+    ],
+)
+def test_layer_import_boundaries(module, allowed_dependencies):
+    package = Path(__file__).resolve().parents[1] / "fallingwater"
+    tree = ast.parse((package / f"{module}.py").read_text())
+    dependencies = set()
+    external_imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                dependencies.add((node.module or "").split(".")[0])
+            elif node.module and node.module.startswith("fallingwater."):
+                dependencies.add(node.module.split(".")[1])
+            elif node.module == "fallingwater":
+                dependencies.update(alias.name for alias in node.names)
+            elif node.module:
+                external_imports.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("fallingwater."):
+                    dependencies.add(alias.name.split(".")[1])
+                else:
+                    external_imports.add(alias.name.split(".")[0])
+    assert dependencies <= allowed_dependencies
+    if module in {"turn_state", "conversation"}:
+        assert external_imports <= {
+            "abc",
+            "collections",
+            "copy",
+            "dataclasses",
+            "typing",
+            "pydantic",
+            "pydantic_ai",
+        }
+    else:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else ""
+                )
+                assert not name.endswith("Payload")
+
+
+def test_conversation_prepares_new_turns_without_registering_them():
+    conversation = Conversation(
+        conversation_id="conversation",
+        settings=ConversationCreatedPayload(agent="unimportable:agent"),
+    )
+    for turn_id in ("first", "second"):
+        queued = _queued(turn_id)
+        prepared = conversation.prepare(queued)
+        assert prepared.payload is queued
+        assert prepared.dispatch("42-7") == (
+            ConversationPokePayload(
+                conversation_id="conversation", turn_id=turn_id
+            ),
+        )
+    assert conversation.turn_state == {}
+    assert conversation.last_event_id == "0-0"
+    with pytest.raises(ValueError, match="No prompt found"):
+        conversation.prepare(_completed())
+
+
+def test_conversation_workflow_preparation_is_pure(monkeypatch):
+    forbidden = Mock(side_effect=AssertionError("preparation attempted I/O"))
+    monkeypatch.setattr(Redis, "execute_command", forbidden)
+    monkeypatch.setattr(Agent, "run_sync", forbidden)
+    monkeypatch.setattr(Agent, "run", forbidden)
+    monkeypatch.setattr("fallingwater.catalog.reify_agent", forbidden)
+    parent = ParentToolReference(
+        conversation_id="parent",
+        turn_id="parent-turn",
+        step_id="parent-step",
+        tool_call_id="parent-call",
+    )
+    conversation = reconstruct_conversation(
+        [
+            _event(
+                "1-0",
+                ConversationCreatedPayload(
+                    agent="unimportable:agent", parent=parent
+                ),
+            ),
+            _event("2-0", _queued()),
+            _event("3-0", _request("call-1")),
+        ],
+        conversation_id="conversation",
+    )
+    machine = conversation.turn_state["turn-1"]
+    before = deepcopy(vars(machine))
+    delegation = _delegation()
+    settings, queued, prepared = conversation.prepare_subagent(
+        delegation,
+        agent="unimportable:child",
+        model="test",
+        deps={"key": "value"},
+        prompt="child prompt",
+    )
+    assert settings.parent == ParentToolReference(
+        conversation_id="conversation",
+        turn_id="turn-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+    )
+    assert settings.deps == {"key": "value"}
+    assert queued == TurnQueuedPayload(
+        turn_id="child-turn", message="child prompt"
+    )
+    assert prepared.dispatch("4-0") == (
+        ConversationPokePayload(conversation_id="child", turn_id="child-turn"),
+    )
+    assert vars(machine) == before
+    assert conversation.last_event_id == "3-0"
+
+    conversation.apply(_event("4-0", delegation))
+    action = _child_action()
+    assert conversation.dispatch_status(action) == "ready"
+    result = conversation.child_outcome(
+        action, _event("42-7", _completed("child-turn"))
+    )
+    assert isinstance(result, ToolResultPayload)
+    assert conversation.accepts_result(result)
+    conversation.prepare(result)
+    assert conversation.resume_actions(result) == ()
+    assert machine.results == {}
+    conversation.apply(_event("5-0", result))
+    assert not conversation.accepts_result(result)
+    assert conversation.resume_actions(result) == (
+        AgentResumePayload(
+            conversation_id="conversation", turn_id="turn-1", step_id="step-1"
+        ),
+    )
+
+    before = deepcopy(vars(machine))
+    prepared = conversation.prepare(_completed())
+    assert prepared.dispatch("99-3") == (
+        SubAgentResultPayload(
+            conversation_id="parent",
+            turn_id="parent-turn",
+            step_id="parent-step",
+            tool_call_id="parent-call",
+            child_conversation_id="conversation",
+            child_turn_id="turn-1",
+            child_terminal_event_id="99-3",
+        ),
+    )
+    assert vars(machine) == before
+    assert conversation.last_event_id == "5-0"
     forbidden.assert_not_called()

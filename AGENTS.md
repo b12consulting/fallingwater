@@ -49,23 +49,25 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
+|   |-- conversation.py       Pure conversation decisions, preparation, and replay
 |   |-- models.py             Conversation and dispatch event/payload schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
-|   |-- stream.py             Stream access and transition checkpoint persistence
+|   |-- stream.py             Low-level typed Redis stream access
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
-|   |-- turn_state.py         Payload transitions, turn machines, conversation replay
+|   |-- turn_state.py         Pure payload transitions and per-turn machines
 |   |-- utils.py              Shared logger and CLI logging setup
 |   |-- web/                  Optional FastAPI integration and monitoring page
 |   |   |-- __init__.py       Web exports
 |   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
 |   |   `-- templates/
 |   |       `-- monitor.html  Read-only recent conversation monitor
-|   |-- worker.py             Machine-enabled agent, tool, and child action execution
+|   |-- worker.py             Action execution and persistence/replay coordination
 |   |-- worker_pool.py        Worker threads and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
-|       `-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
+|       |-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
+|       `-- time.py           Basic assistant with a current-time tool
 `-- tests/                    Pytest tests; conftest enables Typeguard
     |-- conftest.py           Typeguard import hook
     |-- test_agent_proxy.py   Single-call deferred agent checks
