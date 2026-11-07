@@ -13,7 +13,6 @@ This is the quick-start guide for agents working in this repository. See
 |-- README.md                 Project overview and local development
 |-- Makefile                  Compile D2 diagrams to SVGs beside their sources
 |-- architecture.md           Architecture decisions and conventions
-|-- memory.md                 Durable repository implementation notes
 |-- pyproject.toml            Package, dependencies, CLI entry point, pytest setup
 |-- compose.yaml              Local Redis service
 |-- raid.md                   Technical risks, issues, assumptions, decisions
