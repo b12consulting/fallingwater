@@ -38,11 +38,11 @@ revisited. Close or revise an item when the code resolves it.
   timeout phase and the OpenAI SDK retries timeouts up to twice. A
   dispatch entry can therefore become eligible for `XAUTOCLAIM` while
   its original worker is still running. There is no agent-run or
-  tool-call lock, so both model calls and tools may run twice. Set
-  explicit action time limits and keep the claim interval longer than
-  the bounded action duration, or renew pending-entry idle time during
-  processing. Increasing the interval above one HTTP timeout alone
-  does not cover retries or long-running tools.
+  tool-call lock, so both model calls and tools may run twice. D89 chooses
+  automatic ownership renewal during processing; it is not implemented yet.
+  Tool/network timeouts remain separately necessary for stuck calls.
+  Increasing the interval above one HTTP timeout alone does not cover
+  retries or long-running tools.
 - **R6 — Child results beyond the first page (closed).**
   `ConversationStream.iter_events()` advances through Redis range
   pages with an exclusive entry-ID cursor for turn reconstruction.
@@ -766,3 +766,23 @@ revisited. Close or revise an item when the code resolves it.
   distinct results, and duplicate calls. Result/dispatch writes remain separate,
   external effects are not exactly-once, and retries can contend under sustained
   conversation traffic; R1 and R8 remain open.
+- **D89 — Automatic renewal of active dispatch ownership (decided, not
+  implemented).** Renew a pending entry's idle time periodically while its
+  worker processes the action, from delivery or claim through checkpointing,
+  dispatch publication, and acknowledgement. Renewal runs independently of
+  blocking model/tool execution so healthy long-running work is not reclaimed
+  solely because it exceeds `claim_idle_ms`. Atomically verify the entry still
+  belongs to this consumer before renewing it; renewal must not claim it back
+  after another worker takes ownership or recreate an acknowledged entry.
+  Stop renewal when processing ends so genuinely abandoned work remains
+  recoverable.
+  Before implementation, define renewal timing, compatible claim thresholds,
+  failure/lost-ownership handling, and ownership-checked writes and
+  acknowledgements that prevent stale workers from completing reclaimed work.
+  Test long-running work, stopped renewal, and ownership-loss races against
+  real Redis. Renewal is not a tool execution deadline: a hung network call can
+  remain owned indefinitely while renewal is healthy. Explicit network
+  timeouts, bounded retries, and any hard tool deadline are separate decisions;
+  timing out a Python thread does not stop its execution. Remote side effects
+  already started may continue, so renewal does not promise exactly-once
+  external effects or close R1, R5, or R8 before implementation and validation.

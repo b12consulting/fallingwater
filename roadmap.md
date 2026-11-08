@@ -189,10 +189,20 @@ recovery gap or provide exactly-once external effects.
 
 ### Remaining
 
-Prevent concurrent execution caused by reclaiming active work, while preserving
-recovery of genuinely abandoned actions. Choose the mechanism in `raid.md` and
-add real-Redis active-action reclamation tests. RAID R1 and R5 remain open;
-D88 records the implemented result fan-in fix.
+Implement automatic ownership renewal for active dispatch actions, preserving
+recovery of genuinely abandoned work. Renewal must continue independently of
+blocking model/tool calls, cover processing through acknowledgement, and never
+reclaim an entry whose ownership has moved to another worker. Define handling
+of renewal failures and ownership loss, including protection against stale
+writes and acknowledgements.
+
+Ownership renewal does not stop a stuck tool. Tool/network timeouts and bounded
+retries remain a separate concern; a healthy renewal loop could otherwise keep
+a hung call owned indefinitely.
+
+Add real-Redis tests for long-running actions, renewal stopping, ownership loss,
+and active-action reclamation. RAID R1 and R5 remain open; D88 records the
+implemented result fan-in fix and D89 records the renewal decision.
 
 ### Done when
 
