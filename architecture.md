@@ -210,12 +210,33 @@ Each slot is green unless its event is `turn.failed`, in which case it is red.
 User and assistant message slots show Bootstrap Icons `person` and `robot`,
 respectively, without changing their accessible labels or event actions.
 Selecting a slot fetches `/fw-api/dashboard-event` by conversation and exact
-event ID into a Bootstrap 5 modal outside the refreshed card region, preserving open
+event ID into a Bootstrap 6 dialog outside the refreshed card region, preserving open
 details during updates. Detail payloads are complete; text and JSON are escaped.
 ISO 8601 UTC datetimes come from Redis entry IDs. The page is server-rendered initially and
 reports refresh, detail, or asset-loading failures explicitly. Pinned,
 integrity-checked CDN assets avoid a frontend build; network access is required
 for styling and interactions. Existing monitor and SSE behavior is unchanged.
+
+The overview and card fragment accept an optional `before=<redis-id>` cutoff.
+Dispatch discovery uses `XREVRANGE` with an exclusive upper bound, scanning
+batches of 100 until ten distinct conversations are selected or history ends.
+Each selected conversation retains its latest eligible poke ID; **< Prev**
+uses the oldest of those IDs as the next exclusive cutoff, avoiding skipped
+pokes within a millisecond. Conversations can recur in older views through
+earlier pokes. Redis sequences are stream-local: event tails and initial
+settings use the cutoff's millisecond, including all event sequences when the
+dispatch sequence is nonzero and excluding the whole boundary millisecond for
+`-0`. This is retained-history navigation, not a cross-stream atomic snapshot.
+
+A real button-triggered Bootstrap 6 alpha datepicker, using its bundled
+Vanilla Calendar Pro dependency, displays dates as `yyyy/mm/dd`. Selecting a
+date supplies `<UTC-midnight-milliseconds>-0`. Date selection, Prev, and Live
+replace the shareable URL; reloading restores the filter. Polling includes
+the unchanged hidden cutoff and updates the next Prev cursor from the returned
+fragment. Clearing it restores unbounded live reads. Bootstrap 6's prerelease
+stability is a tradeoff of using its datepicker without another UI library.
+Monitor/SSE feeds and full-history detail pages remain unfiltered. Historical
+results depend on retained streams and dispatch pokes, not on an archive.
 
 Conversation names link to `/fw-api/dashboard/{conversation_id}`. This page
 reads the entire retained stream, including conversations outside the recent set, and

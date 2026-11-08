@@ -809,3 +809,36 @@ revisited. Close or revise an item when the code resolves it.
   avoiding collisions between fragment paths and conversation IDs.
   Full-history reads and HTML responses grow with stream length; pagination
   would change the requested all-events view and is not introduced here.
+- **D92 — Historical cutoff for the dashboard overview (superseded by D94).**
+  Interpret the date/time picker as an inclusive upper bound, not a filter for
+  activity since the selected date. Apply the normalized UTC millisecond ID
+  to dispatch discovery, event tails, and initial settings reads, including all
+  sequence IDs in the cutoff millisecond. Preserve the ten-conversation and
+  ten-event limits, dispatch pagination, and cutoff during polling. An empty
+  selection restores live reads. Keep monitor/SSE and full-history detail pages
+  unchanged. This browses retained stream data only; trimmed events or dispatch
+  history cannot be recovered by the picker.
+- **D93 — Button-triggered dashboard date selection (superseded by D94).**
+  Keep Bootstrap 5 and the native date/time input, placing the input inside a
+  dropdown opened by a calendar button. Format the button's selected date as
+  `yyyy/mm/dd`, since the native input's presentation follows browser/OS locale.
+  This preserves the UTC cutoff and live reset without an additional calendar
+  dependency; Bootstrap 6's datepicker example requires a different stack.
+- **D94 — Calendar selection and exclusive Redis-ID history navigation
+  (implemented).** Use Bootstrap 6 alpha and its bundled Vanilla Calendar Pro
+  dependency for the requested actual button-triggered calendar, migrating
+  event modals to native Bootstrap dialogs. Replace the time input and numbered
+  day pagination with an exclusive `before=<redis-id>` cutoff. Date selection
+  means midnight UTC; **< Prev** uses the oldest selected dispatch-poke ID.
+  Discovery scans backward in batches of 100 for ten distinct conversations,
+  preserving exact sequence ordering within a millisecond without counting
+  the whole day's history. A conversation may recur through older pokes.
+  Bound event and initial settings reads by milliseconds, not dispatch
+  sequences, which are stream-local; exclude the entire boundary millisecond
+  for `-0`, otherwise include its event sequences. Retain the cutoff while
+  polling, synchronize the next Prev cursor from fragments, and update URLs
+  for date selection, Prev, and Live. Replace the current URL rather than
+  adding a competing browser-history handler alongside htmx. This supersedes D92's
+  inclusive ISO-time parameter and D93's native-input dropdown. Bootstrap 6
+  alpha stability, CDN access, retained dispatch history, and non-atomic
+  cross-stream timelines remain explicit tradeoffs.

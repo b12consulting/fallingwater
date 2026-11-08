@@ -121,8 +121,15 @@ events, with optional completed history and usage.
 The read-only `/fw-api/dashboard/` presents recently poked conversations as cards
 with green non-failed and red failed event slots. Selecting a slot reveals its full
 details. htmx 4 refreshes the latest ten events of the latest ten conversations
-every two seconds; Bootstrap 5 provides the responsive layout and detail modal.
+every two seconds; Bootstrap 6 alpha provides the layout, event dialog, and
+button-triggered calendar.
 The existing raw monitor and SSE feeds remain available.
+The overview supports an exclusive Redis-ID cutoff via shareable
+`?before=<redis-id>` URLs. Date selection starts before midnight UTC; **< Prev**
+continues before the oldest selected dispatch poke without skipping entries
+that share a millisecond. Polling retains the cutoff and **Live** clears it.
+Older views may repeat conversations with earlier pokes; event timelines use
+the cutoff's millisecond because Redis sequences are stream-local.
 
 Conversation names link to a full-history dashboard with rows of ten event
 slots and inline event details beside the card. It follows the retained stream

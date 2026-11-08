@@ -29,7 +29,6 @@ from ..stream_utils import (
     fmt_dispatch_stream,
 )
 from ..utils import logger
-from ..stream import DispatchStream
 
 
 router = APIRouter()
@@ -70,6 +69,26 @@ def get_namespace(request: Request) -> str:
     return request.app.state.fw_namespace
 
 
+def get_dashboard_before(
+    before: Annotated[
+        str, Query(pattern=r"^(?:[0-9]+-[0-9]+)?$", max_length=41)
+    ] = "",
+) -> str:
+    if not before:
+        return ""
+    try:
+        milliseconds, sequence = map(int, before.split("-"))
+        if sequence > 2**64 - 1:
+            raise ValueError("Redis sequence is out of range")
+        _event_time(before)
+    except (ValueError, OverflowError, OSError) as error:
+        logger.debug("Invalid dashboard cutoff %s", before, exc_info=True)
+        raise HTTPException(
+            status_code=422, detail="Use a valid Redis entry ID"
+        ) from error
+    return f"{milliseconds}-{sequence}"
+
+
 @router.get("/monitor", response_class=HTMLResponse)
 def monitor(request: Request, full: bool = False) -> HTMLResponse:
     """
@@ -105,13 +124,29 @@ def get_conversation_stream(
     return stream
 
 
-def _recent_streams(redis: Redis, namespace: str) -> tuple[str, dict[str, str]]:
+def _recent_streams(
+    redis: Redis, namespace: str, *, before: str = "+"
+) -> tuple[str, dict[str, str]]:
     """
     Find the latest dispatch ID and recently poked conversations.
     """
+    dispatch_cursor, conversation_ids = _discover_conversations(
+        redis, namespace, before=before
+    )
+    return dispatch_cursor, {
+        fmt_conversation_stream(namespace, conversation_id): "0-0"
+        for conversation_id in reversed(conversation_ids)
+    }
+
+
+def _discover_conversations(
+    redis: Redis,
+    namespace: str,
+    *,
+    before: str = "+",
+) -> tuple[str, dict[str, str]]:
     dispatch_cursor = "0-0"
-    before = "+"
-    recent_ids: dict[str, None] = {}
+    recent_ids: dict[str, str] = {}
     dispatch_name = fmt_dispatch_stream(namespace)
     while len(recent_ids) < RECENT_CONVERSATION_LIMIT:
         entries = redis.xrevrange(dispatch_name, max=before, min="-", count=100)
@@ -119,31 +154,28 @@ def _recent_streams(redis: Redis, namespace: str) -> tuple[str, dict[str, str]]:
             break
         if dispatch_cursor == "0-0":
             dispatch_cursor = decode_text(entries[0][0])
-        for _, fields in entries:
+        for entry_id, fields in entries:
             fields = decode_dispatch_fields(fields)
             if fields.get("type") != Action.CONVERSATION_POKE:
                 continue
             conversation_id = fields.get("conversation_id")
             if conversation_id and conversation_id not in recent_ids:
-                recent_ids[conversation_id] = None
+                recent_ids[conversation_id] = decode_text(entry_id)
                 if len(recent_ids) == RECENT_CONVERSATION_LIMIT:
                     break
         before = f"({decode_text(entries[-1][0])}"
 
-    streams = {}
-    for conversation_id in reversed(recent_ids):
-        streams[fmt_conversation_stream(namespace, conversation_id)] = "0-0"
-    return dispatch_cursor, streams
+    return dispatch_cursor, recent_ids
 
 
 def _recent_tail(
-    redis: Redis, stream: str
+    redis: Redis, stream: str, *, before: str = "+"
 ) -> tuple[str, list[ConversationEvent]]:
     """
     Return up to ten retained events in stream order and their latest ID.
     """
     entries = redis.xrevrange(
-        stream, max="+", min="-", count=RECENT_EVENT_LIMIT
+        stream, max=before, min="-", count=RECENT_EVENT_LIMIT
     )
     decoded = [
         decode_conversation_event(entry_id, fields)
@@ -283,24 +315,44 @@ def _event_time(entry_id: str) -> datetime:
     )
 
 
-def _dashboard_context(request: Request, redis: Redis, namespace: str) -> dict:
-    _, streams = _recent_streams(redis, namespace)
-    dispatch = DispatchStream(redis, namespace=namespace)
+def _dashboard_context(
+    request: Request,
+    redis: Redis,
+    namespace: str,
+    before: str = "",
+) -> dict:
+    _, conversation_ids = _discover_conversations(
+        redis, namespace, before=f"({before}" if before else "+"
+    )
+    cutoff_time = _event_time(before) if before else None
+    event_before = "+"
+    if before:
+        milliseconds, sequence = before.split("-")
+        # Sequences are stream-local; event timelines use the cutoff's time.
+        event_before = (
+            f"({milliseconds}-0" if int(sequence) == 0 else milliseconds
+        )
     conversations = []
-    for stream in reversed(streams):
-        conversation_id = stream.removeprefix(
-            f"{namespace}:conversation:"
-        ).removesuffix(":events")
-        _, events = _recent_tail(redis, stream)
-        first = dispatch.conversation_stream(
-            conversation_id
-        ).read_conversation_range(count=1)
+    for conversation_id in conversation_ids:
+        stream = fmt_conversation_stream(namespace, conversation_id)
+        _, events = _recent_tail(redis, stream, before=event_before)
+        first = redis.xrange(stream, min="-", max=event_before, count=1)
         conversations.append(
             _dashboard_card(
-                request, conversation_id, events, first[0] if first else None
+                request,
+                conversation_id,
+                events,
+                decode_conversation_event(*first[0]) if first else None,
             )
         )
-    return {"conversations": conversations, "event_limit": RECENT_EVENT_LIMIT}
+    return {
+        "conversations": conversations,
+        "event_limit": RECENT_EVENT_LIMIT,
+        "before": before,
+        "cutoff_time": cutoff_time,
+        "selected_date": cutoff_time.date().isoformat() if cutoff_time else "",
+        "prev_id": next(reversed(conversation_ids.values()), ""),
+    }
 
 
 def _dashboard_card(
@@ -368,12 +420,13 @@ def dashboard(
     request: Request,
     redis: Annotated[Redis, Depends(get_redis)],
     namespace: Annotated[str, Depends(get_namespace)],
+    before: Annotated[str, Depends(get_dashboard_before)],
 ) -> HTMLResponse:
     """Show recent conversations as cards with clickable event timelines."""
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
-        context=_dashboard_context(request, redis, namespace),
+        context=_dashboard_context(request, redis, namespace, before),
     )
 
 
@@ -382,12 +435,13 @@ def dashboard_cards(
     request: Request,
     redis: Annotated[Redis, Depends(get_redis)],
     namespace: Annotated[str, Depends(get_namespace)],
+    before: Annotated[str, Depends(get_dashboard_before)],
 ) -> HTMLResponse:
     """Refresh the same bounded recent set used by the monitor feed."""
     return templates.TemplateResponse(
         request=request,
         name="dashboard_cards.html",
-        context=_dashboard_context(request, redis, namespace),
+        context=_dashboard_context(request, redis, namespace, before),
     )
 
 

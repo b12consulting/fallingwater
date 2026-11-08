@@ -1,18 +1,18 @@
-<article class="conversation-card p-4 {{ '' if full_history else 'h-100' }}" data-conversation-id="{{ conversation.conversation_id }}">
-  <div class="d-flex justify-content-between align-items-start gap-3 mb-2">
+<article class="conversation-card p-6 {{ '' if full_history else 'h-100' }}" data-conversation-id="{{ conversation.conversation_id }}">
+  <div class="d-flex justify-content-between align-items-start gap-4 mb-2">
     <h2 class="conversation-name text-break mb-0"><a href="{{ conversation.url }}">{{ conversation.conversation_id }}</a></h2>
     {% if conversation.failed_count %}
-    <span class="badge rounded-pill text-bg-danger flex-shrink-0">{{ 'Failure' if full_history else 'Recent failure' }}</span>
+    <span class="badge rounded-pill theme-danger flex-shrink-0">{{ 'Failure' if full_history else 'Recent failure' }}</span>
     {% else %}
-    <span class="badge rounded-pill text-bg-success flex-shrink-0">{{ 'No failures' if full_history else 'No recent failures' }}</span>
+    <span class="badge rounded-pill theme-success flex-shrink-0">{{ 'No failures' if full_history else 'No recent failures' }}</span>
     {% endif %}
   </div>
   {% if conversation.settings %}
-  <p class="small text-secondary text-break mb-4">
+  <p class="small fg-2 text-break mb-6">
     {{ conversation.settings.agent }}{% if conversation.settings.model %} · {{ conversation.settings.model }}{% endif %}
   </p>
   {% else %}
-  <p class="small text-secondary mb-4">Agent settings unavailable</p>
+  <p class="small fg-2 mb-6">Agent settings unavailable</p>
   {% endif %}
   {% for row in conversation.events | batch(10) %}
   <div class="event-timeline mb-2" aria-label="Event timeline">
@@ -24,19 +24,20 @@
             aria-label="{{ event.label }} at {{ event.time.isoformat() }}"
             hx-get="{{ event.details_url }}"
             hx-target="#event-detail" hx-swap="innerHTML"
-            {% if not full_history %}data-bs-toggle="modal" data-bs-target="#event-modal"{% endif %}>
+            {% if not full_history %}data-bs-toggle="dialog" data-bs-target="#event-modal"{% endif %}>
       {% if event.icon %}<i class="bi bi-{{ event.icon }}" aria-hidden="true"></i>{% endif %}
     </button>
     {% endfor %}
   </div>
   {% else %}
-  <p class="small text-secondary mb-2">Waiting for conversation events.</p>
+  <p class="small fg-2 mb-2">Waiting for conversation events.</p>
   {% endfor %}
   {% if conversation.events %}
-  <div class="d-flex flex-wrap justify-content-between gap-2 small text-secondary">
-    <time class="text-break" datetime="{{ conversation.events[0].time.isoformat() }}">{{ conversation.events[0].time.isoformat() }}</time>
-    <time class="text-break" datetime="{{ conversation.events[-1].time.isoformat() }}">{{ conversation.events[-1].time.isoformat() }}</time>
+  <div class="small fg-2">
+    Last event: <time class="text-break" datetime="{{ conversation.events[-1].time.isoformat() }}">{{ conversation.events[-1].time.isoformat(timespec='seconds') }}</time>
   </div>
-  <p class="small text-secondary mt-3 mb-0">{{ conversation.events | length }} events · {{ conversation.failed_count }} failed</p>
+  {% if full_history %}
+  <p class="small fg-2 mt-4 mb-0">{{ conversation.events | length }} events · {{ conversation.failed_count }} failed</p>
+  {% endif %}
   {% endif %}
 </article>

@@ -5,16 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="htmx-config" content='{"noSwap":[204,304,"4xx","5xx"]}'>
   <title>{% block title %}Fallingwater conversation dashboard{% endblock %}</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@6.0.0-alpha.1/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-B/GM4XqrwHnWXNOWMbloTmrYXZg10cakYGmpfsR/bbzQ6JAJI4ihuyADKLnBgrCe" crossorigin="anonymous">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css" rel="stylesheet" integrity="sha384-CK2SzKma4jA5H/MXDUU7i1TqZlCFaD4T01vtyDFvPlD97JQyS+IsSh1nI2EFbpyk" crossorigin="anonymous">
   <script src="https://cdn.jsdelivr.net/npm/htmx.org@4.0.1" integrity="sha384-Qp9rdC8H7EqOoX+nR0P3RPG2Noji+qdwJlGpfzwQJsfOpp3sGwIdSP9xO3+UlEhn" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
+  <script type="module" src="https://cdn.jsdelivr.net/npm/bootstrap@6.0.0-alpha.1/dist/js/bootstrap.bundle.min.js" integrity="sha384-1a/pXj49ZQ1aHEmrJ+gMw1otqoVsYwlEnlD8mIfY2TV03r20Y0CN7uqx1tQogjPL" crossorigin="anonymous"></script>
   <style>
     :root { --dashboard-border: #dce4ef; --dashboard-muted: #65748e; --event-green: #55bf69; --event-red: #dc3545; }
     body { color: #121826; background: #fafbfd; }
     main { max-width: 1600px; }
-    h1.display-5 { font-weight: 750; letter-spacing: -.04em; }
-    .text-secondary { color: var(--dashboard-muted) !important; }
+    .dashboard-heading { font-size: clamp(1.6rem, 1.425rem + 2.1vw, 3rem); font-weight: 750; letter-spacing: -.04em; }
+    .fg-2 { color: var(--dashboard-muted) !important; }
     .dashboard-toolbar, .conversation-card { border: 1px solid var(--dashboard-border); border-radius: .8rem; background: #fff; }
     .conversation-card { box-shadow: 0 2px 3px #14213d05; }
     .conversation-name { font-size: 1.15rem; font-weight: 700; }
@@ -37,94 +37,176 @@
   </style>
 </head>
 <body>
-  <main class="container-fluid px-3 px-lg-4 py-4 py-lg-5">
-    <header class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+  <main class="container-fluid px-4 lg:px-6 py-6 lg:py-12">
+    <header class="d-flex flex-wrap justify-content-between align-items-center gap-4 mb-6">
       <div>
-        <h1 class="display-5 mb-2">{% block heading %}Conversation dashboard{% endblock %}</h1>
-        <p class="text-secondary fs-5 mb-0">{% block subtitle %}Follow the ten most recently active conversations.{% endblock %}</p>
+        <h1 class="dashboard-heading mb-2">{% block heading %}Conversation dashboard{% endblock %}</h1>
+        <p class="fg-2 fs-5 mb-0">{% block subtitle %}Follow the ten most recently active conversations.{% endblock %}</p>
       </div>
-      <div class="d-flex align-items-center gap-3">
-        <span id="refresh-status" class="small text-secondary" role="status">Updates every 2 seconds</span>
-        <button type="button" id="refresh-button" class="btn btn-outline-secondary d-flex align-items-center gap-2"
+      <div class="d-flex align-items-center gap-4">
+        <span id="refresh-status" class="small fg-2" role="status">{% if cutoff_time %}Before {{ cutoff_time.isoformat() }}{% else %}Updates every 2 seconds{% endif %}</span>
+        <button type="button" id="refresh-button" class="btn-outline theme-secondary d-flex align-items-center gap-2"
                 hx-on:click="htmx.trigger('#{{ cards_target | default('conversation-cards') }}', 'dashboardRefresh')" aria-label="{{ refresh_label | default('Refresh conversations') }}">
           <svg class="refresh-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M20 7v5h-5M4 17v-5h5M6.1 7a7 7 0 0 1 11.6-2L20 8M4 16l2.3 3A7 7 0 0 0 17.9 17"/>
           </svg>
           Refresh
         </button>
-        <a href="{{ request.url_for('monitor') }}" class="small text-secondary">Raw monitor</a>
+        <a href="{{ request.url_for('monitor') }}" class="small fg-2">Raw monitor</a>
       </div>
     </header>
-    <div class="dashboard-toolbar d-flex flex-wrap justify-content-between gap-3 px-4 py-3 mb-4">
-      <p class="mb-0 text-secondary">{% block hint %}Each slot is an event. Select one to read its details.{% endblock %}</p>
-      <div class="d-flex gap-3 small">
+    <div class="dashboard-toolbar d-flex flex-wrap justify-content-between gap-4 px-6 py-4 mb-6">
+      <div class="d-flex flex-wrap align-items-center gap-2 fg-2">
+        {% block hint %}
+        <button type="button" id="dashboard-prev-button" class="btn-outline theme-secondary btn-sm"
+                data-before="{{ prev_id }}" aria-label="Previous conversations" {% if not prev_id %}disabled{% endif %}>
+          <i class="bi bi-chevron-left" aria-hidden="true"></i> Prev
+        </button>
+        <button type="button" id="dashboard-cutoff-button" class="btn-outline theme-secondary btn-sm"
+                data-bs-toggle="datepicker" aria-describedby="dashboard-cutoff-label" aria-expanded="false">
+          <i class="bi bi-calendar-week" aria-hidden="true"></i>
+          <span id="dashboard-cutoff-display" data-bs-datepicker-display>{{ selected_date.replace('-', '/') if selected_date else 'Select date' }}</span>
+        </button>
+        <button type="button" id="dashboard-live-button" class="btn-outline theme-secondary btn-sm"
+                aria-label="Clear date and show live conversations">Live</button>
+
+        <input type="hidden" id="dashboard-cutoff" name="before" value="{{ before }}">
+        {% endblock %}
+      </div>
+      <div class="d-flex gap-4 small">
         <span><span class="legend-dot legend-success me-1"></span> Non-failed</span>
         <span><span class="legend-dot legend-failed me-1"></span> Failed</span>
       </div>
     </div>
-    <noscript><p class="alert alert-warning">Enable JavaScript for live updates and event details.</p></noscript>
-    <p id="dashboard-error" class="alert alert-danger" role="alert" hidden></p>
+    <noscript><p class="alert theme-warning">Enable JavaScript for live updates and event details.</p></noscript>
+    <p id="dashboard-error" class="alert theme-danger" role="alert" hidden></p>
     {% block content %}
     <section id="conversation-cards" aria-label="Recent conversations"
              hx-get="{{ request.url_for('dashboard_cards') }}"
              hx-trigger="every 2s, dashboardRefresh"
              hx-indicator="#refresh-button"
+             hx-include="#dashboard-cutoff"
              hx-swap="innerMorph">
       {% include "dashboard_cards.html" %}
     </section>
     {% endblock %}
   </main>
   {% block modal %}
-  <div class="modal fade" id="event-modal" tabindex="-1" aria-labelledby="event-modal-title" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h2 class="modal-title fs-5" id="event-modal-title">Event details</h2>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div id="event-detail" class="modal-body" aria-live="polite">
-          <p class="text-secondary">Select an event to view its details.</p>
-        </div>
-      </div>
+  <dialog class="dialog dialog-lg dialog-scrollable" id="event-modal" aria-labelledby="event-modal-title">
+    <div class="dialog-header">
+      <h2 class="dialog-title fs-5" id="event-modal-title">Event details</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="dialog" aria-label="Close"></button>
     </div>
-  </div>
+    <div id="event-detail" class="dialog-body" aria-live="polite">
+      <p class="fg-2">Select an event to view its details.</p>
+    </div>
+  </dialog>
   {% endblock %}
   <script>
-    const status = document.getElementById("refresh-status");
-    const errorNotice = document.getElementById("dashboard-error");
-    const detail = document.getElementById("event-detail");
-    window.addEventListener("load", () => {
-      if (!window.htmx || !window.bootstrap) {
-        status.textContent = "Live updates unavailable";
-        errorNotice.textContent = "Dashboard assets could not load. Check your network connection and reload.";
-        errorNotice.hidden = false;
+    (() => {
+      const status = document.getElementById("refresh-status");
+      const errorNotice = document.getElementById("dashboard-error");
+      const detail = document.getElementById("event-detail");
+      window.addEventListener("load", () => {
+        if (!window.htmx || !window.bootstrap) {
+          status.textContent = "Live updates unavailable";
+          errorNotice.textContent = "Dashboard assets could not load. Check your network connection and reload.";
+          errorNotice.hidden = false;
+        }
+      });
+      document.body.addEventListener("htmx:before:request", (event) => {
+        if (event.detail.ctx.target.id === "event-detail") {
+          detail.textContent = "Loading event details...";
+        }
+      });
+      document.body.addEventListener("htmx:after:swap", (event) => {
+        const response = event.detail.ctx.response;
+        if (event.detail.ctx.target.id === "{{ cards_target | default('conversation-cards') }}" && response.status >= 200 && response.status < 300) {
+          const view = document.getElementById("dashboard-view-state");
+          const previous = document.getElementById("dashboard-prev-button");
+          if (view && previous) {
+            previous.dataset.before = view.dataset.prevId;
+            previous.disabled = !view.dataset.prevId;
+          }
+          status.textContent = view?.dataset.cutoffTime
+            ? "Before " + view.dataset.cutoffTime
+            : "Live · updates every 2 seconds";
+          errorNotice.hidden = true;
+        }
+      });
+      function showRequestError(event) {
+        if (event.detail.ctx.target.id === "event-detail") {
+          detail.textContent = event.detail.ctx.response?.status === 404
+            ? "This event is no longer available."
+            : "Unable to load event details. Select an event to try again.";
+        } else {
+          status.textContent = "Refresh unavailable";
+          errorNotice.textContent = "Unable to refresh {{ 'history' if full_history else 'conversations' }}. Retrying automatically.";
+          errorNotice.hidden = false;
+        }
       }
-    });
-    document.body.addEventListener("htmx:before:request", (event) => {
-      if (event.detail.ctx.target.id === "event-detail") {
-        detail.textContent = "Loading event details...";
+      document.body.addEventListener("htmx:error", showRequestError);
+      document.body.addEventListener("htmx:response:error", showRequestError);
+    })();
+  </script>
+  <script type="module">
+    import * as bootstrap from "https://cdn.jsdelivr.net/npm/bootstrap@6.0.0-alpha.1/dist/js/bootstrap.bundle.min.js";
+    window.bootstrap = bootstrap;
+    const button = document.getElementById("dashboard-cutoff-button");
+    if (button) {
+      const cutoff = document.getElementById("dashboard-cutoff");
+      const display = document.getElementById("dashboard-cutoff-display");
+      const selectedDate = cutoff.value
+        ? new Date(Number(cutoff.value.split("-")[0])).toISOString().slice(0, 10)
+        : "";
+      const picker = new bootstrap.Datepicker(button, {
+        dateMin: "1970-01-01",
+        placement: "auto",
+        selectedDates: selectedDate ? [selectedDate] : [],
+        dateFormat: date => [
+          date.getFullYear(),
+          String(date.getMonth() + 1).padStart(2, "0"),
+          String(date.getDate()).padStart(2, "0")
+        ].join("/")
+      });
+      function navigate(before) {
+        const changed = cutoff.value !== before;
+        cutoff.value = before;
+        const date = before
+          ? new Date(Number(before.split("-")[0])).toISOString().slice(0, 10)
+          : "";
+        picker.setSelectedDates(date ? [date] : []);
+        display.textContent = date ? date.replaceAll("-", "/") : "Select date";
+        if (changed) {
+          const url = new URL(window.location.href);
+          if (before) url.searchParams.set("before", before);
+          else url.searchParams.delete("before");
+          window.history.replaceState(window.history.state, "", url);
+        }
+        htmx.trigger("#conversation-cards", "dashboardRefresh");
       }
-    });
-    document.body.addEventListener("htmx:after:swap", (event) => {
-      const response = event.detail.ctx.response;
-      if (event.detail.ctx.target.id === "{{ cards_target | default('conversation-cards') }}" && response.status >= 200 && response.status < 300) {
-        status.textContent = "Live · updates every 2 seconds";
-        errorNotice.hidden = true;
-      }
-    });
-    function showRequestError(event) {
-      if (event.detail.ctx.target.id === "event-detail") {
-        detail.textContent = event.detail.ctx.response?.status === 404
-          ? "This event is no longer available."
-          : "Unable to load event details. Select an event to try again.";
-      } else {
-        status.textContent = "Refresh unavailable";
-        errorNotice.textContent = "Unable to refresh {{ 'history' if full_history else 'conversations' }}. Retrying automatically.";
-        errorNotice.hidden = false;
-      }
+      button.addEventListener("change.bs.datepicker", event => {
+        const date = event.dates[0];
+        navigate(date ? Date.parse(date + "T00:00:00Z") + "-0" : "");
+      });
+      button.addEventListener("shown.bs.datepicker", () => button.setAttribute("aria-expanded", "true"));
+      button.addEventListener("hidden.bs.datepicker", () => button.setAttribute("aria-expanded", "false"));
+      document.addEventListener("keydown", event => {
+        if (event.key === "Escape" && button.getAttribute("aria-expanded") === "true") {
+          event.preventDefault();
+          picker.hide();
+          button.setAttribute("aria-expanded", "false");
+          button.focus();
+        }
+      });
+      document.getElementById("dashboard-prev-button").addEventListener("click", event => {
+        navigate(event.currentTarget.dataset.before);
+      });
+      document.getElementById("dashboard-live-button").addEventListener("click", () => {
+        picker.hide();
+        navigate("");
+      });
     }
-    document.body.addEventListener("htmx:error", showRequestError);
-    document.body.addEventListener("htmx:response:error", showRequestError);
   </script>
 </body>
 </html>

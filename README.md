@@ -92,8 +92,21 @@ robot.
 Subagent requests use `arrow-bar-down`; tool requests use `nut`, and tool
 results use `nut-fill`.
 Click a slot to read its message and complete payload. The dashboard refreshes
-every two seconds using htmx 4 and Bootstrap 5; its CDN assets require network
-access.
+every two seconds using htmx 4 and Bootstrap 6 alpha, including its bundled
+Vanilla Calendar Pro datepicker. Its pinned CDN assets require network access;
+Bootstrap 6 is prerelease software.
+
+Use the overview's **Before (UTC)** calendar button to select a date. It shows
+the last ten distinct conversations poked before that date's midnight UTC.
+**< Prev** moves the exclusive cutoff to the oldest selected dispatch-poke ID,
+preserving ordering even when several pokes share a millisecond. Older views
+may show a conversation again if it has earlier pokes.
+Polling and manual refresh retain the cutoff; **Live** clears it.
+The shareable URL uses `?before=<redis-id>`, for example
+`/fw-api/dashboard/?before=1700006400000-0`; selection and navigation update it.
+The button displays dates as `yyyy/mm/dd`. Event tails and initial settings
+are bounded by the cutoff's millisecond, not its stream-local sequence number.
+For a `-0` cutoff, events in that boundary millisecond are excluded.
 
 Click a conversation name to open `/fw-api/dashboard/<conversation-id>`.
 This page shows its full retained history in rows of ten slots,
