@@ -200,6 +200,31 @@ close on shutdown, then cancels remaining streaming tasks. Its Redis client is
 closed after Uvicorn returns, so cancelled stream reads cannot race client
 cleanup.
 
+The `/dashboard/` router route presents the same ten most recently poked
+conversations as responsive cards, each with its latest ten events ordered
+oldest to newest. The standalone app exposes it only at `/fw-api/dashboard/`,
+without root-level dashboard routes or redirects. htmx 4 polls
+`/fw-api/dashboard-cards` every two seconds
+and uses built-in `innerMorph` swaps to retain focus and stable event controls.
+Each slot is green unless its event is `turn.failed`, in which case it is red.
+Selecting a slot fetches `/fw-api/dashboard-event` by conversation and exact
+event ID into a Bootstrap 5 modal outside the refreshed card region, preserving open
+details during updates. Detail payloads are complete; text and JSON are escaped.
+ISO 8601 UTC datetimes come from Redis entry IDs. The page is server-rendered initially and
+reports refresh, detail, or asset-loading failures explicitly. Pinned,
+integrity-checked CDN assets avoid a frontend build; network access is required
+for styling and interactions. Existing monitor and SSE behavior is unchanged.
+
+Conversation names link to `/fw-api/dashboard/{conversation_id}`. This page
+reads the entire retained stream, including conversations outside the recent set, and
+reuses the card template with rows of at most ten slots. The card keeps the
+overview's responsive column width and grows vertically; event details occupy
+the adjacent column, stacking below the card on small screens. htmx polls
+`/fw-api/dashboard-history` by conversation ID, morphing only the history card so
+selected details stay visible. Full-history refresh cost grows with the retained
+stream length, unlike the bounded overview. Fragment routes live outside
+`/dashboard/` so conversation IDs such as `cards` and `event` are not reserved.
+
 ## AD8 — CLI reader groups
 
 `Chat` creates or reuses a consumer group on the conversation stream during

@@ -786,3 +786,26 @@ revisited. Close or revise an item when the code resolves it.
   timing out a Python thread does not stop its execution. Remote side effects
   already started may continue, so renewal does not promise exactly-once
   external effects or close R1, R5, or R8 before implementation and validation.
+- **D90 — Server-rendered recent conversation dashboard (implemented).**
+  Add `/dashboard/` to the web router, mounted at `/fw-api/dashboard/` by the
+  standalone app. Do not add root-level dashboard routes or redirects.
+  Reuse monitor discovery and its ten-event tails, rendering conversation cards
+  and color-coded slots with htmx 4 and Bootstrap 5. Poll an HTML card fragment
+  every two seconds with focus-preserving morphing instead of adding a second
+  SSE protocol or client-side conversation store. Fetch complete event details
+  by exact stream ID into a modal outside the polling region. Escape payload
+  content, validate event IDs, and surface request and asset-loading failures.
+  Pin integrity-checked CDN assets without introducing a frontend build.
+  This bounds each page refresh to ten conversations and ten events each;
+  CDN access and periodic Redis reads are the tradeoffs. Existing monitor and
+  SSE routes are unchanged.
+- **D91 — Full retained conversation history with inline details (implemented).**
+  Link overview conversation names to `/fw-api/dashboard/{conversation_id}` and
+  reuse the same card and event detail templates. Read every retained stream event,
+  laying out rows of at most ten slots within the overview's card width. Poll
+  only the history card, keeping the selected details in a separate column
+  rather than a modal. This also supports conversations outside the recent set.
+  Move card and event fragments to `/dashboard-cards` and `/dashboard-event`,
+  avoiding collisions between fragment paths and conversation IDs.
+  Full-history reads and HTML responses grow with stream length; pagination
+  would change the requested all-events view and is not introduced here.

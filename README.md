@@ -84,6 +84,18 @@ Open `http://localhost:8000/fw-api/monitor` for a read-only page that follows
 the recent conversation feed. Add `?full=1` to include completed-turn history
 and usage in the page.
 
+Open `http://localhost:8000/fw-api/dashboard/` for a
+card-based view of the ten recently poked conversations and their latest ten
+events. Green slots indicate non-failed events; red slots indicate failures.
+Click a slot to read its message and complete payload. The dashboard refreshes
+every two seconds using htmx 4 and Bootstrap 5; its CDN assets require network
+access.
+
+Click a conversation name to open `/fw-api/dashboard/<conversation-id>`.
+This page shows its full retained history in rows of ten slots,
+with the selected event's details alongside the card. History refreshes without
+closing or replacing the selected details.
+
 To follow an existing conversation, replace `boring_wozniak` with its ID:
 
 ```shell

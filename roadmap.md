@@ -118,6 +118,16 @@ conversation pokes, not all conversation activity. Both feeds follow new events.
 A simple monitoring page displays the recent feed, including tool and subagent
 events, with optional completed history and usage.
 
+The read-only `/fw-api/dashboard/` presents recently poked conversations as cards
+with green non-failed and red failed event slots. Selecting a slot reveals its full
+details. htmx 4 refreshes the latest ten events of the latest ten conversations
+every two seconds; Bootstrap 5 provides the responsive layout and detail modal.
+The existing raw monitor and SSE feeds remain available.
+
+Conversation names link to a full-history dashboard with rows of ten event
+slots and inline event details beside the card. It follows the retained stream
+without restricting selection to the ten recent conversations.
+
 ### Remaining
 
 Add health and statistics endpoints, and a documented way for clients to

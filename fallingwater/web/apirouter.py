@@ -3,10 +3,13 @@ FastAPI router and small standalone app for conversation events.
 """
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import EventSourceResponse, HTMLResponse
 from fastapi.sse import ServerSentEvent
 from fastapi.templating import Jinja2Templates
@@ -14,6 +17,7 @@ from redis import Redis
 
 from ..models import (
     ConversationEvent,
+    ConversationCreatedPayload,
     Action,
     Event,
 )
@@ -25,12 +29,22 @@ from ..stream_utils import (
     fmt_dispatch_stream,
 )
 from ..utils import logger
+from ..stream import DispatchStream
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 RECENT_CONVERSATION_LIMIT = 10
 RECENT_EVENT_LIMIT = 10
+EVENT_LABELS = {
+    Event.CONVERSATION_CREATED: "Conversation created",
+    Event.TURN_QUEUED: "User message",
+    Event.TURN_TOOL_REQUESTED: "Tools requested",
+    Event.TURN_TOOL_RESULT: "Tool result",
+    Event.TURN_SUBAGENT_REQUESTED: "Subagent requested",
+    Event.TURN_COMPLETED: "Assistant message",
+    Event.TURN_FAILED: "Turn failed",
+}
 
 
 def get_redis(request: Request) -> Redis:
@@ -254,6 +268,176 @@ def events(
             yield ServerSentEvent(comment="keep-alive")
 
 
+def _event_time(entry_id: str) -> datetime:
+    return datetime.fromtimestamp(
+        int(entry_id.split("-", 1)[0]) / 1000, tz=timezone.utc
+    )
+
+
+def _dashboard_context(request: Request, redis: Redis, namespace: str) -> dict:
+    _, streams = _recent_streams(redis, namespace)
+    dispatch = DispatchStream(redis, namespace=namespace)
+    conversations = []
+    for stream in reversed(streams):
+        conversation_id = stream.removeprefix(
+            f"{namespace}:conversation:"
+        ).removesuffix(":events")
+        _, events = _recent_tail(redis, stream)
+        first = dispatch.conversation_stream(
+            conversation_id
+        ).read_conversation_range(count=1)
+        conversations.append(
+            _dashboard_card(
+                request, conversation_id, events, first[0] if first else None
+            )
+        )
+    return {"conversations": conversations, "event_limit": RECENT_EVENT_LIMIT}
+
+
+def _dashboard_card(
+    request: Request,
+    conversation_id: str,
+    events: list[ConversationEvent],
+    first: ConversationEvent | None,
+) -> dict:
+    return {
+        "conversation_id": conversation_id,
+        "url": request.url_for(
+            "conversation_dashboard",
+            conversation_id=quote(conversation_id, safe=""),
+        ),
+        "id_key": sha256(conversation_id.encode()).hexdigest(),
+        "settings": (
+            first.payload
+            if first and isinstance(first.payload, ConversationCreatedPayload)
+            else None
+        ),
+        "failed_count": sum(
+            event.type == Event.TURN_FAILED for event in events
+        ),
+        "events": [
+            {
+                "entry_id": event.entry_id,
+                "label": EVENT_LABELS[event.type],
+                "failed": event.type == Event.TURN_FAILED,
+                "time": _event_time(event.entry_id),
+                "details_url": request.url_for(
+                    "dashboard_event"
+                ).include_query_params(
+                    conversation_id=conversation_id,
+                    entry_id=event.entry_id,
+                ),
+            }
+            for event in events
+        ],
+    }
+
+
+def _history_context(
+    request: Request, redis: Redis, stream: str, conversation_id: str
+) -> dict:
+    events = [
+        decode_conversation_event(entry_id, fields)
+        for entry_id, fields in redis.xrange(stream, min="-", max="+")
+    ]
+    return {
+        "conversation": _dashboard_card(
+            request, conversation_id, events, events[0] if events else None
+        ),
+        "full_history": True,
+        "cards_target": "conversation-history",
+        "refresh_label": "Refresh history",
+        "events_url": request.url_for(
+            "events", conversation_id=quote(conversation_id, safe="")
+        ),
+    }
+
+
+@router.get("/dashboard/", response_class=HTMLResponse)
+def dashboard(
+    request: Request,
+    redis: Annotated[Redis, Depends(get_redis)],
+    namespace: Annotated[str, Depends(get_namespace)],
+) -> HTMLResponse:
+    """Show recent conversations as cards with clickable event timelines."""
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard.html",
+        context=_dashboard_context(request, redis, namespace),
+    )
+
+
+@router.get("/dashboard-cards", response_class=HTMLResponse)
+def dashboard_cards(
+    request: Request,
+    redis: Annotated[Redis, Depends(get_redis)],
+    namespace: Annotated[str, Depends(get_namespace)],
+) -> HTMLResponse:
+    """Refresh the same bounded recent set used by the monitor feed."""
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard_cards.html",
+        context=_dashboard_context(request, redis, namespace),
+    )
+
+
+@router.get("/dashboard-event", response_class=HTMLResponse)
+def dashboard_event(
+    request: Request,
+    conversation_id: str,
+    entry_id: Annotated[str, Query(pattern=r"^[0-9]+-[0-9]+$")],
+    stream: Annotated[str, Depends(get_conversation_stream)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> HTMLResponse:
+    """Render the exact selected event, including its complete payload."""
+    entries = redis.xrange(stream, min=entry_id, max=entry_id, count=1)
+    if not entries:
+        raise HTTPException(status_code=404, detail="Event not found")
+    event = decode_conversation_event(*entries[0])
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard_event.html",
+        context={
+            "conversation_id": conversation_id,
+            "event": event,
+            "label": EVENT_LABELS[event.type],
+            "time": _event_time(event.entry_id),
+            "failed": event.type == Event.TURN_FAILED,
+            "payload": event.payload.fmt(full=True),
+        },
+    )
+
+
+@router.get("/dashboard-history", response_class=HTMLResponse)
+def dashboard_history(
+    request: Request,
+    conversation_id: str,
+    stream: Annotated[str, Depends(get_conversation_stream)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> HTMLResponse:
+    """Refresh all retained events without replacing the selected details."""
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard_card.html",
+        context=_history_context(request, redis, stream, conversation_id),
+    )
+
+
+@router.get("/dashboard/{conversation_id:path}", response_class=HTMLResponse)
+def conversation_dashboard(
+    request: Request,
+    conversation_id: str,
+    stream: Annotated[str, Depends(get_conversation_stream)],
+    redis: Annotated[Redis, Depends(get_redis)],
+) -> HTMLResponse:
+    """Show full conversation history beside the selected event details."""
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard_conversation.html",
+        context=_history_context(request, redis, stream, conversation_id),
+    )
+
+
 def create_app(
     *,
     redis: Redis,
@@ -266,4 +450,5 @@ def create_app(
     app.state.fw_redis = redis
     app.state.fw_namespace = namespace
     app.include_router(router, prefix="/fw-api")
+
     return app

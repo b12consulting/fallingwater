@@ -57,10 +57,15 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
 |   |-- turn_state.py         Pure payload transitions and per-turn machines
 |   |-- utils.py              Shared logger and CLI logging setup
-|   |-- web/                  Optional FastAPI integration and monitoring page
+|   |-- web/                  Optional FastAPI integration, monitor, and dashboard
 |   |   |-- __init__.py       Web exports
 |   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
 |   |   `-- templates/
+|   |       |-- dashboard.html       Recent conversation dashboard page
+|   |       |-- dashboard_card.html  Shared card and ten-slot timeline rows
+|   |       |-- dashboard_cards.html Polled conversation cards and event slots
+|   |       |-- dashboard_conversation.html Full-history page with inline details
+|   |       |-- dashboard_event.html Selected event details
 |   |       `-- monitor.html  Read-only recent conversation monitor
 |   |-- worker.py             Action execution and persistence/replay coordination
 |   |-- worker_pool.py        Worker threads and graceful shutdown

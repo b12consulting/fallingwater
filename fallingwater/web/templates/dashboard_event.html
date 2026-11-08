@@ -1,0 +1,29 @@
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  <h3 class="h5 mb-0">{{ label }}</h3>
+  <span class="badge {{ 'text-bg-danger' if failed else 'text-bg-success' }}">{{ 'Failed' if failed else 'Non-failed' }}</span>
+</div>
+<dl class="row small mb-4">
+  <dt class="col-sm-3 text-secondary">Conversation</dt>
+  <dd class="col-sm-9 text-break">{{ conversation_id }}</dd>
+  <dt class="col-sm-3 text-secondary">Time</dt>
+  <dd class="col-sm-9 text-break"><time datetime="{{ time.isoformat() }}">{{ time.isoformat() }}</time></dd>
+  <dt class="col-sm-3 text-secondary">Event ID</dt>
+  <dd class="col-sm-9">{{ event.entry_id }}</dd>
+  {% for key, label in [('turn_id', 'Turn'), ('step_id', 'Step'), ('tool_call_id', 'Tool call')] %}
+  {% if key in payload %}
+  <dt class="col-sm-3 text-secondary">{{ label }}</dt>
+  <dd class="col-sm-9 text-break">{{ payload[key] }}</dd>
+  {% endif %}
+  {% endfor %}
+</dl>
+{% if 'error' in payload %}
+<pre class="event-content alert alert-danger">{{ payload.error }}</pre>
+{% elif 'message' in payload %}
+<pre class="event-content bg-body-tertiary rounded p-3">{{ payload.message }}</pre>
+{% elif 'result' in payload %}
+<pre class="event-content bg-body-tertiary rounded p-3">{{ payload.result | tojson(indent=2) }}</pre>
+{% endif %}
+<details>
+  <summary class="text-secondary mb-2">Complete event payload</summary>
+  <pre class="payload-json bg-body-tertiary rounded p-3 mb-0">{{ payload | tojson(indent=2) }}</pre>
+</details>
