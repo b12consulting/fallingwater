@@ -29,6 +29,7 @@ from fallingwater.stream_utils import (
     fmt_conversation_stream,
     fmt_dispatch_stream,
 )
+from fallingwater.stream import DispatchStream
 from fallingwater.web.apirouter import (
     _recent_streams,
     create_app,
@@ -765,7 +766,10 @@ def test_conversation_dashboard_full_history_rows_and_refresh(
         == event_count + 1
     )
     redis.xrange.assert_called_with(
-        fmt_conversation_stream("fw-test", "abc"), min="-", max="+"
+        fmt_conversation_stream("fw-test", "abc"),
+        min="-",
+        max="+",
+        count=None,
     )
     redis.xrevrange.assert_not_called()
 
@@ -795,7 +799,10 @@ def test_dashboard_conversation_links_preserve_and_escape_ids(
         == conversation_id
     )
     redis.xrange.assert_called_with(
-        fmt_conversation_stream("fw-test", conversation_id), min="-", max="+"
+        fmt_conversation_stream("fw-test", conversation_id),
+        min="-",
+        max="+",
+        count=None,
     )
 
 
@@ -864,7 +871,9 @@ def test_sse_replays_events_then_reads_the_tail() -> None:
             )
         ],
     ]
-    stream_events = events(stream, redis)
+    stream_events = events(
+        DispatchStream(redis, namespace="fw-test").conversation_stream("abc")
+    )
 
     first = next(stream_events)
     second = next(stream_events)

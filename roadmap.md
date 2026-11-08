@@ -155,6 +155,9 @@ Synchronous `DispatchStream` and `ConversationStream` classes provide shared
 stream operations, including consumer-group reads and acknowledgements.
 `Chat` and `Worker` use these classes. Related conversation and dispatch
 writes are separate Redis commands.
+Web dashboard range and reverse-tail reads, and single-conversation SSE reads,
+also use `ConversationStream`. Typed, I/O-free dashboard presentation is
+separate from request handling and Redis read coordination.
 
 Pure `Conversation` logic coordinates turn-state decisions and reconstructs
 all turns from persisted events. Turn state machines validate transitions and
@@ -165,10 +168,10 @@ history snapshots share immutable message prefixes.
 
 ### Remaining
 
-Move the web SSE routes and CLI event inspection onto the stream classes. They
-still call `XREAD` or `XREVRANGE` directly; the recent-conversations feed needs
-stream methods that preserve its reverse-tail replay and multi-stream follow
-behavior.
+Move web dispatch discovery, the recent feed's multiplexed `XREAD`, and CLI
+event inspection onto the stream classes. The recent feed already uses the
+shared reverse-range reader for tail replay; its multi-stream follow behavior
+still needs an appropriate stream-level API.
 
 Add consumer-group lifecycle management, including deleting worker
 consumers with no pending entries when the `WorkerPool` starts.

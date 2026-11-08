@@ -60,6 +60,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- web/                  Optional FastAPI integration, monitor, and dashboard
 |   |   |-- __init__.py       Web exports
 |   |   |-- apirouter.py      Routes, SSE feeds, and standalone app
+|   |   |-- dashboard.py      I/O-free presentation and typed dashboard data
 |   |   `-- templates/
 |   |       |-- dashboard.html       Recent conversation dashboard page
 |   |       |-- dashboard_card.html  Shared card and ten-slot timeline rows

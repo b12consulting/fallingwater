@@ -842,3 +842,17 @@ revisited. Close or revise an item when the code resolves it.
   inclusive ISO-time parameter and D93's native-input dropdown. Bootstrap 6
   alpha stability, CDN access, retained dispatch history, and non-atomic
   cross-stream timelines remain explicit tradeoffs.
+- **D95 — Focused web read and presentation refactoring (implemented).**
+  Normalize dashboard cutoffs once into an immutable value with distinct
+  dispatch and event bounds, retaining D94's stream-local sequence rule.
+  Name discovery's ordered conversation-to-poke map `latest_pokes` so card
+  ordering and Prev are explicit. Move card/event formatting and typed template
+  data to the I/O-free `web/dashboard.py` module; keep query validation,
+  HTTP errors, and read coordination in the router.
+  Extend `ConversationStream` with bounded forward reads, optional unlimited
+  counts, and typed newest-first reads. Use those operations for dashboard
+  tails, settings, exact events, full history, and the single-conversation SSE
+  feed without changing existing stream-call defaults. Keep shared dispatch
+  discovery and the recent feed's multiplexed read/eviction coordination
+  unchanged. This does not change selection order, add an activity index, alter
+  wire formats, or introduce cross-stream snapshot guarantees.

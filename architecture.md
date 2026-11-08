@@ -217,6 +217,16 @@ reports refresh, detail, or asset-loading failures explicitly. Pinned,
 integrity-checked CDN assets avoid a frontend build; network access is required
 for styling and interactions. Existing monitor and SSE behavior is unchanged.
 
+`web/dashboard.py` owns I/O-free card and event presentation, with typed
+template dictionaries for slots, cards, overview, history, and details.
+The router validates requests and coordinates reads; its immutable
+`DashboardCutoff` parses the ID once and supplies separate dispatch and event
+bounds. Conversation range, reverse-tail, and single-conversation SSE reads
+use `ConversationStream`, which owns decoding. Existing forward-range defaults
+remain unchanged; explicit bounds and `count=None` support exact events,
+historical settings, and unlimited retained history. Dispatch discovery and
+the recent feed's multiplexed `XREAD` remain web coordination.
+
 The overview and card fragment accept an optional `before=<redis-id>` cutoff.
 Dispatch discovery uses `XREVRANGE` with an exclusive upper bound, scanning
 batches of 100 until ten distinct conversations are selected or history ends.

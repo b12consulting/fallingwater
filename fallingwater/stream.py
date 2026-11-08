@@ -179,10 +179,24 @@ class ConversationStream:
         self.name = fmt_conversation_stream(dispatch.namespace, conversation_id)
 
     def read_conversation_range(
-        self, *, min: str = "-", count: int = 100
+        self,
+        *,
+        min: str = "-",
+        max: str = "+",
+        count: int | None = 100,
     ) -> list[ConversationEvent]:
         """Read and decode a range of conversation events."""
-        entries = self.redis.xrange(self.name, min=min, count=count)
+        entries = self.redis.xrange(self.name, min=min, max=max, count=count)
+        return [
+            decode_conversation_event(entry_id, fields)
+            for entry_id, fields in entries
+        ]
+
+    def read_conversation_reverse_range(
+        self, *, max: str = "+", min: str = "-", count: int = 100
+    ) -> list[ConversationEvent]:
+        """Read and decode events newest-first within Redis ID bounds."""
+        entries = self.redis.xrevrange(self.name, max=max, min=min, count=count)
         return [
             decode_conversation_event(entry_id, fields)
             for entry_id, fields in entries

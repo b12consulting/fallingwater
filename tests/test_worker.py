@@ -61,15 +61,29 @@ class MemoryRedis(Redis):
             "fw:conversation:abc:events": list(entries)
         }
 
-    def xrange(self, stream: str, min: str = "-", count: int = 100):
+    def xrange(
+        self,
+        stream: str,
+        min: str = "-",
+        max: str = "+",
+        count: int | None = 100,
+    ):
         entries = self.streams.get(stream, [])
         cursor = min.removeprefix("(")
         exclusive = min.startswith("(")
+        upper = max.removeprefix("(")
+        upper_exclusive = max.startswith("(")
         selected = [
             entry
             for entry in entries
-            if min == "-"
-            or (entry[0] > cursor if exclusive else entry[0] >= cursor)
+            if (
+                min == "-"
+                or (entry[0] > cursor if exclusive else entry[0] >= cursor)
+            )
+            and (
+                max == "+"
+                or (entry[0] < upper if upper_exclusive else entry[0] <= upper)
+            )
         ]
         return selected[:count]
 

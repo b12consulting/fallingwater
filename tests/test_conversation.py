@@ -70,6 +70,58 @@ def test_dispatch_append_event_writes_action_fields() -> None:
     )
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_conversation_range_reads_preserve_bounds_and_order(reverse) -> None:
+    redis = MagicMock(spec=Redis)
+    fields = encode_conversation_event(
+        Event.TURN_QUEUED,
+        TurnQueuedPayload(turn_id="turn-1", message="hello"),
+    )
+    ids = ["3-0", "2-0"] if reverse else ["2-0", "3-0"]
+    command = redis.xrevrange if reverse else redis.xrange
+    command.return_value = [(entry_id.encode(), fields) for entry_id in ids]
+    stream = DispatchStream(redis, namespace="fw-test").conversation_stream(
+        "abc"
+    )
+
+    read = (
+        stream.read_conversation_reverse_range
+        if reverse
+        else stream.read_conversation_range
+    )
+    events = read(min="(1-0", max="3-0", count=2)
+
+    assert [event.entry_id for event in events] == ids
+    assert all(
+        isinstance(event.payload, TurnQueuedPayload)
+        and event.payload.message == "hello"
+        for event in events
+    )
+    command.assert_called_once_with(
+        "fw-test:conversation:abc:events", min="(1-0", max="3-0", count=2
+    )
+
+
+def test_conversation_range_without_count_does_not_limit_history() -> None:
+    redis = MagicMock(spec=Redis)
+    fields = encode_conversation_event(
+        Event.TURN_QUEUED,
+        TurnQueuedPayload(turn_id="turn-1", message="hello"),
+    )
+    redis.xrange.return_value = [
+        (f"{index}-0", fields) for index in range(1, 102)
+    ]
+    stream = DispatchStream(redis).conversation_stream("abc")
+
+    events = stream.read_conversation_range(max="+", count=None)
+
+    assert len(events) == 101
+    assert events[-1].entry_id == "101-0"
+    redis.xrange.assert_called_once_with(
+        "fw:conversation:abc:events", min="-", max="+", count=None
+    )
+
+
 def test_group_operations_keep_stream_group_and_consumer_explicit() -> None:
     redis = MagicMock(spec=Redis)
     stream = "fw:conversation:abc:events"
