@@ -165,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     web_parser.add_argument("--host", default="127.0.0.1")
     web_parser.add_argument("--port", type=int, default=8000)
+    web_parser.add_argument("--reload", action="store_true", default=False)
     web_parser.set_defaults(handler=run_web)
 
     reset_parser = subparsers.add_parser(
@@ -403,6 +404,7 @@ def run_web(args: argparse.Namespace) -> None:
             host=args.host,
             port=args.port,
             timeout_graceful_shutdown=3,
+            reload=args.reload,
         )
 
 

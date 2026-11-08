@@ -24,7 +24,9 @@
             aria-label="{{ event.label }} at {{ event.time.isoformat() }}"
             hx-get="{{ event.details_url }}"
             hx-target="#event-detail" hx-swap="innerHTML"
-            {% if not full_history %}data-bs-toggle="modal" data-bs-target="#event-modal"{% endif %}></button>
+            {% if not full_history %}data-bs-toggle="modal" data-bs-target="#event-modal"{% endif %}>
+      {% if event.icon %}<i class="bi bi-{{ event.icon }}" aria-hidden="true"></i>{% endif %}
+    </button>
     {% endfor %}
   </div>
   {% else %}

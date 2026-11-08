@@ -1,6 +1,6 @@
 <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
   <h3 class="h5 mb-0">{{ label }}</h3>
-  <span class="badge {{ 'text-bg-danger' if failed else 'text-bg-success' }}">{{ 'Failed' if failed else 'Non-failed' }}</span>
+  <span class="legend-dot {{ 'legend-failed' if failed else 'legend-success' }}" role="img" aria-label="{{ 'Failed' if failed else 'Non-failed' }}"></span>
 </div>
 <dl class="row small mb-4">
   <dt class="col-sm-3 text-secondary">Conversation</dt>

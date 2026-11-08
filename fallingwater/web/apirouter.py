@@ -45,6 +45,15 @@ EVENT_LABELS = {
     Event.TURN_COMPLETED: "Assistant message",
     Event.TURN_FAILED: "Turn failed",
 }
+EVENT_ICONS = {
+    Event.CONVERSATION_CREATED: "file-check",
+    Event.TURN_QUEUED: "person",
+    Event.TURN_COMPLETED: "robot",
+    Event.TURN_SUBAGENT_REQUESTED: "arrow-bar-down",
+    Event.TURN_TOOL_REQUESTED: "nut",
+    Event.TURN_TOOL_RESULT: "nut-fill",
+    Event.TURN_FAILED: "exclamation-square",
+}
 
 
 def get_redis(request: Request) -> Redis:
@@ -319,6 +328,7 @@ def _dashboard_card(
             {
                 "entry_id": event.entry_id,
                 "label": EVENT_LABELS[event.type],
+                "icon": EVENT_ICONS.get(event.type),
                 "failed": event.type == Event.TURN_FAILED,
                 "time": _event_time(event.entry_id),
                 "details_url": request.url_for(

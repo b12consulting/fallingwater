@@ -207,6 +207,8 @@ without root-level dashboard routes or redirects. htmx 4 polls
 `/fw-api/dashboard-cards` every two seconds
 and uses built-in `innerMorph` swaps to retain focus and stable event controls.
 Each slot is green unless its event is `turn.failed`, in which case it is red.
+User and assistant message slots show Bootstrap Icons `person` and `robot`,
+respectively, without changing their accessible labels or event actions.
 Selecting a slot fetches `/fw-api/dashboard-event` by conversation and exact
 event ID into a Bootstrap 5 modal outside the refreshed card region, preserving open
 details during updates. Detail payloads are complete; text and JSON are escaped.

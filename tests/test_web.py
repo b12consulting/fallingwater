@@ -17,6 +17,9 @@ from fallingwater.models import (
     ConversationCreatedPayload,
     Action,
     Event,
+    SubAgentRequestedPayload,
+    ToolRequestedPayload,
+    ToolResultPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -57,6 +60,29 @@ def _event(event_type: Event, **values):
         payload = TurnFailedPayload(
             turn_id=values.get("turn_id", "turn-1"),
             error=values.get("error", "tool failed"),
+        )
+    elif event_type == Event.TURN_TOOL_REQUESTED:
+        payload = ToolRequestedPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            requests={},
+            step_messages=[],
+            usage=RunUsage(),
+        )
+    elif event_type == Event.TURN_TOOL_RESULT:
+        payload = ToolResultPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            tool_call_id="call-1",
+            result="tool result",
+        )
+    elif event_type == Event.TURN_SUBAGENT_REQUESTED:
+        payload = SubAgentRequestedPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            tool_call_id="call-1",
+            child_conversation_id="child",
+            child_turn_id="child-turn",
         )
     else:
         raise ValueError(event_type)
@@ -275,6 +301,11 @@ def test_dashboard_escapes_content_and_loads_exact_full_event() -> None:
     assert "chat &amp; &#34;&lt;script&gt;" in page.text
     assert details.status_code == 200
     assert "Assistant message" in details.text
+    assert {
+        "class": "legend-dot legend-success",
+        "role": "img",
+        "aria-label": "Non-failed",
+    } in _elements(details.text, "span")
     assert "<script>alert" not in details.text
     assert "&lt;script&gt;" in details.text
     assert '"turn_messages"' in details.text
@@ -286,6 +317,65 @@ def test_dashboard_escapes_content_and_loads_exact_full_event() -> None:
         max=entry_id,
         count=1,
     )
+
+
+@pytest.mark.parametrize(
+    "path", ["/fw-api/dashboard/", "/fw-api/dashboard/abc"]
+)
+def test_dashboard_message_slot_icons(path) -> None:
+    history = [
+        ("1-0", _event(Event.CONVERSATION_CREATED)),
+        ("2-0", _event(Event.TURN_QUEUED)),
+        ("3-0", _event(Event.TURN_COMPLETED)),
+        ("4-0", _event(Event.TURN_FAILED)),
+        ("5-0", _event(Event.TURN_SUBAGENT_REQUESTED)),
+        ("6-0", _event(Event.TURN_TOOL_REQUESTED)),
+        ("7-0", _event(Event.TURN_TOOL_RESULT)),
+    ]
+    redis = MagicMock(spec=Redis)
+    redis.exists.return_value = 1
+    redis.xrange.side_effect = lambda *_args, **kwargs: history[
+        : kwargs.get("count")
+    ]
+    redis.xrevrange.side_effect = lambda stream, **kwargs: (
+        ([("1-0", _poke("abc"))] if kwargs["max"] == "+" else [])
+        if stream == fmt_dispatch_stream("fw-test")
+        else list(reversed(history))[: kwargs["count"]]
+    )
+
+    class Collector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.current = None
+            self.icons = {}
+
+        def handle_starttag(self, name, attrs):
+            attrs = dict(attrs)
+            if name == "button" and "data-event-id" in attrs:
+                self.current = attrs["data-event-id"]
+                self.icons[self.current] = []
+            elif name == "i" and self.current:
+                self.icons[self.current].append(attrs)
+
+        def handle_endtag(self, name):
+            if name == "button":
+                self.current = None
+
+    with TestClient(create_app(redis=redis, namespace="fw-test")) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    parser = Collector()
+    parser.feed(response.text)
+    assert parser.icons == {
+        "1-0": [{"class": "bi bi-file-check", "aria-hidden": "true"}],
+        "2-0": [{"class": "bi bi-person", "aria-hidden": "true"}],
+        "3-0": [{"class": "bi bi-robot", "aria-hidden": "true"}],
+        "4-0": [{"class": "bi bi-exclamation-square", "aria-hidden": "true"}],
+        "5-0": [{"class": "bi bi-arrow-bar-down", "aria-hidden": "true"}],
+        "6-0": [{"class": "bi bi-nut", "aria-hidden": "true"}],
+        "7-0": [{"class": "bi bi-nut-fill", "aria-hidden": "true"}],
+    }
 
 
 def test_dashboard_failed_event_is_red_and_shows_error() -> None:
@@ -303,7 +393,15 @@ def test_dashboard_failed_event_is_red_and_shows_error() -> None:
         )
 
     assert response.status_code == 200
-    assert "text-bg-danger" in response.text
+    assert {
+        "class": "legend-dot legend-failed",
+        "role": "img",
+        "aria-label": "Failed",
+    } in _elements(response.text, "span")
+    assert all(
+        "badge" not in element.get("class", "").split()
+        for element in _elements(response.text, "span")
+    )
     assert "Network timed out" in response.text
 
 

@@ -87,6 +87,10 @@ and usage in the page.
 Open `http://localhost:8000/fw-api/dashboard/` for a
 card-based view of the ten recently poked conversations and their latest ten
 events. Green slots indicate non-failed events; red slots indicate failures.
+Bootstrap Icons mark user messages with a person and assistant messages with a
+robot.
+Subagent requests use `arrow-bar-down`; tool requests use `nut`, and tool
+results use `nut-fill`.
 Click a slot to read its message and complete payload. The dashboard refreshes
 every two seconds using htmx 4 and Bootstrap 5; its CDN assets require network
 access.
