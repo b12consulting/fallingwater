@@ -55,7 +55,7 @@
         <a href="{{ request.url_for('monitor') }}" class="small fg-2">Raw monitor</a>
       </div>
     </header>
-    <div class="dashboard-toolbar d-flex flex-wrap justify-content-between gap-4 px-6 py-4 mb-6">
+    <div class="dashboard-toolbar d-flex flex-wrap justify-content-between align-items-center gap-4 px-6 py-4 mb-6">
       <div class="d-flex flex-wrap align-items-center gap-2 fg-2">
         {% block hint %}
         <button type="button" id="dashboard-prev-button" class="btn-outline theme-secondary btn-sm"
@@ -73,9 +73,9 @@
         <input type="hidden" id="dashboard-cutoff" name="before" value="{{ before }}">
         {% endblock %}
       </div>
-      <div class="d-flex gap-4 small">
-        <span><span class="legend-dot legend-success me-1"></span> Non-failed</span>
-        <span><span class="legend-dot legend-failed me-1"></span> Failed</span>
+      <div class="d-flex align-items-center gap-4 small">
+        <span class="d-inline-flex align-items-center gap-2"><span class="legend-dot legend-success"></span> Non-failed</span>
+        <span class="d-inline-flex align-items-center gap-2"><span class="legend-dot legend-failed"></span> Failed</span>
       </div>
     </div>
     <noscript><p class="alert theme-warning">Enable JavaScript for live updates and event details.</p></noscript>
