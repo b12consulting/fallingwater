@@ -856,3 +856,10 @@ revisited. Close or revise an item when the code resolves it.
   discovery and the recent feed's multiplexed read/eviction coordination
   unchanged. This does not change selection order, add an activity index, alter
   wire formats, or introduce cross-stream snapshot guarantees.
+- **D96 — Durable failure tracebacks (implemented).** Store formatted Python
+  tracebacks, including chained exceptions, in `TurnFailedPayload.traceback`
+  alongside the existing error description so diagnostics survive worker-log
+  loss. Preserve the child's traceback when its failure propagates to a parent.
+  Default to null for older events and failures without a captured exception.
+  Tracebacks can expose source paths and exception details; they are retained
+  and exposed wherever complete conversation payloads are available.

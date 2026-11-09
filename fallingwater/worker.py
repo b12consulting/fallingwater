@@ -1,6 +1,7 @@
 """Execute actions enabled by turn machines and checkpoint their outcomes."""
 
 from threading import Event as ThreadEvent
+from traceback import format_exc
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -392,7 +393,11 @@ class Worker:
                 self.checkpoint(
                     cnv_stream,
                     conversation,
-                    TurnFailedPayload(turn_id=turn_id, error=str(error)),
+                    TurnFailedPayload(
+                        turn_id=turn_id,
+                        error=str(error),
+                        traceback=format_exc(),
+                    ),
                 )
                 processed = True
             if processed:

@@ -333,8 +333,11 @@ payload model:
   - Turn ID, displayed response, structured JSON data for the new Pydantic AI
     messages, and accumulated usage.
 - `turn.failed`
-  - Fields: `turn_id: str`, `error: str`
-  - Turn ID and failure description.
+  - Fields: `turn_id: str`, `error: str`, `traceback: str | null`
+  - Turn ID, failure description, and formatted Python traceback (including
+    chained exceptions). Workers persist the traceback as well as logging it;
+    child failures preserve it when propagated to the parent. The field
+    defaults to null for older events or failures without a captured exception.
 
 The dispatch stream is text based and does not use the conversation payload
 envelope. `Event` contains only conversation event types; `Action`

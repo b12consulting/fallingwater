@@ -846,14 +846,15 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
 
 
 def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        try:
+            raise ValueError("underlying failure")
+        except ValueError as error:
+            raise RuntimeError("agent failed") from error
+
     agent = Agent(TestModel(), name="failing-agent")
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr(
-        "fallingwater.worker.run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("agent failed")
-        ),
-    )
+    monkeypatch.setattr("fallingwater.worker.run", fail)
     redis = MemoryRedis(_base_entries())
     worker = _worker(redis)
     action = decode_dispatch_event(
@@ -884,10 +885,17 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
     failed = _events(redis)[-1].payload
     assert isinstance(failed, TurnFailedPayload)
     assert failed.error == "agent failed"
+    assert failed.traceback is not None
+    assert "Traceback (most recent call last):" in failed.traceback
+    assert "in fail" in failed.traceback
+    assert "ValueError: underlying failure" in failed.traceback
+    assert "The above exception was the direct cause" in failed.traceback
+    assert failed.traceback.endswith("RuntimeError: agent failed\n")
     acknowledge.assert_called_once_with(worker.group, "1-0")
 
 
-def test_failed_child_fails_parent_turn(monkeypatch) -> None:
+@pytest.mark.parametrize("traceback", [None, "child traceback"])
+def test_failed_child_fails_parent_turn(monkeypatch, traceback) -> None:
     parent_agent = Agent(TestModel(), name="parent")
     redis = MemoryRedis(_base_entries())
     worker = _worker(redis)
@@ -924,7 +932,9 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     worker.checkpoint(
         child_stream,
         child_conversation,
-        TurnFailedPayload(turn_id="child-turn", error="child failed"),
+        TurnFailedPayload(
+            turn_id="child-turn", error="child failed", traceback=traceback
+        ),
     )
     monkeypatch.setattr(
         "fallingwater.worker.reify_agent", lambda _path: parent_agent
@@ -935,6 +945,7 @@ def test_failed_child_fails_parent_turn(monkeypatch) -> None:
     failed = _events(redis)[-1].payload
     assert isinstance(failed, TurnFailedPayload)
     assert failed.error == "Subagent failed: child failed"
+    assert failed.traceback == traceback
 
 
 @pytest.mark.parametrize(

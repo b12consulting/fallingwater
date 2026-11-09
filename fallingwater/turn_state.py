@@ -313,6 +313,7 @@ class ChildFailed(ChildOutcome):
         return TurnFailedPayload(
             turn_id=self.start.turn_id,
             error=f"Subagent failed: {self.stop.error}",
+            traceback=self.stop.traceback,
         )
 
     def emit(self, machine: "TurnStateMachine") -> tuple[Emission, ...]:
