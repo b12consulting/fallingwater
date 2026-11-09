@@ -3,8 +3,6 @@
     <h2 class="conversation-name text-break mb-0"><a href="{{ conversation.url }}">{{ conversation.conversation_id }}</a></h2>
     {% if conversation.failed_count %}
     <span class="badge rounded-pill theme-danger flex-shrink-0">{{ 'Failure' if full_history else 'Recent failure' }}</span>
-    {% else %}
-    <span class="badge rounded-pill theme-success flex-shrink-0">{{ 'No failures' if full_history else 'No recent failures' }}</span>
     {% endif %}
   </div>
   {% if conversation.settings %}
