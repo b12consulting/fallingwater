@@ -12,11 +12,11 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import RedisError
 
-from .agent_proxy import SubAgentRequest, execute_tool, run
-from .catalog import reify_agent
-from .conversation import Conversation, reconstruct_conversation
-from .stream import ConversationStream, DispatchStream
-from .models import (
+from fallingwater.catalog import reify_agent
+from fallingwater.agent_proxy import SubAgentRequest, execute_tool, run
+from fallingwater.conversation import Conversation, reconstruct_conversation
+from fallingwater.stream import ConversationStream, DispatchStream
+from fallingwater.models import (
     ConversationPokePayload,
     DispatchPayloadType,
     DispatchEvent,
@@ -30,12 +30,12 @@ from .models import (
     TurnCompletedPayload,
     TurnFailedPayload,
 )
-from .turn_state import (
+from fallingwater.turn_state import (
     TurnPayload,
     TurnStateMachine,
     requests_adapter,
 )
-from .utils import logger
+from fallingwater.utils import logger
 
 
 _json_value_adapter = TypeAdapter(Any)
@@ -132,26 +132,32 @@ class Worker:
             deps=child.deps,
             prompt=child.prompt,
         )
+        entry_id = cnv_stream.append_payload(prepared.payload)
         child_stream = cnv_stream.dispatch.conversation_stream(
             request.child_conversation_id
         )
         # A queued child can reconstruct its parent request during recovery.
         child_stream.append_payload(settings)
         child_stream.append_payload(queued)
-        entry_id = cnv_stream.append_payload(prepared.payload)
         self.publish(cnv_stream, prepared.dispatch(entry_id))
 
     def run_agent_step(
         self,
         *,
-        agent: Any,
         conversation: Conversation,
         turn: TurnStateMachine,
         cnv_stream: ConversationStream,
-        deps: Any,
         prompt: str | None,
     ) -> None:
         requests = turn.requests
+        agent = reify_agent(conversation.settings.agent)
+        deps = (
+            None
+            if not conversation.settings.deps
+            and agent.deps_type is type(None)
+            else TypeAdapter(agent.deps_type).validate_python(settings.deps)
+        )
+
         result = run(
             agent,
             prompt,
@@ -204,22 +210,17 @@ class Worker:
     def execute_tool_call(
         self,
         *,
-        agent: Any,
         conversation: Conversation,
         turn: TurnStateMachine,
         cnv_stream: ConversationStream,
-        deps: Any,
         action: ToolCallPayload,
     ) -> None:
         value = execute_tool(
-            agent,
+            conversation,
             turn.calls[action.tool_call_id],
-            deps=deps,
             prompt=turn.prompt,
             messages=[*turn.history, *turn.turn_messages],
-            model=conversation.settings.model or None,
             usage=turn.usage or RunUsage(),
-            conversation_id=cnv_stream.conversation_id,
         )
         if isinstance(value, SubAgentRequest):
             child_conversation_id = str(
@@ -243,6 +244,10 @@ class Worker:
                     tool_call_id=action.tool_call_id,
                     child_conversation_id=child_conversation_id,
                     child_turn_id=child_turn_id,
+                    agent_path=value.agent_path,
+                    model=value.model,
+                    prompt=value.prompt,
+                    deps=value.deps,
                 ),
                 value,
             )
@@ -302,29 +307,18 @@ class Worker:
                 cnv_stream, payload, conversation
             )
 
-        settings = conversation.settings
-        agent = reify_agent(settings.agent)
-        deps = (
-            None
-            if not settings.deps and agent.deps_type is type(None)
-            else TypeAdapter(agent.deps_type).validate_python(settings.deps)
-        )
         if isinstance(payload, ToolCallPayload):
             self.execute_tool_call(
-                agent=agent,
                 conversation=conversation,
                 turn=turn,
                 cnv_stream=cnv_stream,
-                deps=deps,
                 action=payload,
             )
         else:
             self.run_agent_step(
-                agent=agent,
                 conversation=conversation,
                 turn=turn,
                 cnv_stream=cnv_stream,
-                deps=deps,
                 prompt=(
                     turn.prompt
                     if isinstance(payload, ConversationPokePayload)

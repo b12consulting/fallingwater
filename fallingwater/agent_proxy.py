@@ -16,11 +16,14 @@ from pydantic_ai import (
     DeferredToolResults,
     RunContext,
 )
+from pydantic import TypeAdapter
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.tools import Tool
 from pydantic_ai.usage import RunUsage
 
+from fallingwater.catalog import reify_agent
+from fallingwater.conversation import Conversation
 
 _deferred_tool_calls: ContextVar[
     dict[str, tuple[RunContext[Any], dict[str, Any]]] | None
@@ -99,17 +102,23 @@ def _execute_tool(
 
 
 def execute_tool(
-    agent: Agent,
+    conversation: Conversation,
     call: ToolCallPart,
     *,
-    deps: Any,
     prompt: str,
     messages: Sequence[ModelMessage],
-    model: Any,
     usage: RunUsage,
-    conversation_id: str,
 ) -> Any:
     """Resolve a deferred attached tool and restore its runtime context."""
+
+    settings = conversation.settings
+    agent = reify_agent(settings.agent)
+    deps = (
+        None
+        if not settings.deps and agent.deps_type is type(None)
+        else TypeAdapter(agent.deps_type).validate_python(settings.deps)
+    )
+    model = conversation.settings.model or None
     tool = _find_attached_tool(agent, call.tool_name)
     args = call.args
     if isinstance(args, str):
@@ -126,7 +135,7 @@ def execute_tool(
             messages=list(messages),
             tool_call_id=call.tool_call_id,
             tool_name=call.tool_name,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
         )
         if tool.takes_ctx
         else None

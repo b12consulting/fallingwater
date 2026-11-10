@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cache
 from typing import Any, Self, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -80,6 +81,17 @@ DISPATCH_PAYLOAD_MODELS: dict[Action, type[DispatchPayloadType]] = {
 }
 
 
+@cache
+def get_dispatch_action(payload_model: type[DispatchPayloadType]) -> Action:
+    """
+    Return dispatch action to send to dispatch stream based on
+    payload model
+    """
+    for action, model in DISPATCH_PAYLOAD_MODELS.items():
+        if issubclass(payload_model, model):
+            return action
+
+
 class DispatchEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -153,6 +165,10 @@ class SubAgentRequestedPayload(ConversationPayload):
     tool_call_id: str
     child_conversation_id: str
     child_turn_id: str
+    agent_path: str
+    model: str
+    prompt: str
+    deps: dict[str, Any] = Field(default_factory=dict)
 
 
 class TurnCompletedPayload(ConversationPayload):
@@ -198,6 +214,17 @@ PAYLOAD_MODELS: dict[Event, type[ConversationPayloadType]] = {
     Event.TURN_COMPLETED: TurnCompletedPayload,
     Event.TURN_FAILED: TurnFailedPayload,
 }
+
+
+@cache
+def get_cnv_event(cnv_payload: type[ConversationPayloadType]) -> Event:
+    """
+    Return event to put in conversation stream based on given
+    payload type
+    """
+    for event, payload in PAYLOAD_MODELS.items():
+        if issubclass(cnv_payload, payload):
+            return event
 
 
 class ConversationEvent(BaseModel):
