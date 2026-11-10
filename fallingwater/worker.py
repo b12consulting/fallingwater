@@ -155,7 +155,9 @@ class Worker:
             None
             if not conversation.settings.deps
             and agent.deps_type is type(None)
-            else TypeAdapter(agent.deps_type).validate_python(settings.deps)
+            else TypeAdapter(agent.deps_type).validate_python(
+                conversation.settings.deps
+            )
         )
 
         result = run(
@@ -245,7 +247,7 @@ class Worker:
                     child_conversation_id=child_conversation_id,
                     child_turn_id=child_turn_id,
                     agent_path=value.agent_path,
-                    model=value.model,
+                    model=value.model or conversation.settings.model,
                     prompt=value.prompt,
                     deps=value.deps,
                 ),

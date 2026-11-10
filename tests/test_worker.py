@@ -255,6 +255,74 @@ def test_checkpoint_rejects_empty_tool_request_set_without_writing() -> None:
     assert _dispatch(redis) == []
 
 
+def test_agent_step_loads_conversation_dependencies(monkeypatch) -> None:
+    agent = Agent(TestModel(), deps_type=dict[str, int])
+    run_agent = Mock(
+        return_value=AgentRunResult(
+            output="answer",
+            usage=RunUsage(),
+            new_messages=_messages("answer"),
+            tool_contexts={},
+        )
+    )
+    monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
+    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    redis = MemoryRedis(_base_entries(deps={"value": 42}))
+
+    assert _process(
+        _worker(redis),
+        {
+            "type": Action.CONVERSATION_POKE,
+            "turn_id": "turn-1",
+            "conversation_id": "abc",
+        },
+    )
+
+    assert run_agent.call_args.kwargs["deps"] == {"value": 42}
+    assert _events(redis)[-1].type == Event.TURN_COMPLETED
+
+
+@pytest.mark.parametrize("child_model", [None, "child-model"])
+def test_subagent_request_persists_resolved_model(
+    monkeypatch, child_model
+) -> None:
+    child = SubAgentRequest(
+        agent_path="example:child", prompt="child prompt", model=child_model
+    )
+    monkeypatch.setattr(
+        "fallingwater.worker.execute_tool", Mock(return_value=child)
+    )
+    redis = MemoryRedis(
+        [
+            *_base_entries(),
+            _entry(
+                "3-0",
+                Event.TURN_TOOL_REQUESTED,
+                _tool_request(
+                    [ToolCallPart("ask_child", {}, tool_call_id="call-1")]
+                ),
+            ),
+        ]
+    )
+
+    assert _process(
+        _worker(redis),
+        {
+            "type": Action.TOOL_CALL,
+            "conversation_id": "abc",
+            "turn_id": "turn-1",
+            "step_id": "step-1",
+            "tool_call_id": "call-1",
+        },
+    )
+
+    delegation = _events(redis)[-1].payload
+    assert isinstance(delegation, SubAgentRequestedPayload)
+    settings = _events(redis, delegation.child_conversation_id)[0].payload
+    assert isinstance(settings, ConversationCreatedPayload)
+    assert delegation.model == settings.model == (child_model or "test")
+
+
 def test_queue_subagent_writes_recoverable_child_state_before_dispatch() -> None:
     redis = MagicMock(spec=Redis)
     redis.xadd.return_value = b"1-0"
