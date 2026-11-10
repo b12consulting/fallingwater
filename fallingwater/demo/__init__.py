@@ -9,6 +9,7 @@ from pydantic_ai import Agent, AgentSpec, RunContext
 import requests
 
 from .jeopardy import jeopardy_contestant, jeopardy_host
+from .time import time_agent
 
 
 haiku_master = Agent.from_spec(

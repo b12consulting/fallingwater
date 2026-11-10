@@ -109,6 +109,21 @@ def test_send_queues_repeated_prompts_as_distinct_turns() -> None:
         TurnQueuedPayload(turn_id=first_turn, message="hello"),
         TurnQueuedPayload(turn_id=second_turn, message="hello"),
     ]
+    assert chat.conversation.turn_state == {}
+
+
+def test_send_does_not_dispatch_when_persistence_fails() -> None:
+    redis = MagicMock(spec=Redis)
+    chat = _empty_chat(redis)
+    redis.xadd.reset_mock()
+    redis.xadd.side_effect = RuntimeError("write failed")
+
+    with pytest.raises(RuntimeError, match="write failed"):
+        chat.send("hello")
+
+    assert redis.xadd.call_count == 1
+    assert redis.xadd.call_args.args[0] == "fw:conversation:abc:events"
+    assert chat.conversation.turn_state == {}
 
 
 def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
@@ -346,7 +361,9 @@ def test_read_keeps_new_event_cursor_across_calls(capsys) -> None:
         {stream: ">"},
         {stream: ">"},
     ]
-    assert [call.kwargs["block"] for call in redis.xreadgroup.call_args_list] == [
+    assert [
+        call.kwargs["block"] for call in redis.xreadgroup.call_args_list
+    ] == [
         None,
         None,
         None,

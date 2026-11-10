@@ -9,10 +9,11 @@ revisited. Close or revise an item when the code resolves it.
 ## Risks
 
 - **R1 — Duplicate external effects (open).** Workers skip results already
-  visible when they load a turn, and `save_tool_result` checks for a
-  saved call result before appending another. These reads are not
-  atomic with the writes, so concurrent workers can still duplicate
-  model runs, results, terminal events, or dispatch actions. A crash
+  visible when they load a turn, and `save_tool_result` uses a cursor-checked
+  Lua append to reject concurrently saved results and avoid duplicate fan-in
+  actions from concurrent tool-result saves. Other checkpoints and external
+  execution remain unguarded, so concurrent workers can still duplicate
+  model runs, tool effects, terminal events, or other dispatch actions. A crash
   after a tool's external side effect but before saving its result can
   also run the tool again. Attached tools need their own idempotency
   strategy for effects that must occur once; D72 defines the execution
@@ -37,11 +38,11 @@ revisited. Close or revise an item when the code resolves it.
   timeout phase and the OpenAI SDK retries timeouts up to twice. A
   dispatch entry can therefore become eligible for `XAUTOCLAIM` while
   its original worker is still running. There is no agent-run or
-  tool-call lock, so both model calls and tools may run twice. Set
-  explicit action time limits and keep the claim interval longer than
-  the bounded action duration, or renew pending-entry idle time during
-  processing. Increasing the interval above one HTTP timeout alone
-  does not cover retries or long-running tools.
+  tool-call lock, so both model calls and tools may run twice. D89 chooses
+  automatic ownership renewal during processing; it is not implemented yet.
+  Tool/network timeouts remain separately necessary for stuck calls.
+  Increasing the interval above one HTTP timeout alone does not cover
+  retries or long-running tools.
 - **R6 — Child results beyond the first page (closed).**
   `ConversationStream.iter_events()` advances through Redis range
   pages with an exclusive entry-ID cursor for turn reconstruction.
@@ -725,3 +726,140 @@ revisited. Close or revise an item when the code resolves it.
   terminal replay/dispatch behavior and add history only when a running turn
   becomes successfully completed. This does not implement retries or reopen
   failed turns.
+- **D86 — Pure conversation decisions and low-level streams (implemented).**
+  Move workflow decisions behind `Conversation`, shared by `Chat` and `Worker`,
+  while retaining turn-specific validation on its machines. `prepare` returns
+  a validated payload and dispatch intents without advancing canonical state.
+  New-turn preparation does not register a machine; only replay captures its
+  history and usage. Parent notification intents bind the actual persisted
+  terminal ID outside Redis access. Streams accept supplied payloads and handle
+  wire types, codecs, reads, writes, groups, claims, and acknowledgements; they
+  no longer construct workflow payloads or call domain machines.
+  Worker owns checkpoint and child-write sequencing, including result replay
+  before validation and after persistence before deciding fan-in. Chat uses
+  the same preparation abstraction for submission without loading full history.
+  Import-boundary and no-I/O preparation tests guard the separation; existing
+  race and write-order tests retain consistency coverage. This supersedes
+  D83's stream-owned orchestration without changing wire schemas or public
+  Chat behavior. Former high-level `ConversationStream` workflow helpers are
+  removed; low-level `append_event` remains available. No atomicity,
+  exactly-once execution, or recovery guarantees are added.
+- **D87 — Separate conversation and turn-state modules (implemented).**
+  Extract `Conversation`, `PreparedEvent`, and `reconstruct_conversation` to
+  `conversation.py`. Keep payload transitions, notification intents, shared
+  message prefixes, and per-turn machines in `turn_state.py`. Conversation
+  depends on turn state, never the reverse; both remain I/O-free and streams
+  depend on neither. Update callers and import-boundary checks without
+  compatibility re-exports or behavior changes.
+- **D88 — Cursor-checked tool-result append (implemented).**
+  `ConversationStream.append_if_current` uses a single-key Lua script to check
+  for events after the caller's replay cursor. If stale, return up to 100
+  events without writing; otherwise append the supplied encoded payload and
+  return that exact event. Worker replays returned events and revalidates
+  eligibility before retrying. On success, decide resumption from turn state
+  replayed through this append's ID, without refreshing later events. This
+  replaces D86's post-write tail refresh: two concurrent result savers cannot
+  both observe the completed tool set at their own append boundary, and a
+  duplicate saver rejects its result after replaying the winning write.
+  Lua remains domain-agnostic and event wire formats do not change. Isolated
+  real-Redis tests cover Lua responses, bounded conflicts, errors, simultaneous
+  distinct results, and duplicate calls. Result/dispatch writes remain separate,
+  external effects are not exactly-once, and retries can contend under sustained
+  conversation traffic; R1 and R8 remain open.
+- **D89 — Automatic renewal of active dispatch ownership (decided, not
+  implemented).** Renew a pending entry's idle time periodically while its
+  worker processes the action, from delivery or claim through checkpointing,
+  dispatch publication, and acknowledgement. Renewal runs independently of
+  blocking model/tool execution so healthy long-running work is not reclaimed
+  solely because it exceeds `claim_idle_ms`. Atomically verify the entry still
+  belongs to this consumer before renewing it; renewal must not claim it back
+  after another worker takes ownership or recreate an acknowledged entry.
+  Stop renewal when processing ends so genuinely abandoned work remains
+  recoverable.
+  Before implementation, define renewal timing, compatible claim thresholds,
+  failure/lost-ownership handling, and ownership-checked writes and
+  acknowledgements that prevent stale workers from completing reclaimed work.
+  Test long-running work, stopped renewal, and ownership-loss races against
+  real Redis. Renewal is not a tool execution deadline: a hung network call can
+  remain owned indefinitely while renewal is healthy. Explicit network
+  timeouts, bounded retries, and any hard tool deadline are separate decisions;
+  timing out a Python thread does not stop its execution. Remote side effects
+  already started may continue, so renewal does not promise exactly-once
+  external effects or close R1, R5, or R8 before implementation and validation.
+- **D90 — Server-rendered recent conversation dashboard (implemented).**
+  Add `/dashboard/` to the web router, mounted at `/fw-api/dashboard/` by the
+  standalone app. Do not add root-level dashboard routes or redirects.
+  Reuse monitor discovery and its ten-event tails, rendering conversation cards
+  and color-coded slots with htmx 4 and Bootstrap 5. Poll an HTML card fragment
+  every two seconds with focus-preserving morphing instead of adding a second
+  SSE protocol or client-side conversation store. Fetch complete event details
+  by exact stream ID into a modal outside the polling region. Escape payload
+  content, validate event IDs, and surface request and asset-loading failures.
+  Pin integrity-checked CDN assets without introducing a frontend build.
+  This bounds each page refresh to ten conversations and ten events each;
+  CDN access and periodic Redis reads are the tradeoffs. Existing monitor and
+  SSE routes are unchanged.
+- **D91 — Full retained conversation history with inline details (implemented).**
+  Link overview conversation names to `/fw-api/dashboard/{conversation_id}` and
+  reuse the same card and event detail templates. Read every retained stream event,
+  laying out rows of at most ten slots within the overview's card width. Poll
+  only the history card, keeping the selected details in a separate column
+  rather than a modal. This also supports conversations outside the recent set.
+  Move card and event fragments to `/dashboard-cards` and `/dashboard-event`,
+  avoiding collisions between fragment paths and conversation IDs.
+  Full-history reads and HTML responses grow with stream length; pagination
+  would change the requested all-events view and is not introduced here.
+- **D92 — Historical cutoff for the dashboard overview (superseded by D94).**
+  Interpret the date/time picker as an inclusive upper bound, not a filter for
+  activity since the selected date. Apply the normalized UTC millisecond ID
+  to dispatch discovery, event tails, and initial settings reads, including all
+  sequence IDs in the cutoff millisecond. Preserve the ten-conversation and
+  ten-event limits, dispatch pagination, and cutoff during polling. An empty
+  selection restores live reads. Keep monitor/SSE and full-history detail pages
+  unchanged. This browses retained stream data only; trimmed events or dispatch
+  history cannot be recovered by the picker.
+- **D93 — Button-triggered dashboard date selection (superseded by D94).**
+  Keep Bootstrap 5 and the native date/time input, placing the input inside a
+  dropdown opened by a calendar button. Format the button's selected date as
+  `yyyy/mm/dd`, since the native input's presentation follows browser/OS locale.
+  This preserves the UTC cutoff and live reset without an additional calendar
+  dependency; Bootstrap 6's datepicker example requires a different stack.
+- **D94 — Calendar selection and exclusive Redis-ID history navigation
+  (implemented).** Use Bootstrap 6 alpha and its bundled Vanilla Calendar Pro
+  dependency for the requested actual button-triggered calendar, migrating
+  event modals to native Bootstrap dialogs. Replace the time input and numbered
+  day pagination with an exclusive `before=<redis-id>` cutoff. Date selection
+  means midnight UTC; **< Prev** uses the oldest selected dispatch-poke ID.
+  Discovery scans backward in batches of 100 for ten distinct conversations,
+  preserving exact sequence ordering within a millisecond without counting
+  the whole day's history. A conversation may recur through older pokes.
+  Bound event and initial settings reads by milliseconds, not dispatch
+  sequences, which are stream-local; exclude the entire boundary millisecond
+  for `-0`, otherwise include its event sequences. Retain the cutoff while
+  polling, synchronize the next Prev cursor from fragments, and update URLs
+  for date selection, Prev, and Live. Replace the current URL rather than
+  adding a competing browser-history handler alongside htmx. This supersedes D92's
+  inclusive ISO-time parameter and D93's native-input dropdown. Bootstrap 6
+  alpha stability, CDN access, retained dispatch history, and non-atomic
+  cross-stream timelines remain explicit tradeoffs.
+- **D95 — Focused web read and presentation refactoring (implemented).**
+  Normalize dashboard cutoffs once into an immutable value with distinct
+  dispatch and event bounds, retaining D94's stream-local sequence rule.
+  Name discovery's ordered conversation-to-poke map `latest_pokes` so card
+  ordering and Prev are explicit. Move card/event formatting and typed template
+  data to the I/O-free `web/dashboard.py` module; keep query validation,
+  HTTP errors, and read coordination in the router.
+  Extend `ConversationStream` with bounded forward reads, optional unlimited
+  counts, and typed newest-first reads. Use those operations for dashboard
+  tails, settings, exact events, full history, and the single-conversation SSE
+  feed without changing existing stream-call defaults. Keep shared dispatch
+  discovery and the recent feed's multiplexed read/eviction coordination
+  unchanged. This does not change selection order, add an activity index, alter
+  wire formats, or introduce cross-stream snapshot guarantees.
+- **D96 — Durable failure tracebacks (implemented).** Store formatted Python
+  tracebacks, including chained exceptions, in `TurnFailedPayload.traceback`
+  alongside the existing error description so diagnostics survive worker-log
+  loss. Preserve the child's traceback when its failure propagates to a parent.
+  Default to null for older events and failures without a captured exception.
+  Tracebacks can expose source paths and exception details; they are retained
+  and exposed wherever complete conversation payloads are available.

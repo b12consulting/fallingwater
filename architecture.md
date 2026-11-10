@@ -56,16 +56,17 @@ the same stream.
 and acknowledgements. It decodes each dispatch entry into a typed action or an
 invalid-entry value that the worker acknowledges. It creates a
 `ConversationStream` bound to an ID; that object owns typed event reads and
-writes, its reader groups, and writes to both streams. `Chat` keeps one bound
+writes and its reader groups. `Chat` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
 `models.py` defines the event and action schemas; `stream_utils.py`
 handles naming validation and wire codecs. `Chat` and `Worker` decide when to
-acknowledge entries; turn machines decide which work is enabled.
+acknowledge entries; `Conversation` and its turn machines decide which work
+is enabled.
 
-`Chat.send` asks its conversation stream to write the queued event and dispatch
-poke with two successive `XADD` commands. Group and consumer names remain
-explicit on stream operations.
+`Chat.send` prepares a queued event through `Conversation`, then writes the
+event and dispatch poke through the two stream objects with successive `XADD`
+commands. Group and consumer names remain explicit on stream operations.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -110,7 +111,7 @@ the canonical delta for later turns. Deferred request payloads use
 the full conversation history.
 
 `ConversationStream.iter_events()` pages through the event stream and supplies
-decoded events to `turn_state.reconstruct_conversation`. That pure function
+decoded events to `conversation.reconstruct_conversation`. That pure function
 returns a `Conversation` containing the configuration, conversation ID, replay
 cursor, and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
 prompt, prior-history snapshot, accumulated turn messages, usage, active tool
@@ -199,6 +200,64 @@ close on shutdown, then cancels remaining streaming tasks. Its Redis client is
 closed after Uvicorn returns, so cancelled stream reads cannot race client
 cleanup.
 
+The `/dashboard/` router route presents the same ten most recently poked
+conversations as responsive cards, each with its latest ten events ordered
+oldest to newest. The standalone app exposes it only at `/fw-api/dashboard/`,
+without root-level dashboard routes or redirects. htmx 4 polls
+`/fw-api/dashboard-cards` every two seconds
+and uses built-in `innerMorph` swaps to retain focus and stable event controls.
+Each slot is green unless its event is `turn.failed`, in which case it is red.
+User and assistant message slots show Bootstrap Icons `person` and `robot`,
+respectively, without changing their accessible labels or event actions.
+Selecting a slot fetches `/fw-api/dashboard-event` by conversation and exact
+event ID into a Bootstrap 6 dialog outside the refreshed card region, preserving open
+details during updates. Detail payloads are complete; text and JSON are escaped.
+ISO 8601 UTC datetimes come from Redis entry IDs. The page is server-rendered initially and
+reports refresh, detail, or asset-loading failures explicitly. Pinned,
+integrity-checked CDN assets avoid a frontend build; network access is required
+for styling and interactions. Existing monitor and SSE behavior is unchanged.
+
+`web/dashboard.py` owns I/O-free card and event presentation, with typed
+template dictionaries for slots, cards, overview, history, and details.
+The router validates requests and coordinates reads; its immutable
+`DashboardCutoff` parses the ID once and supplies separate dispatch and event
+bounds. Conversation range, reverse-tail, and single-conversation SSE reads
+use `ConversationStream`, which owns decoding. Existing forward-range defaults
+remain unchanged; explicit bounds and `count=None` support exact events,
+historical settings, and unlimited retained history. Dispatch discovery and
+the recent feed's multiplexed `XREAD` remain web coordination.
+
+The overview and card fragment accept an optional `before=<redis-id>` cutoff.
+Dispatch discovery uses `XREVRANGE` with an exclusive upper bound, scanning
+batches of 100 until ten distinct conversations are selected or history ends.
+Each selected conversation retains its latest eligible poke ID; **< Prev**
+uses the oldest of those IDs as the next exclusive cutoff, avoiding skipped
+pokes within a millisecond. Conversations can recur in older views through
+earlier pokes. Redis sequences are stream-local: event tails and initial
+settings use the cutoff's millisecond, including all event sequences when the
+dispatch sequence is nonzero and excluding the whole boundary millisecond for
+`-0`. This is retained-history navigation, not a cross-stream atomic snapshot.
+
+A real button-triggered Bootstrap 6 alpha datepicker, using its bundled
+Vanilla Calendar Pro dependency, displays dates as `yyyy/mm/dd`. Selecting a
+date supplies `<UTC-midnight-milliseconds>-0`. Date selection, Prev, and Live
+replace the shareable URL; reloading restores the filter. Polling includes
+the unchanged hidden cutoff and updates the next Prev cursor from the returned
+fragment. Clearing it restores unbounded live reads. Bootstrap 6's prerelease
+stability is a tradeoff of using its datepicker without another UI library.
+Monitor/SSE feeds and full-history detail pages remain unfiltered. Historical
+results depend on retained streams and dispatch pokes, not on an archive.
+
+Conversation names link to `/fw-api/dashboard/{conversation_id}`. This page
+reads the entire retained stream, including conversations outside the recent set, and
+reuses the card template with rows of at most ten slots. The card keeps the
+overview's responsive column width and grows vertically; event details occupy
+the adjacent column, stacking below the card on small screens. htmx polls
+`/fw-api/dashboard-history` by conversation ID, morphing only the history card so
+selected details stay visible. Full-history refresh cost grows with the retained
+stream length, unlike the bounded overview. Fragment routes live outside
+`/dashboard/` so conversation IDs such as `cards` and `event` are not reserved.
+
 ## AD8 — CLI reader groups
 
 `Chat` creates or reuses a consumer group on the conversation stream during
@@ -274,8 +333,11 @@ payload model:
   - Turn ID, displayed response, structured JSON data for the new Pydantic AI
     messages, and accumulated usage.
 - `turn.failed`
-  - Fields: `turn_id: str`, `error: str`
-  - Turn ID and failure description.
+  - Fields: `turn_id: str`, `error: str`, `traceback: str | null`
+  - Turn ID, failure description, and formatted Python traceback (including
+    chained exceptions). Workers persist the traceback as well as logging it;
+    child failures preserve it when propagated to the parent. The field
+    defaults to null for older events or failures without a captured exception.
 
 The dispatch stream is text based and does not use the conversation payload
 envelope. `Event` contains only conversation event types; `Action`
@@ -320,9 +382,10 @@ the shared conversation event decoder.
 function tools and returns their requests to `Worker`. The worker stores each
 request and dispatches each call independently. Results are stored by call ID;
 the last unique result schedules the next agent run with `DeferredToolResults`.
-The reconstructed conversation records its last event ID. Result fan-in checks only
-events written after that snapshot, then checks the new tail after saving its
-result to include sibling results that arrived during the write.
+The reconstructed conversation records its last replayed event ID. Result
+fan-in replays newer events and uses a cursor-checked append, retrying after
+conflicts. Resumption is decided through the successfully appended result's
+event ID, without incorporating later writes.
 Synchronous and asynchronous function tools are supported; deferred requests
 and results must be JSON serializable. `agent_proxy.execute_tool` resolves the
 attached callable, decodes arguments, and rebuilds basic `RunContext` fields
@@ -373,16 +436,40 @@ already-created group and propagate other Redis errors.
 registry. `stream_utils.py` contains stream key formatting and codecs; callers
 import schemas directly from `models.py`.
 
-`Chat` and `Worker` retain acknowledgement policy. Payload transitions and turn
-machines own workflow validation, completion, and turn-resumption policy.
-`ConversationStream.checkpoint` previews a transition without changing the
-snapshot, persists its payload, and publishes its emissions. Only stream replay
-advances the snapshot, so an optimistic write cannot displace an earlier
-concurrent outcome. `save_tool_result` additionally replays the concurrent
-tail before and after the write. `Worker` routes child-result actions before
+Streams accept supplied payloads and provide only typed Redis access.
+`append_payload` selects the registered wire type without constructing a new
+workflow payload; `append_event` retains explicit type/payload writes.
+`stream.py` has no dependency on `Conversation`, turn machines, or notification
+intents.
+
+`conversation.py` defines `Conversation`, `PreparedEvent`, and
+`reconstruct_conversation`, depending only on payload models and the pure
+turn-state module. `Conversation` exposes pure preparation, dispatch eligibility, result
+eligibility, child-outcome normalization, and post-replay resumption decisions.
+`prepare` returns a `PreparedEvent` containing the validated payload and
+emissions without advancing state. Its `dispatch(entry_id)` binds terminal
+notification intents to the actual persisted event ID. New-turn preparation
+uses an unregistered machine, allowing `Chat` to submit turns without replaying
+history or optimistically adding them to canonical state.
+
+`Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
+Worker checkpointing prepares a fact, persists it, then publishes its actions.
+Only applying persisted events advances replayed conversation state, so an
+optimistic write cannot displace an earlier concurrent outcome. Worker result
+saving refreshes before checking eligibility and validating, then uses
+`ConversationStream.append_if_current` to atomically check for unseen events
+and append through a single-key Lua script. A stale cursor returns up to 100
+unseen events without writing; Worker replays them, revalidates, and retries
+while the result remains eligible. A successful append returns only its new
+event. Worker replays through that event ID and asks `Conversation` for resume
+actions without reading later writes, so only the result completing the tool
+set emits a resume. Lua handles stream operations and opaque encoded payloads,
+not domain decisions. Dispatch publication remains a separate write.
+Child creation and queueing remain before the parent
+request write and dispatch. `Worker` routes child-result actions before
 loading an agent because those actions use only saved stream state. The CLI
-inspection commands and web SSE feeds keep their read-only query patterns, which include scans and
-multi-stream reads.
+inspection commands and web SSE feeds keep their read-only query patterns,
+including scans and multi-stream reads.
 
 `recovery.py` currently contains only a no-op `recover()` and a checklist for
 future reconciliation of partial writes. It does not repair streams yet.
@@ -433,8 +520,9 @@ for tools or children; it does not mean a worker is actively executing.
 Conversation history advances only when replay changes a running turn into a
 completed one, never on failure or repeated terminal events.
 
-Workers ask the machine whether an action is ready, waiting, or stale before
-loading an agent. They execute ready work, leave premature resumes pending, and
+Workers ask `Conversation` whether an action is ready, waiting, or stale;
+the conversation delegates turn-specific rules to its machines. They execute
+ready work, leave premature resumes pending, and
 acknowledge stale actions. Dependency/schema validation and Redis/error boundaries
 remain outside the machine. These machines do not provide locks, atomic writes,
 exactly-once execution, or partial-write reconciliation; `recovery.py` remains

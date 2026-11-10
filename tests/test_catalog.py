@@ -3,14 +3,16 @@ Agent import paths are the integration point for client applications.
 """
 
 import sys
+from datetime import datetime, timezone
 from types import ModuleType
+from unittest.mock import Mock
 
 import pytest
 from pydantic_ai import Agent, AgentSpec
 from pydantic_ai.models.test import TestModel
 
 from fallingwater.catalog import reify_agent
-from fallingwater.demo import flaky_agent, haiku_master
+from fallingwater.demo import flaky_agent, haiku_master, time_agent
 
 
 def test_load_existing_agent_from_both_path_forms() -> None:
@@ -54,3 +56,18 @@ def test_flaky_demo_agent_can_fail_or_answer(
     monkeypatch.setattr("fallingwater.demo.random", lambda: 1.0)
     result = flaky_agent.run_sync("hello", model=TestModel())
     assert result.output
+
+
+def test_time_demo_agent_calls_current_time_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert reify_agent("fallingwater.demo:time_agent") is time_agent
+    current = datetime(2026, 11, 7, 22, 42, 39, tzinfo=timezone.utc)
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = current
+    monkeypatch.setattr("fallingwater.demo.time.datetime", clock)
+
+    result = time_agent.run_sync("What time is it?", model=TestModel())
+
+    clock.now.assert_called_once_with()
+    assert current.astimezone().isoformat(timespec="seconds") in result.output

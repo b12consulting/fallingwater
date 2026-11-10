@@ -176,6 +176,7 @@ class TurnCompletedPayload(ConversationPayload):
 class TurnFailedPayload(ConversationPayload):
     turn_id: str
     error: str
+    traceback: str | None = None
 
 
 ConversationPayloadType: TypeAlias = (

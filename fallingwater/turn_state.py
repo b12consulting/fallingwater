@@ -1,7 +1,7 @@
-"""Payload transitions and pure reconstruction of conversation turns."""
+"""Pure payload transitions and per-turn state machines."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Literal, Self, TypeAlias, overload
@@ -9,8 +9,6 @@ from typing import Literal, Self, TypeAlias, overload
 from pydantic import (
     BaseModel,
     ConfigDict,
-    Field,
-    PrivateAttr,
     TypeAdapter,
     model_validator,
 )
@@ -67,7 +65,8 @@ class MessageHistory(Sequence[ModelMessage]):
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "_length",
+            self,
+            "_length",
             (len(self.previous) if self.previous is not None else 0)
             + len(self.messages),
         )
@@ -85,10 +84,12 @@ class MessageHistory(Sequence[ModelMessage]):
             yield from prefix.messages
 
     @overload
-    def __getitem__(self, index: int) -> ModelMessage: ...
+    def __getitem__(self, index: int) -> ModelMessage:
+        ...
 
     @overload
-    def __getitem__(self, index: slice) -> Sequence[ModelMessage]: ...
+    def __getitem__(self, index: slice) -> Sequence[ModelMessage]:
+        ...
 
     def __getitem__(
         self, index: int | slice
@@ -127,7 +128,9 @@ Emission: TypeAlias = DispatchPayloadType | ParentNotification
 
 
 class Transition(BaseModel, ABC):
-    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, validate_default=True
+    )
 
     start: TurnPayload | None
     stop: TurnPayload | None
@@ -139,7 +142,9 @@ class Transition(BaseModel, ABC):
             and self.stop is not None
             and self.start.turn_id != self.stop.turn_id
         ):
-            raise ValueError("Transition endpoints must belong to the same turn")
+            raise ValueError(
+                "Transition endpoints must belong to the same turn"
+            )
         return self
 
     @property
@@ -168,6 +173,7 @@ class Transition(BaseModel, ABC):
 
     @abstractmethod
     def emit(self, machine: "TurnStateMachine") -> tuple[Emission, ...]:
+        """Return actions for the dispatch stream."""
         raise NotImplementedError
 
 
@@ -216,7 +222,9 @@ class RequestTools(Transition):
                 step_id=self.stop.step_id,
                 tool_call_id=call.tool_call_id,
             )
-            for call in requests_adapter.validate_python(self.stop.requests).calls
+            for call in requests_adapter.validate_python(
+                self.stop.requests
+            ).calls
         )
 
 
@@ -303,7 +311,9 @@ class ChildFailed(ChildOutcome):
     @property
     def outcome(self) -> TurnFailedPayload:
         return TurnFailedPayload(
-            turn_id=self.start.turn_id, error=f"Subagent failed: {self.stop.error}"
+            turn_id=self.start.turn_id,
+            error=f"Subagent failed: {self.stop.error}",
+            traceback=self.stop.traceback,
         )
 
     def emit(self, machine: "TurnStateMachine") -> tuple[Emission, ...]:
@@ -418,9 +428,7 @@ class TurnStateMachine:
         if self.parent is None:
             return ()
         return (
-            ParentNotification(
-                self.parent, self.conversation_id, self.turn_id
-            ),
+            ParentNotification(self.parent, self.conversation_id, self.turn_id),
         )
 
     def dispatch_status(
@@ -464,7 +472,7 @@ class TurnStateMachine:
             and payload.tool_call_id not in self.results
         )
 
-    def resume_actions(self, step_id: str) -> tuple[Emission, ...]:
+    def resume_actions(self, step_id: str) -> tuple[AgentResumePayload, ...]:
         action = AgentResumePayload(
             conversation_id=self.conversation_id,
             turn_id=self.turn_id,
@@ -538,9 +546,8 @@ class TurnStateMachine:
             raise ValueError("Conversation settings are not a turn payload")
         if not self.running:
             return
-        if (
-            isinstance(payload, ToolResultPayload)
-            and not self.accepts_result(payload)
+        if isinstance(payload, ToolResultPayload) and not self.accepts_result(
+            payload
         ):
             return
         if isinstance(payload, SubAgentRequestedPayload) and (
@@ -555,65 +562,3 @@ class TurnStateMachine:
         self.transition(payload)
         if not self.running:
             self.terminal_event_id = event.entry_id
-
-
-class Conversation(BaseModel):
-    """Conversation configuration, turn machines, and the replay cursor."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    conversation_id: str
-    settings: ConversationCreatedPayload
-    turn_state: dict[str, TurnStateMachine] = Field(default_factory=dict)
-    last_event_id: str = "0-0"
-    _history: MessageHistory = PrivateAttr(default_factory=MessageHistory)
-    _latest_completed: TurnStateMachine | None = PrivateAttr(default=None)
-
-    def apply(self, event: ConversationEvent) -> None:
-        payload = event.payload
-        if isinstance(payload, ConversationCreatedPayload):
-            raise ValueError("Conversation settings were already loaded")
-
-        if payload.turn_id not in self.turn_state:
-            if not isinstance(payload, TurnQueuedPayload):
-                raise ValueError(f"No prompt found for turn: {payload.turn_id}")
-            self.turn_state[payload.turn_id] = TurnStateMachine(
-                self.conversation_id,
-                payload.turn_id,
-                parent=self.settings.parent,
-                history=self._history,
-                usage=(
-                    self._latest_completed.usage
-                    if self._latest_completed is not None
-                    else None
-                ),
-            )
-        machine = self.turn_state[payload.turn_id]
-        was_running = machine.running
-        machine.replay(event)
-        if was_running and machine.completed:
-            self._history = MessageHistory(
-                previous=self._history, messages=tuple(machine.turn_messages)
-            )
-            self._latest_completed = machine
-        self.last_event_id = event.entry_id
-
-
-def reconstruct_conversation(
-    events: Iterable[ConversationEvent], *, conversation_id: str
-) -> Conversation:
-    """Replay all turns without publishing the transitions' dispatch hints."""
-    iterator = iter(events)
-    first = next(iterator, None)
-    if first is None or not isinstance(
-        first.payload, ConversationCreatedPayload
-    ):
-        raise ValueError(f"Conversation settings not found in {conversation_id}")
-    conversation = Conversation(
-        conversation_id=conversation_id,
-        settings=first.payload,
-        last_event_id=first.entry_id,
-    )
-    for event in iterator:
-        conversation.apply(event)
-    return conversation

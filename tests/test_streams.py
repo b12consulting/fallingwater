@@ -19,6 +19,7 @@ from fallingwater.models import (
     ToolRequestedPayload,
     ToolResultPayload,
     TurnCompletedPayload,
+    TurnFailedPayload,
     TurnQueuedPayload,
 )
 from fallingwater.stream_utils import (
@@ -53,6 +54,22 @@ def test_conversation_event_round_trips_as_compressed_payload() -> None:
     )
     assert event.type == Event.TURN_QUEUED
     assert event.payload == TurnQueuedPayload(turn_id="turn-1", message="hello")
+
+
+def test_legacy_failed_event_without_traceback_decodes() -> None:
+    event = decode_conversation_event(
+        "1-0",
+        {
+            "type": Event.TURN_FAILED.value,
+            "payload": zstd.compress(
+                b'{"turn_id":"turn-1","error":"legacy failure"}'
+            ),
+        },
+    )
+
+    assert isinstance(event.payload, TurnFailedPayload)
+    assert event.payload.error == "legacy failure"
+    assert event.payload.traceback is None
 
 
 @pytest.mark.parametrize("entry_id", ["1-0", b"1-0"])

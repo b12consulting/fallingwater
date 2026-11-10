@@ -1,0 +1,24 @@
+<div id="dashboard-view-state" class="d-flex flex-wrap justify-content-between gap-2 small fg-2 mb-4"
+     data-prev-id="{{ prev_id }}" data-cutoff-time="{{ cutoff_time.isoformat() if cutoff_time else '' }}">
+  <span>{{ conversations | length }} of 10 {{ 'historical' if before else 'recent' }} conversations</span>
+  <span>Last {{ event_limit }} events per conversation · oldest to newest</span>
+</div>
+<div class="row row-cols-1 md:row-cols-2 xl:row-cols-3 g-4 lg:g-6">
+  {% for conversation in conversations %}
+  <div class="col" id="conversation-{{ conversation.id_key }}">
+    {% include "dashboard_card.html" %}
+  </div>
+  {% else %}
+  <div class="col-12 w-100">
+    <div class="conversation-card text-center py-12 px-6">
+      {% if before %}
+      <h2 class="h4">No conversations before this cutoff</h2>
+      <p class="fg-2 mb-0">Choose a later date or return to live conversations.</p>
+      {% else %}
+      <h2 class="h4">No recent conversations yet</h2>
+      <p class="fg-2 mb-0">Send a message to an agent. Its conversation will appear here automatically.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>

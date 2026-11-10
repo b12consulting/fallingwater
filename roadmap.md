@@ -90,8 +90,8 @@ conversations and dispatch entries remain available.
 Repair missing dispatch actions and partial child setup after failures between
 separate writes. `recover()` is currently a placeholder; pending-action
 reclamation alone does not repair every saved event missing its next action.
-Add real-Redis restart and recovery tests alongside the current in-memory and
-mocked worker tests.
+Extend real-Redis coverage to worker restart and recovery; current isolated
+Redis tests cover concurrent result saves alongside in-memory and mocked tests.
 
 ### Decision
 
@@ -118,6 +118,23 @@ conversation pokes, not all conversation activity. Both feeds follow new events.
 A simple monitoring page displays the recent feed, including tool and subagent
 events, with optional completed history and usage.
 
+The read-only `/fw-api/dashboard/` presents recently poked conversations as cards
+with green non-failed and red failed event slots. Selecting a slot reveals its full
+details. htmx 4 refreshes the latest ten events of the latest ten conversations
+every two seconds; Bootstrap 6 alpha provides the layout, event dialog, and
+button-triggered calendar.
+The existing raw monitor and SSE feeds remain available.
+The overview supports an exclusive Redis-ID cutoff via shareable
+`?before=<redis-id>` URLs. Date selection starts before midnight UTC; **< Prev**
+continues before the oldest selected dispatch poke without skipping entries
+that share a millisecond. Polling retains the cutoff and **Live** clears it.
+Older views may repeat conversations with earlier pokes; event timelines use
+the cutoff's millisecond because Redis sequences are stream-local.
+
+Conversation names link to a full-history dashboard with rows of ten event
+slots and inline event details beside the card. It follows the retained stream
+without restricting selection to the ten recent conversations.
+
 ### Remaining
 
 Add health and statistics endpoints, and a documented way for clients to
@@ -138,18 +155,23 @@ Synchronous `DispatchStream` and `ConversationStream` classes provide shared
 stream operations, including consumer-group reads and acknowledgements.
 `Chat` and `Worker` use these classes. Related conversation and dispatch
 writes are separate Redis commands.
+Web dashboard range and reverse-tail reads, and single-conversation SSE reads,
+also use `ConversationStream`. Typed, I/O-free dashboard presentation is
+separate from request handling and Redis read coordination.
 
-Pure turn state machines validate transitions, track pending tool calls and
-delegations, and reconstruct all turns from persisted events. Replay keeps the
-first result per call and first terminal outcome; queue-time history snapshots
-share immutable message prefixes.
+Pure `Conversation` logic coordinates turn-state decisions and reconstructs
+all turns from persisted events. Turn state machines validate transitions and
+track pending tool calls and delegations. `Chat` and `Worker` coordinate I/O;
+stream classes do not construct workflow payloads or call domain machines.
+Replay keeps the first result per call and first terminal outcome; queue-time
+history snapshots share immutable message prefixes.
 
 ### Remaining
 
-Move the web SSE routes and CLI event inspection onto the stream classes. They
-still call `XREAD` or `XREVRANGE` directly; the recent-conversations feed needs
-stream methods that preserve its reverse-tail replay and multi-stream follow
-behavior.
+Move web dispatch discovery, the recent feed's multiplexed `XREAD`, and CLI
+event inspection onto the stream classes. The recent feed already uses the
+shared reverse-range reader for tail replay; its multi-stream follow behavior
+still needs an appropriate stream-level API.
 
 Add consumer-group lifecycle management, including deleting worker
 consumers with no pending entries when the `WorkerPool` starts.
@@ -161,16 +183,24 @@ stream operations. Worker pool startup removes consumers with no pending entries
 and preserves consumers that still have pending work.
 
 
-## 5. Worker concurrency correctness — open
+## 5. Worker concurrency correctness — partial
+
+### Available
+
+Concurrent tool-result saves publish one resume for a completed request batch.
+A cursor-checked append rejects stale writes; workers replay newer events and
+revalidate before retrying. Resumption is decided through the successfully
+appended result's event ID, without reading later writes. Duplicate saves for
+the same call are rejected after replaying the winning result. This shared
+result-saving path also handles successful child-agent outcomes.
+
+Isolated real-Redis tests reproduce simultaneous completion of distinct calls
+and duplicate saves, verifying one resume publication. Result persistence and
+dispatch publication remain separate writes; this does not close the crash
+recovery gap or provide exactly-once external effects.
 
 ### Issues
 
-- **Duplicate resume publication during result fan-in.** Concurrent
-  `ToolResultPayload` saves can each publish `turn.agent.resume` for the same
-  conversation, turn, and step after observing a complete request batch. This
-  happens with ordinary tools, distinct subagents, or mixed batches during normal
-  parallel execution, without prior duplicate work. Distinct resume entries can
-  then run the same agent continuation concurrently.
 - **Premature reclamation of active dispatch actions.** `XAUTOCLAIM` can reassign
   an action while its original worker is still processing it. The idle threshold
   defaults to five minutes and is configurable with `--claim-idle-ms`; workers
@@ -179,10 +209,20 @@ and preserves consumers that still have pending work.
 
 ### Remaining
 
-Prevent duplicate resume publication for a completed request batch and prevent
-concurrent execution caused by reclaiming active work, while preserving recovery
-of genuinely abandoned actions. Choose the mechanisms in `raid.md`. These issues
-are tracked by RAID R1 and R5.
+Implement automatic ownership renewal for active dispatch actions, preserving
+recovery of genuinely abandoned work. Renewal must continue independently of
+blocking model/tool calls, cover processing through acknowledgement, and never
+reclaim an entry whose ownership has moved to another worker. Define handling
+of renewal failures and ownership loss, including protection against stale
+writes and acknowledgements.
+
+Ownership renewal does not stop a stuck tool. Tool/network timeouts and bounded
+retries remain a separate concern; a healthy renewal loop could otherwise keep
+a hung call owned indefinitely.
+
+Add real-Redis tests for long-running actions, renewal stopping, ownership loss,
+and active-action reclamation. RAID R1 and R5 remain open; D88 records the
+implemented result fan-in fix and D89 records the renewal decision.
 
 ### Done when
 
