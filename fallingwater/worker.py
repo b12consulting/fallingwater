@@ -29,7 +29,6 @@ from fallingwater.models import (
     ToolResultPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
-    get_cnv_event,
 )
 from fallingwater.turn_state import (
     TurnPayload,
@@ -89,24 +88,10 @@ class Worker:
         conversation: Conversation,
         payload: TurnPayload,
     ) -> str:
-        self.refresh(cnv_stream, conversation)
-        while True:
-            turn = conversation.turn_state.get(payload.turn_id)
-            if turn is not None and not turn.running:
-                if turn.terminal_event_id is None:
-                    raise ValueError("Terminal turn has no saved event ID")
-                return turn.terminal_event_id
-            prepared = conversation.prepare(payload)
-            entry_id, events = cnv_stream.append_if_current(
-                get_cnv_event(type(payload)),
-                prepared.payload,
-                after_id=conversation.last_event_id,
-            )
-            for event in events:
-                conversation.apply(event)
-            if entry_id is not None:
-                self.publish(cnv_stream, prepared.dispatch(entry_id))
-                return entry_id
+        prepared = conversation.prepare(payload)
+        entry_id = cnv_stream.append_payload(prepared.payload)
+        self.publish(cnv_stream, prepared.dispatch(entry_id))
+        return entry_id
 
     def save_tool_result(
         self,

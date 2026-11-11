@@ -462,10 +462,11 @@ uses an unregistered machine, allowing `Chat` to submit turns without replaying
 history or optimistically adding them to canonical state.
 
 `Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
-Worker checkpointing refreshes state, prepares a fact, persists it with a
-cursor check, applies the saved event, then publishes its actions.
-Only applying persisted events advances replayed conversation state, so an
-optimistic write cannot displace an earlier concurrent outcome. Worker result
+Worker checkpointing prepares a fact, appends it, then publishes its actions.
+It does not refresh or advance the replayed state; only applying persisted
+events does that. General checkpoints have no cursor check, so concurrent
+workers may append competing outcomes; replay retains the first terminal
+outcome. Worker result
 saving refreshes before checking eligibility and validating, then uses
 `ConversationStream.append_if_current` to atomically check for unseen events
 and append through a single-key Lua script. A stale cursor returns up to 100
@@ -477,8 +478,6 @@ set emits a resume. Lua handles stream operations and opaque encoded payloads,
 not domain decisions. Dispatch publication remains a separate write.
 Delegation registration and agent initialization also reuse the cursor-checked
 append mechanism. The complete parent request precedes agent creation/queueing.
-Queue and terminal checkpoints are cursor-checked so a queued turn's snapshot
-reflects the persisted order of concurrent enqueue and completion.
 `Worker` routes child-result actions before
 loading an agent because those actions use only saved stream state. The CLI
 inspection commands and web SSE feeds keep their read-only query patterns,

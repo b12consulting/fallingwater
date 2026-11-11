@@ -1267,7 +1267,7 @@ def test_checkpoint_and_refresh_preserve_first_concurrent_terminal(
         conversation,
         failed if first_succeeds else completed,
     )
-    assert not conversation.turn_state["turn-1"].running
+    assert conversation.turn_state["turn-1"].running
     worker.checkpoint(
         stream,
         conversation,

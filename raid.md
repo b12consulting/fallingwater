@@ -10,7 +10,7 @@ revisited. Close or revise an item when the code resolves it.
 
 - **R1 — Duplicate external effects (open).** Workers skip results already
   visible when they load a turn. Cursor-checked Lua appends guard result
-  fan-in, checkpoints, persistent registrations, and agent initialization.
+  fan-in, persistent registrations, and agent initialization.
   External execution remains unguarded, so concurrent workers can still
   duplicate model runs, tool effects, or dispatch actions. A crash
   after a tool's external side effect but before saving its result can
@@ -875,8 +875,11 @@ revisited. Close or revise an item when the code resolves it.
   snapshots. The initial automatic FIFO policy was removed to keep agents
   aligned with ordinary conversations; callers order dependent follow-ups by
   waiting for results. Each new turn dispatches independently.
-  Reuse cursor-checked appends for atomic registration, idempotent setup,
-  and canonical checkpoints. Replaying a saved delegation can finish
+  Reuse cursor-checked appends for atomic registration and idempotent setup.
+  General checkpointing retains the simpler prepare/append/publish sequence;
+  cursor-checked retry and refresh are deferred. Concurrent checkpoints can
+  append competing outcomes, with the first terminal outcome retained on replay.
+  Replaying a saved delegation can finish
   missing initialization without rerunning its tool, but a full reconciliation
   scanner and ownership renewal remain unimplemented. This replaces the
   initial raw-ID/reject-overlap proposal. The runnable
