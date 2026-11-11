@@ -76,6 +76,48 @@ you omit the ID, it starts a conversation and prints its new ID to stderr.
 Any earlier unread results are printed to stdout before the new turn's result.
 
 
+## Named agent sessions
+
+Tools returning `AgentRequest` create fresh agent conversations by default.
+Set `persistent=True` to register a session for reuse within the parent
+conversation. An explicit `name` overrides the agent definition's name:
+
+```python
+from fallingwater.agent_proxy import AgentRequest
+
+first = AgentRequest(
+    agent_path="fallingwater.demo.editor_writers:writer",
+    name="alice",
+    prompt="Draft an invitation for Friday's team lunch.",
+    persistent=True,
+)
+follow_up = AgentRequest(
+    name="alice", prompt="Make your draft warmer.", persistent=True
+)
+```
+
+Each tool receives only the agent's answer, not a conversation ID. Named
+follow-ups use the saved agent, model, dependencies, and completed history.
+An unknown name or explicitly conflicting settings fail the requesting turn.
+Requests to the same persistent agent may run concurrently, each using history
+and usage captured when its turn was queued. Wait for the previous answer
+before submitting a follow-up that depends on it. No worker is reserved while
+waiting for an agent, and a failure still fails its requesting parent turn.
+
+Names without persistence do not register or reuse sessions. Persistence means
+reuse, not retention: one-off conversations are also stored in Redis. Deps
+remain reconstructed from the conversation's original settings.
+
+Try the editor, which delegates to one or more writers:
+
+```shell
+fw worker -w 2
+fw chat --agent fallingwater.demo:editor --model <model>
+```
+
+Worker ownership renewal and complete cross-stream crash recovery remain
+unimplemented; this is not exactly-once model or tool execution.
+
 ## Web
 
 Install the web dependencies with `python -m pip install -e '.[web]'`, then

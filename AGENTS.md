@@ -49,7 +49,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal and library conversation workflow
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
-|   |-- conversation.py       Pure conversation decisions, preparation, and replay
+|   |-- conversation.py       Pure decisions, agent registry, and conversation replay
 |   |-- models.py             Conversation and dispatch event/payload schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
@@ -72,6 +72,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- worker_pool.py        Worker threads and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
+|       |-- editor_writers.py Editor delegating to fresh or persistent writers
 |       |-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
 |       `-- time.py           Basic assistant with a current-time tool
 `-- tests/                    Pytest tests; conftest enables Typeguard
@@ -82,7 +83,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_chat.py          Chat submission checks
     |-- test_cli.py           CLI smoke checks
     |-- test_conversation.py  Dispatch and conversation stream checks
-    |-- test_jeopardy.py      Jeopardy child-agent request checks
+    |-- test_demo.py          Jeopardy and editor/writer request checks
     |-- test_streams.py       Conversation event codec and naming checks
     |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks

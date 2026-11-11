@@ -29,7 +29,7 @@ from fallingwater.models import (
     ConversationPokePayload,
     PAYLOAD_MODELS,
     ParentToolReference,
-    SubAgentRequestedPayload,
+    AgentRequestedPayload,
     SubAgentResultPayload,
     ToolCallPayload,
     ToolRequestedPayload,
@@ -89,12 +89,16 @@ def _result(call_id="call-1", *, step_id="step-1", turn_id="turn-1"):
 
 
 def _delegation(call_id="call-1"):
-    return SubAgentRequestedPayload(
+    return AgentRequestedPayload(
         turn_id="turn-1",
         step_id="step-1",
         tool_call_id=call_id,
         child_conversation_id="child",
         child_turn_id="child-turn",
+        agent_path="unimportable:child",
+        model="test",
+        prompt="child prompt",
+        deps={"key": "value"},
     )
 
 
@@ -1274,13 +1278,7 @@ def test_conversation_workflow_preparation_is_pure(monkeypatch):
     machine = conversation.turn_state["turn-1"]
     before = deepcopy(vars(machine))
     delegation = _delegation()
-    settings, queued, prepared = conversation.prepare_subagent(
-        delegation,
-        agent="unimportable:child",
-        model="test",
-        deps={"key": "value"},
-        prompt="child prompt",
-    )
+    settings, queued, prepared = conversation.prepare_subagent(delegation)
     assert settings.parent == ParentToolReference(
         conversation_id="conversation",
         turn_id="turn-1",
@@ -1289,7 +1287,9 @@ def test_conversation_workflow_preparation_is_pure(monkeypatch):
     )
     assert settings.deps == {"key": "value"}
     assert queued == TurnQueuedPayload(
-        turn_id="child-turn", message="child prompt"
+        turn_id="child-turn",
+        message="child prompt",
+        parent=settings.parent,
     )
     assert prepared.dispatch("4-0") == (
         ConversationPokePayload(conversation_id="child", turn_id="child-turn"),
@@ -1332,3 +1332,162 @@ def test_conversation_workflow_preparation_is_pure(monkeypatch):
     assert vars(machine) == before
     assert conversation.last_event_id == "5-0"
     forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_agent_turns_overlap_and_route_each_result_independently(
+    fails,
+) -> None:
+    parents = [
+        ParentToolReference(
+            conversation_id="editor",
+            turn_id=f"editor-turn-{index}",
+            step_id="step",
+            tool_call_id=call_id,
+        )
+        for index, call_id in enumerate(("first", "second"), 1)
+    ]
+    conversation = reconstruct_conversation(
+        [
+            _event(
+                "1-0",
+                ConversationCreatedPayload(
+                    agent="example:writer",
+                    parent=parents[0],
+                ),
+            ),
+            _event(
+                "2-0",
+                TurnQueuedPayload(
+                    turn_id="turn-1", message="draft", parent=parents[0]
+                ),
+            ),
+            _event("3-0", _request("call-1")),
+        ],
+        conversation_id="writer",
+    )
+    queued = TurnQueuedPayload(
+        turn_id="turn-2", message="revise", parent=parents[1]
+    )
+    poke = ConversationPokePayload(conversation_id="writer", turn_id="turn-2")
+    assert conversation.prepare(queued).emissions == (poke,)
+    conversation.apply(_event("4-0", queued))
+    assert conversation.dispatch_status(poke) == "ready"
+    if not fails:
+        conversation.apply(_event("5-0", _result()))
+        assert conversation.dispatch_status(poke) == "ready"
+    terminal = (
+        TurnFailedPayload(turn_id="turn-1", error="failed")
+        if fails
+        else _completed()
+    )
+    prepared = conversation.prepare(terminal)
+    assert len(prepared.emissions) == 1
+    assert prepared.dispatch("6-0")[0].tool_call_id == "first"
+    conversation.apply(_event("6-0", terminal))
+    second = conversation.turn_state["turn-2"]
+    assert conversation.dispatch_status(poke) == "ready"
+    assert second.history == []
+    assert second.usage is None
+    assert (
+        conversation.prepare(_completed("turn-2"))
+        .dispatch("7-0")[0]
+        .tool_call_id
+        == "second"
+    )
+
+
+def test_agent_registry_survives_later_steps_and_parent_turns() -> None:
+    delegation = _delegation().model_copy(
+        update={"name": "alice", "persistent": True}
+    )
+    conversation = reconstruct_conversation(
+        [
+            _event("1-0", ConversationCreatedPayload(agent="example:editor")),
+            _event("2-0", _queued()),
+            _event("3-0", _request("call-1")),
+            _event("4-0", delegation),
+            _event("5-0", _result()),
+            _event("6-0", _request("call-2", step_id="step-2")),
+            _event("7-0", _result("call-2", step_id="step-2")),
+            _event("8-0", _completed()),
+            _event("9-0", _queued("turn-2")),
+        ],
+        conversation_id="editor",
+    )
+
+    assert conversation.agent_by_name == {"alice": "child"}
+    assert conversation.agent_spec("alice") == delegation
+    assert conversation.turn_state["turn-1"].delegations == {}
+
+
+def test_delegation_settings_ignore_identity_but_event_equality_does_not() -> None:
+    original = _delegation()
+    follow_up = original.model_copy(
+        update={
+            "turn_id": "another-parent-turn",
+            "step_id": "another-step",
+            "tool_call_id": "another-call",
+            "child_turn_id": "another-agent-turn",
+            "prompt": "revise",
+            "name": "alice",
+            "persistent": True,
+        }
+    )
+
+    assert original.has_same_settings(follow_up)
+    assert original != follow_up
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"agent_path": "example:other"},
+        {"model": "another-model"},
+        {"deps": {"key": "another-value"}},
+    ],
+)
+def test_registration_rejects_changed_agent_settings(changes) -> None:
+    original = _delegation().model_copy(
+        update={"name": "alice", "persistent": True}
+    )
+    conversation = reconstruct_conversation(
+        [
+            _event("1-0", ConversationCreatedPayload(agent="example:editor")),
+            _event("2-0", _queued()),
+            _event("3-0", _request("call-1", "call-2")),
+            _event("4-0", original),
+        ],
+        conversation_id="editor",
+    )
+    follow_up = original.model_copy(
+        update={
+            "tool_call_id": "call-2",
+            "child_turn_id": "another-agent-turn",
+            "prompt": "revise",
+            **changes,
+        }
+    )
+
+    with pytest.raises(ValueError, match="settings cannot change"):
+        conversation.prepare(follow_up)
+
+
+def test_conversation_settings_ignore_parent_routing() -> None:
+    original = ConversationCreatedPayload(agent="example:writer", model="test")
+    routed = original.model_copy(
+        update={
+            "parent": ParentToolReference(
+                conversation_id="editor",
+                turn_id="turn",
+                step_id="step",
+                tool_call_id="call",
+            )
+        }
+    )
+
+    assert original.has_same_settings(routed)
+    assert original != routed
+    assert not original.has_same_settings(
+        original.model_copy(update={"model": "another-model"})
+    )

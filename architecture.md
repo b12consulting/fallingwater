@@ -115,15 +115,17 @@ decoded events to `conversation.reconstruct_conversation`. That pure function
 returns a `Conversation` containing the configuration, conversation ID, replay
 cursor, and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
 prompt, prior-history snapshot, accumulated turn messages, usage, active tool
-request, per-call results, and child delegations. History and usage are captured
-when the queued event is replayed, not when a worker later claims its action.
+request, per-call results, and child delegations. All conversations capture
+history and usage when the queued event is replayed, including persistent
+agent sessions. Later outcomes do not change an already queued turn's snapshot.
 Snapshots share immutable `MessageHistory` prefixes. Replay appends one completed
 message chunk at a time rather than retaining a full history copy for every
 turn; the worker materializes only its selected turn's history for execution.
 
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
-conversation, and each may load the same prior history.
+conversation, and each may load the same prior history. Persistent agent
+conversations follow the same policy.
 
 ## AD5 — Conversation identity and configuration
 
@@ -313,8 +315,10 @@ payload model:
     parent tool correlation for child conversations. `model` defaults to an
     empty string; `deps` defaults to an empty object.
 - `turn.queued`
-  - Fields: `turn_id: str`, `message: str`
-  - Turn ID and user prompt.
+  - Fields: `turn_id: str`, `message: str`,
+    `parent: ParentToolReference | null`
+  - Turn ID, user prompt, and optional per-turn delegation routing. Missing
+    parent references fall back to the creation-level reference for old events.
 - `turn.tool.requested`
   - Fields: `turn_id: str`, `step_id: str`, `requests: dict[str, Any]`,
     `step_messages: list[dict[str, Any]]`, `usage: RunUsage`
@@ -322,11 +326,13 @@ payload model:
 - `turn.tool.result`
   - Fields: `turn_id: str`, `step_id: str`, `tool_call_id: str`, `result: Any`
   - One JSON-compatible tool result associated with a deferred request.
-- `turn.subagent.requested`
+- `turn.agent.requested`
   - Fields: `turn_id`, `step_id`, `tool_call_id`, `child_conversation_id`,
-    `child_turn_id`
-  - Correlation between a parent tool call and its separately queued child
-    conversation.
+    `child_turn_id`, `agent_path`, `model`, `prompt`, `deps`, `name`,
+    `persistent`
+  - Correlation and complete resolved specification for an agent turn.
+    `name` defaults to null and `persistent` to false; persistent delegations
+    require a name and establish or reuse a parent-scoped registration.
 - `turn.completed`
   - Fields: `turn_id: str`, `message: str`, `turn_messages: list[dict[str, Any]]`,
     `usage: RunUsage`
@@ -406,15 +412,18 @@ failure between them can leave saved state without its next dispatch action;
 replaying the original action does not repair every such partial write.
 
 Nested agent work uses its own conversation stream. A tool may return the
-public `SubAgentRequest` model with an agent import path, prompt, optional
-model, and JSON dependencies. The worker persists parent correlation and queues
-the child with successive writes: child `conversation.created`, child
-`turn.queued`, parent `turn.subagent.requested`, then child
-`conversation.poke`. The child stream can reconstruct the parent request once
-its queued turn is saved. The worker does not wait for the child. Child completion
+public `AgentRequest` model with a prompt, an agent import path for creation,
+optional model/JSON dependencies/name, and explicit persistence. A name-only
+persistent request continues a registered agent. The worker first persists
+parent `turn.agent.requested` with the complete resolved specification,
+then creates settings if absent and queues the agent turn. It publishes
+`conversation.poke` when that turn is ready. A recorded request can finish
+interrupted initialization when its tool action is replayed. The worker does
+not wait for the agent. Child completion
 or failure queues a parent-result action carrying the child's terminal event
 ID, which lets the parent read that event directly. Child IDs are deterministic for the
-parent tool call, so retries reuse the same child. A child failure fails its
+parent tool call; persistent names reuse conversation IDs but receive distinct
+turn IDs. A child failure fails its
 parent, and late sibling results are ignored after a terminal event. No worker
 capacity is reserved while child work runs.
 
@@ -453,7 +462,8 @@ uses an unregistered machine, allowing `Chat` to submit turns without replaying
 history or optimistically adding them to canonical state.
 
 `Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
-Worker checkpointing prepares a fact, persists it, then publishes its actions.
+Worker checkpointing refreshes state, prepares a fact, persists it with a
+cursor check, applies the saved event, then publishes its actions.
 Only applying persisted events advances replayed conversation state, so an
 optimistic write cannot displace an earlier concurrent outcome. Worker result
 saving refreshes before checking eligibility and validating, then uses
@@ -465,8 +475,11 @@ event. Worker replays through that event ID and asks `Conversation` for resume
 actions without reading later writes, so only the result completing the tool
 set emits a resume. Lua handles stream operations and opaque encoded payloads,
 not domain decisions. Dispatch publication remains a separate write.
-Child creation and queueing remain before the parent
-request write and dispatch. `Worker` routes child-result actions before
+Delegation registration and agent initialization also reuse the cursor-checked
+append mechanism. The complete parent request precedes agent creation/queueing.
+Queue and terminal checkpoints are cursor-checked so a queued turn's snapshot
+reflects the persisted order of concurrent enqueue and completion.
+`Worker` routes child-result actions before
 loading an agent because those actions use only saved stream state. The CLI
 inspection commands and web SSE feeds keep their read-only query patterns,
 including scans and multi-stream reads.
@@ -502,16 +515,17 @@ Child-outcome transitions normalize a saved child completion into a parent tool
 result, or a child failure into a parent failure. Terminal transitions emit a
 `ParentNotification` intent rather than inventing a Redis ID. The persistence
 boundary resolves it to `SubAgentResultPayload` after appending the terminal
-event, preserving direct reads of that exact child event. No stored payload or
-dispatch wire format changes.
+event, preserving direct reads of that exact child event using the existing
+dispatch routing format.
 
 `preview()` validates and emits without mutation; strict `transition()` also
 advances the machine and rejects invalid new facts. Replay uses the same transitions
 but discards emissions, retaining the first result for each call and the first
 terminal outcome. Identical current request checkpoints do not duplicate
 messages or reset results; obsolete results and late work after termination are
-ignored. Queue-time history includes canonical completed turns in terminal-event
-order. Overlapping turns never gain answers that arrived after their submission.
+ignored. Queue-time history includes canonical completed turns in
+terminal-event order. Overlapping turns never gain answers that arrived
+after submission, including turns in persistent agent conversations.
 
 Machine status is derived from the current payload: `completed` identifies
 successful completion, `failed` identifies terminal failure, and `running` means
@@ -527,3 +541,24 @@ acknowledge stale actions. Dependency/schema validation and Redis/error boundari
 remain outside the machine. These machines do not provide locks, atomic writes,
 exactly-once execution, or partial-write reconciliation; `recovery.py` remains
 unimplemented.
+
+## AD17 — Persistent named agent conversations
+
+`AgentRequest` defaults to ephemeral execution, creating a fresh
+conversation even if named. Explicit `persistent=True` resolves a request name
+or the referenced agent definition's name, then creates or reuses its
+parent-scoped session. Name-only follow-ups require an existing registration;
+explicitly conflicting agent/model/dependency settings are rejected. Parent
+delegation events hold the complete resolved specification and rebuild
+`Conversation.agent_by_name` plus its original specifications across parent
+steps and turns. Deps and answer-only results are unchanged. Persistence means
+reusable identity, not different retention.
+
+Persistent agent conversations allow overlapping turns, just like ordinary
+conversations. Every queued turn emits its own poke and captures history/usage
+from turns completed before its queued event. Callers order dependent follow-ups
+by waiting for previous results; persistence does not impose FIFO execution.
+Each turn stores its own parent reference, preventing follow-up answers from
+resolving the original creation call. Registration and setup are cursor-checked
+and replayable, but dispatch publication remains separate and ownership renewal,
+exactly-once external effects, and full cross-stream recovery are not provided.

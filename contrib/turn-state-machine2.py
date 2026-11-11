@@ -34,7 +34,7 @@ from fallingwater.models import (
     ConversationPokePayload,
     DispatchPayloadType,
     ParentToolReference,
-    SubAgentRequestedPayload,
+    AgentRequestedPayload,
     ToolCallPayload,
     ToolRequestedPayload,
     ToolResultPayload,
@@ -51,7 +51,7 @@ TurnPayload: TypeAlias = (
     TurnQueuedPayload
     | ToolRequestedPayload
     | ToolResultPayload
-    | SubAgentRequestedPayload
+    | AgentRequestedPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
@@ -130,7 +130,7 @@ class ResolveTool(Transition):
 
 class DelegateTool(Transition):
     start: ToolRequestedPayload | ToolResultPayload
-    stop: SubAgentRequestedPayload
+    stop: AgentRequestedPayload
 
     def emit(self, machine: "TurnStateMachine") -> ConversationPokePayload:
         machine.require_pending_call(
@@ -147,7 +147,7 @@ class DelegateTool(Transition):
 
 
 class ChildOutcome(Transition):
-    start: SubAgentRequestedPayload
+    start: AgentRequestedPayload
     stop: TurnCompletedPayload | TurnFailedPayload
 
     @model_validator(mode="after")
@@ -202,7 +202,7 @@ class FailTurn(Transition):
         TurnQueuedPayload
         | ToolRequestedPayload
         | ToolResultPayload
-        | SubAgentRequestedPayload
+        | AgentRequestedPayload
     )
     stop: TurnFailedPayload
 
@@ -427,7 +427,7 @@ def main() -> None:
     )
     assert_rejected(parent, result)
 
-    delegation = SubAgentRequestedPayload(
+    delegation = AgentRequestedPayload(
         turn_id="parent-turn",
         step_id="parent-step",
         tool_call_id="call-2",

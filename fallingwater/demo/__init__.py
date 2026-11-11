@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, AgentSpec, RunContext
 import requests
 
+from .editor_writers import editor
 from .jeopardy import jeopardy_contestant, jeopardy_host
 from .time import time_agent
 

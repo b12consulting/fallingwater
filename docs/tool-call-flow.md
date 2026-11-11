@@ -8,7 +8,7 @@ namespace:
   including tool requests and results.
 
 Ordinary tool calls use the conversation's existing stream. A tool that returns
-a `SubAgentRequest` creates child work as described in [subagent-flow.md](subagent-flow.md).
+a `AgentRequest` creates child work as described in [subagent-flow.md](subagent-flow.md).
 
 ## Successful tool call
 

@@ -6,9 +6,9 @@ import json
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from pydantic_ai import (
     Agent,
     CallDeferred,
@@ -16,7 +16,6 @@ from pydantic_ai import (
     DeferredToolResults,
     RunContext,
 )
-from pydantic import TypeAdapter
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.tools import Tool
@@ -47,15 +46,27 @@ _tool_hooks = Hooks()
 _tool_hooks.on.before_tool_execute()(_defer_tool_execution)
 
 
-class SubAgentRequest(BaseModel):
-    """Serializable request for a nonblocking child-agent turn."""
+class AgentRequest(BaseModel):
+    """Serializable request for a nonblocking agent turn."""
 
     model_config = ConfigDict(extra="forbid")
 
-    agent_path: str = Field(min_length=1)
+    agent_path: str | None = Field(default=None, min_length=1)
     prompt: str = Field(min_length=1)
     model: str | None = None
     deps: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1)
+    persistent: bool = False
+
+    @model_validator(mode="after")
+    def validate_session(self) -> Self:
+        if self.name is not None and not self.name.strip():
+            raise ValueError("Agent name must not be blank")
+        if self.agent_path is None and not (self.persistent and self.name):
+            raise ValueError(
+                "Provide agent_path or a name with persistent=True"
+            )
+        return self
 
 
 @dataclass(frozen=True)

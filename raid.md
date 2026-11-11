@@ -9,11 +9,10 @@ revisited. Close or revise an item when the code resolves it.
 ## Risks
 
 - **R1 — Duplicate external effects (open).** Workers skip results already
-  visible when they load a turn, and `save_tool_result` uses a cursor-checked
-  Lua append to reject concurrently saved results and avoid duplicate fan-in
-  actions from concurrent tool-result saves. Other checkpoints and external
-  execution remain unguarded, so concurrent workers can still duplicate
-  model runs, tool effects, terminal events, or other dispatch actions. A crash
+  visible when they load a turn. Cursor-checked Lua appends guard result
+  fan-in, checkpoints, persistent registrations, and agent initialization.
+  External execution remains unguarded, so concurrent workers can still
+  duplicate model runs, tool effects, or dispatch actions. A crash
   after a tool's external side effect but before saving its result can
   also run the tool again. Attached tools need their own idempotency
   strategy for effects that must occur once; D72 defines the execution
@@ -346,7 +345,7 @@ revisited. Close or revise an item when the code resolves it.
   D64).** Store each model step's full deferred request set, then
   enqueue one dispatch action per call. Save results by call ID and
   queue an agent-resume action when every requested call has a
-  result. A tool can return `SubAgentRequest(agent_path, prompt,
+  result. A tool can return `AgentRequest(agent_path, prompt,
   model?, deps?)`; Fallingwater creates a deterministic child
   conversation, records parent correlation, and queues the child turn
   without blocking the parent worker. Child completion or failure
@@ -515,7 +514,7 @@ revisited. Close or revise an item when the code resolves it.
   missing work. Recovery must reconcile incomplete turns and calls by
   their turn, step, and call IDs; the last entry of each stream is
   insufficient when turns and tool calls overlap. The current
-  `turn.subagent.requested` event stores child IDs but not the agent,
+  `turn.agent.requested` event stores child IDs but not the agent,
   model, dependencies, or prompt, so it cannot rebuild a child after a
   partial creation. D74 defines the durable child intent needed before
   relying on recovery. Replay should choose one canonical terminal outcome and
@@ -538,7 +537,7 @@ revisited. Close or revise an item when the code resolves it.
   no tool work to dispatch; the former immediate resume action is
   removed.
 - **D69 — Child conversation ID field (decided).** Name the child ID in
-  `SubAgentRequestedPayload` `child_conversation_id` rather than the
+  `AgentRequestedPayload` `child_conversation_id` rather than the
   ambiguous `conversation_id`. `ParentToolReference.conversation_id`
   continues to identify the parent. This changes the serialized field
   directly; no legacy format is supported before production. The
@@ -547,7 +546,7 @@ revisited. Close or revise an item when the code resolves it.
   no-op `recover()` in `recovery.py` with the reconciliation work listed
   in comments. No recovery command is implemented yet. Write child
   `conversation.created`, child `turn.queued`, parent
-  `turn.subagent.requested`, then child `conversation.poke`.
+  `turn.agent.requested`, then child `conversation.poke`.
   After the child turn is queued, its stream has the configuration,
   prompt, turn ID, and parent reference needed to repair later writes.
   A crash after only `conversation.created` still needs safe rollback
@@ -863,3 +862,29 @@ revisited. Close or revise an item when the code resolves it.
   Default to null for older events and failures without a captured exception.
   Tracebacks can expose source paths and exception details; they are retained
   and exposed wherever complete conversation payloads are available.
+- **D97 — Explicit persistent named agent sessions (implemented).**
+  Add optional `name` and opt-in `persistent=True` to `AgentRequest`.
+  Ephemeral requests retain fresh-conversation behavior even when named.
+  Persistent creation uses the explicit name or agent definition's name;
+  name-only follow-ups reuse the registered session and reject unknown names
+  or conflicting explicit settings. Replay parent delegation events into
+  `Conversation.agent_by_name` and resolved specifications, rather than storing
+  mutable state in Deps or making the model track raw conversation IDs.
+  Keep answer-only results and store parent routing on each queued agent turn.
+  Persistent agent turns may overlap and retain queue-time history/usage
+  snapshots. The initial automatic FIFO policy was removed to keep agents
+  aligned with ordinary conversations; callers order dependent follow-ups by
+  waiting for results. Each new turn dispatches independently.
+  Reuse cursor-checked appends for atomic registration, idempotent setup,
+  and canonical checkpoints. Replaying a saved delegation can finish
+  missing initialization without rerunning its tool, but a full reconciliation
+  scanner and ownership renewal remain unimplemented. This replaces the
+  initial raw-ID/reject-overlap proposal. The runnable
+  `fallingwater/demo/editor_writers.py` demonstrates creation and named reuse.
+  Persistence means reusable identity, not stream retention or exactly-once
+  external effects; closure/cancellation APIs remain out of scope.
+  The delegation payload is `AgentRequestedPayload`, registered under
+  `Event.TURN_AGENT_REQUESTED` with wire name `turn.agent.requested`. The old
+  request model and payload/event names have no compatibility aliases or
+  migration.
+  The former `sequential` creation setting is removed without migration.

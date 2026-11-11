@@ -74,9 +74,16 @@ absent conversation stream. Archives do not restore dispatch work.
 
 Attached synchronous and asynchronous function tools execute through independent
 per-call actions. A batch waits for all results before the agent resumes. Tools
-returning `SubAgentRequest` queue child conversations and receive child answers
+returning `AgentRequest` queue child conversations and receive child answers
 as tool results without occupying a worker while the child runs. Ordinary tool
 exceptions and child failures fail the parent turn.
+
+`AgentRequest(persistent=True)` registers an agent by explicit name or its
+definition's name in the parent conversation. Name-only follow-ups reuse its
+settings and history, without changing Deps or returning raw IDs to the model.
+Turns may overlap within a persistent session, using queue-time history snapshots.
+The editor/writers demo exercises this API. Named ephemeral requests still create
+fresh conversations and do not affect the registry.
 
 Workers reclaim eligible pending actions and skip work with saved results or
 terminal outcomes. This is not complete crash recovery or exactly-once execution.
@@ -87,16 +94,18 @@ Add incremental answer streaming and live tool or delegate progress to the
 terminal, beyond final answers and event inspection. Decide how long
 conversations and dispatch entries remain available.
 
-Repair missing dispatch actions and partial child setup after failures between
-separate writes. `recover()` is currently a placeholder; pending-action
-reclamation alone does not repair every saved event missing its next action.
-Extend real-Redis coverage to worker restart and recovery; current isolated
-Redis tests cover concurrent result saves alongside in-memory and mocked tests.
+Repair missing dispatch actions after failures between separate writes.
+Replaying a saved delegation now finishes missing agent setup idempotently,
+but `recover()` is still a placeholder; pending-action reclamation alone does
+not repair every saved event missing its next action. Extend real-Redis coverage
+to worker restart and full recovery; current isolated tests cover result
+fan-in and concurrent persistent registration.
 
 ### Decision
 
 Senders that need sequential conversation history wait for a turn to finish
-before submitting the next prompt. Decide what ends a conversation, whether
+before submitting the next prompt, including for persistent agent sessions.
+Decide what ends a conversation, whether
 ending can happen automatically, and what later submissions do.
 
 ### Done when

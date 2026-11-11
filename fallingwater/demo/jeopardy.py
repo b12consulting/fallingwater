@@ -14,7 +14,7 @@ import os
 
 from pydantic_ai import Agent, AgentSpec, RunContext
 
-from fallingwater.agent_proxy import SubAgentRequest
+from fallingwater.agent_proxy import AgentRequest
 
 
 jeopardy_contestant = Agent.from_spec(
@@ -51,7 +51,7 @@ jeopardy_host = Agent.from_spec(
 
 
 @jeopardy_host.tool
-def ask_contestant(ctx: RunContext[None], clue: str) -> SubAgentRequest:
+def ask_contestant(ctx: RunContext[None], clue: str) -> AgentRequest:
     """Request a separate contestant turn for one clue.
 
     Args:
@@ -63,7 +63,7 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> SubAgentRequest:
     model = (
         os.getenv("FW_MODEL") or f"{ctx.model.system}:{ctx.model.model_name}"
     )
-    return SubAgentRequest(
+    return AgentRequest(
         agent_path="fallingwater.demo:jeopardy_contestant",
         prompt=clue,
         model=model,

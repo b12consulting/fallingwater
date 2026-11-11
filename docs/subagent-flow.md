@@ -28,12 +28,12 @@ turn.tool.requested <-----------------------------------------------------------
                                                       conversation.poke [parent] <- Acknowledge action
 
                                                       turn.tool.call -------------> Execute parent tool
-                                                                                   Get SubAgentRequest
+                                                                                   Get AgentRequest
                                                                                    Create child work
                                                                                    (successive writes)
-                           conversation.created <------------------------------------+  |
-                           turn.queued <---------------------------------------------+
-turn.subagent.requested <----------------------------------------------------------+
+turn.agent.requested <-------------------------------------------------------------+  |
+                           conversation.created <---------------------------------------+
+                           turn.queued <------------------------------------------------+
                                                       conversation.poke [child] <----+
                                                       turn.tool.call <------------- Acknowledge action
 
@@ -64,24 +64,23 @@ the parent agent. When the model requests tools, Fallingwater records one
 and usage. Following writes dispatch one `turn.tool.call` per call.
 
 A subagent request starts as an ordinary deferred tool call. When a worker
-executes the tool and receives a `SubAgentRequest`, it writes four entries
-in order:
+executes the tool and receives a `AgentRequest` for a new, immediately
+runnable conversation, it writes four entries in order:
 
-1. Child: `conversation.created`, containing its agent, model, dependencies,
-   and a reference back to the parent tool call.
-2. Child: `turn.queued`, containing its prompt and turn ID.
-3. Parent: `turn.subagent.requested`, containing the child conversation and
-   turn IDs, together with the parent turn, step, and tool-call IDs.
+1. Parent: `turn.agent.requested`, containing correlation IDs, the complete
+   resolved agent/model/dependency/prompt specification, name, and persistence.
+2. Child: `conversation.created`, containing its settings.
+3. Child: `turn.queued`, containing its prompt, turn ID, and parent tool reference.
 4. Dispatch: `conversation.poke`, targeting the child conversation and turn.
 
 The worker acknowledges the parent tool action and becomes available for
 other work. No worker stays blocked waiting for the child. Child IDs are
-deterministic for the parent tool call. A recovered action skips a saved
-subagent request, but concurrent workers can still create duplicate child work.
-If the worker stops after only `conversation.created`, the child prompt is not
-saved and that orphan needs cleanup before the parent tool action is replayed.
-Once `turn.queued` is saved, recovery can reconstruct a missing parent request
-from the child's parent reference and queued turn, then add a missing poke.
+deterministic for the parent tool call. Registration and initialization use
+cursor-checked appends to prevent duplicate creation or queued events.
+A recovered tool action uses its saved delegation specification to finish
+missing initialization without rerunning the tool. A missing poke for a ready,
+not-yet-started turn can also be republished. Dispatch writes remain separate,
+so not every crash window is repaired and duplicate hints remain possible.
 
 Another available worker, or the same worker on a later action, runs the child.
 The child can use tools and request further subagents through the same flow.
@@ -103,6 +102,33 @@ worker saving the final result then dispatches `turn.agent.resume`.
 Otherwise, the parent waits for the remaining sibling tool or subagent
 results. A worker resumes the parent agent with those results, and the parent
 can complete or request more tools.
+
+## Persistent named agents
+
+The default `persistent=False` always creates a fresh conversation, even with
+a name. With `persistent=True`, the parent registers the explicit request name
+or the referenced agent's definition name. Parent replay reconstructs
+`Conversation.agent_by_name`; no separate registry key or Deps mutation is used.
+The registry survives parent turns and model steps. Names are parent-scoped.
+
+An existing name reuses its conversation and original settings. A request may
+omit `agent_path` when it supplies a name and `persistent=True`; unknown names
+and explicit conflicting settings fail the requesting turn. Results remain
+answer-only rather than returning raw IDs.
+
+Each delegation saves a new parent request and queues a distinct agent turn;
+only first creation saves `conversation.created`. Every new turn emits its own
+poke and may execute while other turns in that agent conversation are
+unfinished. Each turn retains the completed history and usage captured when it
+was queued; later answers do not change that snapshot. Callers must wait for an
+answer before submitting a follow-up that depends on it. This matches ordinary
+conversation behavior rather than enforcing an agent-specific ordering policy.
+
+Parent notification routing comes from each turn's queued event. The
+creation-level parent reference remains a fallback for older events. A
+persistent registration does not reserve a worker. Automatic
+ownership renewal and complete reconciliation of missing dispatch actions
+remain outside this implementation.
 
 ## Failed child turn
 
@@ -134,7 +160,7 @@ its failure also notifies its own parent through dispatch.
 
 Dispatch entries are worker actions with text routing fields. Conversation
 entries are durable events with a `type` and a compressed JSON `payload`.
-For example, `turn.subagent.requested` is a parent conversation event, while
+For example, `turn.agent.requested` is a parent conversation event, while
 `turn.subagent.result` is a dispatch action.
 
 Workers acknowledge each dispatch action after saving its checkpoint.

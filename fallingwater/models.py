@@ -21,7 +21,7 @@ class Event(StrEnum):
     TURN_QUEUED = "turn.queued"
     TURN_TOOL_REQUESTED = "turn.tool.requested"
     TURN_TOOL_RESULT = "turn.tool.result"
-    TURN_SUBAGENT_REQUESTED = "turn.subagent.requested"
+    TURN_AGENT_REQUESTED = "turn.agent.requested"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
 
@@ -138,10 +138,19 @@ class ConversationCreatedPayload(ConversationPayload):
     deps: dict[str, Any] = Field(default_factory=dict)
     parent: ParentToolReference | None = None
 
+    def has_same_settings(self, other: Self) -> bool:
+        """Compare execution settings without parent routing."""
+        return (
+            self.agent == other.agent
+            and self.model == other.model
+            and self.deps == other.deps
+        )
+
 
 class TurnQueuedPayload(ConversationPayload):
     turn_id: str
     message: str
+    parent: ParentToolReference | None = None
 
 
 class ToolRequestedPayload(ConversationPayload):
@@ -159,7 +168,7 @@ class ToolResultPayload(ConversationPayload):
     result: Any
 
 
-class SubAgentRequestedPayload(ConversationPayload):
+class AgentRequestedPayload(ConversationPayload):
     turn_id: str
     step_id: str
     tool_call_id: str
@@ -169,6 +178,22 @@ class SubAgentRequestedPayload(ConversationPayload):
     model: str
     prompt: str
     deps: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1)
+    persistent: bool = False
+
+    def has_same_settings(self, other: Self) -> bool:
+        """Compare agent settings without delegation identity or prompt."""
+        return (
+            self.agent_path == other.agent_path
+            and self.model == other.model
+            and self.deps == other.deps
+        )
+
+    @model_validator(mode="after")
+    def validate_name(self) -> Self:
+        if self.persistent and (self.name is None or not self.name.strip()):
+            raise ValueError("Persistent delegation requires an agent name")
+        return self
 
 
 class TurnCompletedPayload(ConversationPayload):
@@ -200,7 +225,7 @@ ConversationPayloadType: TypeAlias = (
     | TurnQueuedPayload
     | ToolRequestedPayload
     | ToolResultPayload
-    | SubAgentRequestedPayload
+    | AgentRequestedPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
@@ -210,7 +235,7 @@ PAYLOAD_MODELS: dict[Event, type[ConversationPayloadType]] = {
     Event.TURN_QUEUED: TurnQueuedPayload,
     Event.TURN_TOOL_REQUESTED: ToolRequestedPayload,
     Event.TURN_TOOL_RESULT: ToolResultPayload,
-    Event.TURN_SUBAGENT_REQUESTED: SubAgentRequestedPayload,
+    Event.TURN_AGENT_REQUESTED: AgentRequestedPayload,
     Event.TURN_COMPLETED: TurnCompletedPayload,
     Event.TURN_FAILED: TurnFailedPayload,
 }
@@ -237,5 +262,7 @@ class ConversationEvent(BaseModel):
     @model_validator(mode="after")
     def validate_payload_type(self) -> Self:
         if not isinstance(self.payload, PAYLOAD_MODELS[self.type]):
-            raise ValueError(f"invalid payload for conversation event {self.type}")
+            raise ValueError(
+                f"invalid payload for conversation event {self.type}"
+            )
         return self

@@ -4,7 +4,12 @@ import pytest
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.models.test import TestModel
 
-from fallingwater.agent_proxy import _execute_tool, _find_attached_tool, run
+from fallingwater.agent_proxy import (
+    AgentRequest,
+    _execute_tool,
+    _find_attached_tool,
+    run,
+)
 
 
 def test_run_returns_tool_request_without_executing_tool() -> None:
@@ -94,3 +99,23 @@ def test_unattached_tool_fails_clearly() -> None:
 
     with pytest.raises(ValueError, match="No directly attached function tool"):
         _find_attached_tool(agent, "missing")
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"name": "writer"},
+        {"persistent": True},
+        {"agent_path": "example:writer", "name": "  "},
+    ],
+)
+def test_agent_request_rejects_invalid_session_selection(fields) -> None:
+    with pytest.raises(ValueError):
+        AgentRequest(prompt="write", **fields)
+
+
+def test_agent_request_accepts_name_only_persistent_followup() -> None:
+    request = AgentRequest(name="writer", prompt="revise", persistent=True)
+
+    assert request.agent_path is None

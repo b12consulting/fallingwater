@@ -16,7 +16,7 @@ EVENT_LABELS = {
     Event.TURN_QUEUED: "User message",
     Event.TURN_TOOL_REQUESTED: "Tools requested",
     Event.TURN_TOOL_RESULT: "Tool result",
-    Event.TURN_SUBAGENT_REQUESTED: "Subagent requested",
+    Event.TURN_AGENT_REQUESTED: "Agent requested",
     Event.TURN_COMPLETED: "Assistant message",
     Event.TURN_FAILED: "Turn failed",
 }
@@ -24,7 +24,7 @@ EVENT_ICONS = {
     Event.CONVERSATION_CREATED: "file-check",
     Event.TURN_QUEUED: "person",
     Event.TURN_COMPLETED: "robot",
-    Event.TURN_SUBAGENT_REQUESTED: "arrow-bar-down",
+    Event.TURN_AGENT_REQUESTED: "arrow-bar-down",
     Event.TURN_TOOL_REQUESTED: "nut",
     Event.TURN_TOOL_RESULT: "nut-fill",
     Event.TURN_FAILED: "exclamation-square",
