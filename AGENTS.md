@@ -47,7 +47,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
 |   |-- archive.py            Conversation archive export and restore
 |   |-- catalog.py            Agent import-path loading
-|   |-- chat.py               Terminal and library conversation workflow
+|   |-- chat.py               Nonblocking terminal chat and blocking library workflows
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
 |   |-- conversation.py       Pure decisions, agent registry, and conversation replay
 |   |-- models.py             Conversation and dispatch event/payload schemas
@@ -75,12 +75,12 @@ This is the quick-start guide for agents working in this repository. See
 |       |-- editor_writers.py Editor delegating to fresh or persistent writers
 |       |-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
 |       `-- time.py           Basic assistant with a current-time tool
-`-- tests/                    Pytest tests; conftest enables Typeguard
-    |-- conftest.py           Typeguard import hook
+`-- tests/                    Pytest tests; conftest provides shared fixtures
+    |-- conftest.py           Typeguard import hook and isolated Redis fixture
     |-- test_agent_proxy.py   Single-call deferred agent checks
     |-- test_archive.py       Zstandard archive export and restore checks
     |-- test_catalog.py       Agent import-path checks
-    |-- test_chat.py          Chat submission checks
+    |-- test_chat.py          Chat submission, terminal input, and reader lifecycle checks
     |-- test_cli.py           CLI smoke checks
     |-- test_conversation.py  Dispatch and conversation stream checks
     |-- test_demo.py          Jeopardy and editor/writer request checks

@@ -61,8 +61,12 @@ and predict which definition a resumed conversation will use.
 
 The CLI can start and resume a chat by ID, including answers or failures that
 arrived while it was closed. `fw chat --msg` submits one prompt, prints its
-result, and exits. Its conversation reader group defaults to `user` and can be
-selected with `--group`. Prompts and completed answers pass through Redis, and a
+result, and exits. Interactive chat accepts overlapping prompts with
+`prompt_toolkit`, displaying incoming outcomes against their prompt's local
+submission timestamp without disrupting input. Its conversation reader group
+defaults to `user` and can be selected with `--group`. `--rewind` resets that
+group to replay retained history without rerunning work. Prompts and completed
+answers pass through Redis, and a
 worker can finish its active action before shutdown, leaving subsequent actions
 for another worker. A later turn uses completed history captured when that turn
 was queued.

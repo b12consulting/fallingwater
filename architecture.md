@@ -270,6 +270,15 @@ interrupted session. Each `Chat` starts with a reader cursor at `0`, advances
 through pending entries, and switches to `>` when the pending read is empty.
 Later reads on that instance stay on `>`.
 
+`fw chat --rewind` calls `Chat.rewind` before reading. It uses `XGROUP SETID`
+to reset only the selected conversation reader group to `0`, then starts the
+local reader at `>`. Reading redelivered entries rather than draining pending
+entries first preserves stream order and avoids printing pending outcomes
+twice during replay. It keeps the group and its pending entries, which are
+acknowledged normally as events replay. Other reader groups, worker dispatch,
+and conversation events remain unchanged; readers sharing this group share
+the reset position. Both interactive and one-shot startup use this replay.
+
 The CLI acknowledges `conversation.created`, `turn.queued`, and unrecognized
 events as it reads them. It prints each `turn.completed` or `turn.failed` event
 before acknowledging it, so a terminal exit between printing and acknowledgement
@@ -283,6 +292,36 @@ group represents one logical terminal reader. In one-shot mode, `--msg` prints
 earlier results read during startup catch-up and the new turn's result to stdout.
 Results that arrive after the new prompt is queued use the same output.
 The library's `Chat.receive` and the web feed still use independent `XREAD` calls.
+
+Interactive `Chat.run` uses synchronous `prompt_toolkit` input in the main
+thread and one background Redis reader thread, without application-level
+asyncio tasks. Submission calls `send` without waiting
+for an outcome. `patch_stdout` preserves the editable input when the reader
+prints results. On EOF or Ctrl-C, stop and join the reader without cancelling
+submitted turns; reader or submission errors terminate the input session and
+propagate rather than silently leaving a disconnected terminal open.
+Reader failures go through a thread-safe queue; invalidating the prompt wakes
+its render hook to end input, then the main thread joins the reader and raises
+the saved error.
+
+All displayed prompts use the local `HH:MM:SS` derived from their
+`turn.queued` Redis ID. Answers and failures reference that submission time,
+not their completion time. Timestamp headers appear on separate lines,
+right-aligned to the current terminal width, above the left-aligned messages.
+Queued text and its timestamp use a light-grey background; replies and failures
+retain the default background. All displayed messages use `prompt_toolkit`
+formatted output. Only timestamp alignment measures the terminal width;
+message bodies retain their original text and use natural terminal wrapping,
+without manual line breaks or full-width background padding.
+The reader records timestamps from queued events. If an outcome references an
+uncached prompt, it scans retained queued events to recover the timestamp,
+including prompts already acknowledged by this group. A history scan is only
+needed for such cache misses.
+Timestamps are presentation labels, not unique identifiers; internal routing
+continues to use turn IDs. Interactive and one-shot readers use the same output
+format without a mode flag; `--msg` still waits for one result and exits.
+`Chat.ask` and `receive` continue to return answer strings without printing.
+Overlapping submissions retain the queue-time history policy in AD4.
 
 ## AD9 — Compressed conversation payloads
 

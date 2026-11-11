@@ -272,6 +272,10 @@ class ConversationStream:
     def create_group(self, group: str, *, id: str = "0") -> None:
         _create_group(self.redis, self.name, group, id=id)
 
+    def rewind_group(self, group: str) -> None:
+        """Reset a reader group's delivery position to the stream beginning."""
+        self.redis.xgroup_setid(self.name, group, id="0")
+
     def read_group(
         self,
         group: str,

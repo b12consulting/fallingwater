@@ -3,7 +3,7 @@ Smoke checks for the installed CLI entry point.
 """
 
 from importlib.metadata import version
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from redis import Redis
@@ -127,6 +127,7 @@ def test_chat_argument_defaults_come_from_environment(
     assert args.agent == "fallingwater.demo:haiku_master"
     assert args.model == "openai:gpt-4o-mini"
     assert args.group == "user"
+    assert not args.rewind
     assert args.msg is None
     assert args.params == []
 
@@ -187,6 +188,7 @@ def test_named_chat_passes_agent_and_model_to_chat(
     )
 
     chat.run.assert_called_once_with()
+    chat.rewind.assert_not_called()
     assert chat_class.call_args.kwargs == {
         "namespace": "fw",
         "conversation_id": "test",
@@ -306,6 +308,30 @@ def test_chat_msg_sends_one_prompt_without_starting_terminal(
     chat.run_once.assert_called_once_with("Hello")
     chat.run.assert_not_called()
     assert capsys.readouterr().err.strip() == "Conversation: bright_turing"
+
+
+@pytest.mark.parametrize("message", [None, "Hello"])
+def test_chat_rewinds_selected_group_before_reading(
+    monkeypatch: pytest.MonkeyPatch, message: str | None
+) -> None:
+    connection = MagicMock()
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *args, **kwargs: connection
+    )
+    chat = MagicMock()
+    chat_class = MagicMock(return_value=chat)
+    monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
+    args = ["chat", "abc", "--group", "reader-one", "--rewind"]
+    if message is not None:
+        args.extend(["--msg", message])
+
+    assert main(args) == 0
+
+    assert chat_class.call_args.kwargs["group"] == "reader-one"
+    assert chat.method_calls == [
+        call.rewind(),
+        call.run() if message is None else call.run_once(message),
+    ]
 
 
 def test_reset_deletes_only_selected_namespace(

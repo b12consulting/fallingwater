@@ -891,3 +891,38 @@ revisited. Close or revise an item when the code resolves it.
   request model and payload/event names have no compatibility aliases or
   migration.
   The former `sequential` creation setting is removed without migration.
+- **D98 — Nonblocking terminal input and timestamped replies (implemented).**
+  Use synchronous `prompt_toolkit` input in the main thread and preserved edits
+  while one background thread reads the existing conversation consumer group.
+  Replace the initial asyncio orchestration with a stop event and joined reader
+  thread. Queue reader errors and invalidate the prompt; its render hook ends
+  input so the main thread can raise the saved error.
+  Submission does not wait for an answer; reader and submission failures
+  propagate, and EOF/Ctrl-C stops and joins the reader without cancelling
+  submitted work. Keep `Chat.ask`, `receive`, and one-shot CLI behavior blocking.
+  Label displayed prompts with local `HH:MM:SS` from their queued Redis ID
+  and reference that same timestamp on replies and failures. Put each timestamp
+  on its own line, right-aligned to the current terminal width, above the message.
+  Highlight queued text and timestamps with a light-grey background and
+  contrasting dark text. Let the terminal wrap message bodies naturally,
+  without padding rows or inserting width-dependent line breaks; measure width
+  only for timestamp alignment. Use `prompt_toolkit` formatted output so styling
+  does not leak into replies.
+  Use the same formatted output for interactive and one-shot readers without
+  an instance-wide display mode. Remember queued-event timestamps and scan
+  retained events only when a missing timestamp must be recovered, including
+  acknowledged prompts whose answers remain unread. These scans grow with
+  conversation history.
+  Timestamps can coincide and change with the local time zone; they are display
+  labels only, while routing retains turn IDs. No automatic serialization or
+  history refresh is introduced for overlapping turns.
+- **D99 — Explicit reader-group rewind (implemented).**
+  Add `fw chat --rewind` to reset the selected conversation group with
+  `XGROUP SETID` at `0`, then read at `>` rather than replaying pending entries
+  first. This displays retained conversation events once in stream order,
+  even when later outcomes remain pending under the same or another consumer.
+  Keep the existing group and pending entries; acknowledge replayed entries
+  normally. Apply rewind before interactive or one-shot startup, without
+  changing conversation data, other groups, or worker dispatch. The position
+  is shared by all readers in the selected group; independent replays should
+  use another group. This replays saved output, not agent or tool execution.
