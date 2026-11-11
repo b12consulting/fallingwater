@@ -29,7 +29,7 @@ from .models import (
 from .utils import logger, check_agent
 
 
-SESSION_PROMPT = "▸ "
+SESSION_PROMPT = "› " # "▸ "
 
 
 class Chat:
@@ -136,7 +136,13 @@ class Chat:
     @staticmethod
     def timestamp(entry_id: str) -> str:
         milliseconds = int(entry_id.split("-", 1)[0])
-        return datetime.fromtimestamp(milliseconds / 1000).strftime("%H:%M:%S")
+        timestamp = datetime.fromtimestamp(milliseconds / 1000)
+        format = (
+            "%H:%M:%S"
+            if timestamp.date() == datetime.now().date()
+            else "%Y/%m/%d %H:%M:%S"
+        )
+        return timestamp.strftime(format)
 
     @staticmethod
     def print_message(

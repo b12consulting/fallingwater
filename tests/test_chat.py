@@ -98,6 +98,29 @@ def _terminal(monkeypatch, exit_error=EOFError) -> MagicMock:
     return session
 
 
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        (datetime(2026, 11, 11, 0, 1, 2), "00:01:02"),
+        (datetime(2026, 11, 10, 23, 59, 59), "2026/11/10 23:59:59"),
+        (datetime(2026, 11, 12, 0, 0, 1), "2026/11/12 00:00:01"),
+        (datetime(2025, 11, 11, 12, 0, 0), "2025/11/11 12:00:00"),
+    ],
+)
+def test_timestamp_includes_date_only_outside_today(
+    monkeypatch, timestamp: datetime, expected: str
+) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 11, 11, 12, 0, 0)
+
+    monkeypatch.setattr("fallingwater.chat.datetime", FixedDatetime)
+    entry_id = f"{int(timestamp.timestamp() * 1000)}-7"
+
+    assert Chat.timestamp(entry_id) == expected
+
+
 def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
     redis = MagicMock(spec=Redis)
     chat = _empty_chat(redis)
