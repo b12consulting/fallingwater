@@ -116,11 +116,14 @@ ignoring supplied replacements. Initial dependencies remain in the creation
 event; supplying new dependencies on resume is rejected. Resumption does not
 append another `conversation.created` event.
 
-The interactive CLI waits for each submitted turn's outcome before accepting
-its next prompt. Independent clients can submit overlapping turns. A turn's
-history includes completed events recorded before its queued event; an earlier
-answer that arrives after submission is excluded. Clients that need sequential
-history should wait for each turn to finish before submitting the next.
+The interactive CLI accepts new prompts without waiting for earlier outcomes.
+A background reader prints answers or failures while `prompt_toolkit` preserves
+the current input. Each prompt shows its queued event's local timestamp, and
+its outcome references that same timestamp. Timestamp headers are right-aligned
+on their own lines above the messages. A turn's history includes completed
+events recorded before its queued event; an earlier answer that arrives after
+submission is excluded. Clients that need sequential history should wait for
+each turn to finish before submitting the next.
 
 ## Failed turn
 
@@ -155,7 +158,17 @@ events, printing unread answers or failures before accepting another prompt.
 It prints results before acknowledging them, so an interrupted session can
 print a result again after restart. Startup catch-up does not wait for turns
 whose results have not yet arrived. The library's `receive` and the web event
-feeds use independent `XREAD` cursors instead.
+feeds use independent `XREAD` cursors instead. The group reader remembers
+timestamps from queued events and scans saved events when an outcome's prompt
+is missing from its cache, including already acknowledged prompts. `Chat.ask`
+and the CLI's `--msg` mode remain blocking. One-shot output uses the same
+timestamp headers, message labels, and queued-message styling as interactive
+chat, while `Chat.ask` returns the answer without printing.
+
+`fw chat <id> --rewind` resets the selected reader group's delivery position
+and replays retained events in stream order, including already acknowledged
+messages. It then continues normal chat, without rerunning agents or tools.
+Readers sharing that group also share the reset; other groups are untouched.
 
 Closing the client leaves submitted work in Redis. Workers recover abandoned
 dispatch actions with `XAUTOCLAIM` after the configured idle period. A saved

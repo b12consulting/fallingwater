@@ -12,30 +12,30 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import RedisError
 
-from .agent_proxy import SubAgentRequest, execute_tool, run
-from .catalog import reify_agent
-from .conversation import Conversation, reconstruct_conversation
-from .stream import ConversationStream, DispatchStream
-from .models import (
+from fallingwater.catalog import reify_agent
+from fallingwater.agent_proxy import AgentRequest, execute_tool, run
+from fallingwater.conversation import Conversation, reconstruct_conversation
+from fallingwater.stream import ConversationStream, DispatchStream
+from fallingwater.models import (
     ConversationPokePayload,
     DispatchPayloadType,
     DispatchEvent,
     Event,
     InvalidDispatchEvent,
     SubAgentResultPayload,
-    SubAgentRequestedPayload,
+    AgentRequestedPayload,
     ToolCallPayload,
     ToolRequestedPayload,
     ToolResultPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
 )
-from .turn_state import (
+from fallingwater.turn_state import (
     TurnPayload,
     TurnStateMachine,
     requests_adapter,
 )
-from .utils import logger
+from fallingwater.utils import logger
 
 
 _json_value_adapter = TypeAdapter(Any)
@@ -122,36 +122,156 @@ class Worker:
         self,
         cnv_stream: ConversationStream,
         conversation: Conversation,
-        request: SubAgentRequestedPayload,
-        child: SubAgentRequest,
+        action: ToolCallPayload,
+        child: AgentRequest,
     ) -> None:
-        settings, queued, prepared = conversation.prepare_subagent(
-            request,
-            agent=child.agent_path,
-            model=child.model or conversation.settings.model,
-            deps=child.deps,
-            prompt=child.prompt,
+        self.refresh(cnv_stream, conversation)
+        while conversation.turn_state[action.turn_id].running:
+            request = conversation.turn_state[action.turn_id].delegations.get(
+                action.tool_call_id
+            )
+            if request is not None:
+                self.ensure_subagent(conversation, request)
+                return
+            request = self.resolve_subagent(conversation, action, child)
+            prepared = conversation.prepare(request)
+            entry_id, events = cnv_stream.append_if_current(
+                Event.TURN_AGENT_REQUESTED,
+                prepared.payload,
+                after_id=conversation.last_event_id,
+            )
+            for event in events:
+                conversation.apply(event)
+            if entry_id is not None:
+                self.ensure_subagent(conversation, request)
+                return
+
+    @staticmethod
+    def resolve_subagent(
+        conversation: Conversation,
+        action: ToolCallPayload,
+        child: AgentRequest,
+    ) -> AgentRequestedPayload:
+        name = child.name
+        if child.persistent and name is None and child.agent_path is not None:
+            name = reify_agent(child.agent_path).name
+        if child.persistent and (name is None or not name.strip()):
+            raise ValueError("Persistent agent requires a name")
+        registered = (
+            conversation.agent_by_name.get(name)
+            if child.persistent and name is not None
+            else None
         )
-        child_stream = cnv_stream.dispatch.conversation_stream(
+        if registered is not None and name is not None:
+            previous = conversation.agent_spec(name)
+            if (
+                child.agent_path is not None
+                and child.agent_path != previous.agent_path
+            ):
+                raise ValueError("Registered agent has a different agent_path")
+            if child.model is not None and child.model != previous.model:
+                raise ValueError("Registered agent has a different model")
+            if "deps" in child.model_fields_set and child.deps != previous.deps:
+                raise ValueError("Registered agent has different dependencies")
+            agent_path = previous.agent_path
+            model = previous.model
+            deps = previous.deps
+            conversation_id = registered
+        else:
+            if child.agent_path is None:
+                raise ValueError(f"No registered agent named {name!r}")
+            agent_path = child.agent_path
+            model = child.model or conversation.settings.model
+            deps = child.deps
+            conversation_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"fallingwater:{conversation.conversation_id}:{action.turn_id}:{action.step_id}:{action.tool_call_id}",
+                )
+            )
+        turn_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"fallingwater:{conversation_id}:turn:{conversation.conversation_id}:{action.turn_id}:{action.step_id}:{action.tool_call_id}",
+            )
+        )
+        return AgentRequestedPayload(
+            turn_id=action.turn_id,
+            step_id=action.step_id,
+            tool_call_id=action.tool_call_id,
+            child_conversation_id=conversation_id,
+            child_turn_id=turn_id,
+            agent_path=agent_path,
+            model=model,
+            deps=deps,
+            prompt=child.prompt,
+            name=name,
+            persistent=child.persistent,
+        )
+
+    def ensure_subagent(
+        self,
+        conversation: Conversation,
+        request: AgentRequestedPayload,
+    ) -> None:
+        settings, queued = conversation.subagent_payloads(request)
+        child_stream = self.dsp_stream.conversation_stream(
             request.child_conversation_id
         )
-        # A queued child can reconstruct its parent request during recovery.
-        child_stream.append_payload(settings)
-        child_stream.append_payload(queued)
-        entry_id = cnv_stream.append_payload(prepared.payload)
-        self.publish(cnv_stream, prepared.dispatch(entry_id))
+        events = list(child_stream.iter_events())
+        if not events:
+            child_stream.append_if_current(
+                Event.CONVERSATION_CREATED, settings, after_id="0-0"
+            )
+            events = list(child_stream.iter_events())
+        child_conversation = reconstruct_conversation(
+            events, conversation_id=request.child_conversation_id
+        )
+        saved = child_conversation.settings
+        if not saved.has_same_settings(settings):
+            raise ValueError("Agent conversation has conflicting settings")
+        while True:
+            existing = child_conversation.turn_state.get(queued.turn_id)
+            if existing is not None:
+                if existing.queued != queued:
+                    raise ValueError("Agent turn has a conflicting request")
+                poke = ConversationPokePayload(
+                    conversation_id=request.child_conversation_id,
+                    turn_id=queued.turn_id,
+                )
+                if child_conversation.dispatch_status(poke) == "ready":
+                    self.publish(child_stream, (poke,))
+                return
+            prepared = child_conversation.prepare(queued)
+            entry_id, tail = child_stream.append_if_current(
+                Event.TURN_QUEUED,
+                prepared.payload,
+                after_id=child_conversation.last_event_id,
+            )
+            for event in tail:
+                child_conversation.apply(event)
+            if entry_id is not None:
+                self.publish(child_stream, prepared.dispatch(entry_id))
+                return
 
     def run_agent_step(
         self,
         *,
-        agent: Any,
         conversation: Conversation,
         turn: TurnStateMachine,
         cnv_stream: ConversationStream,
-        deps: Any,
         prompt: str | None,
     ) -> None:
         requests = turn.requests
+        agent = reify_agent(conversation.settings.agent)
+        deps = (
+            None
+            if not conversation.settings.deps and agent.deps_type is type(None)
+            else TypeAdapter(agent.deps_type).validate_python(
+                conversation.settings.deps
+            )
+        )
+
         result = run(
             agent,
             prompt,
@@ -204,46 +324,23 @@ class Worker:
     def execute_tool_call(
         self,
         *,
-        agent: Any,
         conversation: Conversation,
         turn: TurnStateMachine,
         cnv_stream: ConversationStream,
-        deps: Any,
         action: ToolCallPayload,
     ) -> None:
         value = execute_tool(
-            agent,
+            conversation,
             turn.calls[action.tool_call_id],
-            deps=deps,
             prompt=turn.prompt,
             messages=[*turn.history, *turn.turn_messages],
-            model=conversation.settings.model or None,
             usage=turn.usage or RunUsage(),
-            conversation_id=cnv_stream.conversation_id,
         )
-        if isinstance(value, SubAgentRequest):
-            child_conversation_id = str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"fallingwater:{cnv_stream.conversation_id}:{turn.turn_id}:{action.step_id}:{action.tool_call_id}",
-                )
-            )
-            child_turn_id = str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"fallingwater:{child_conversation_id}:turn:{action.tool_call_id}",
-                )
-            )
+        if isinstance(value, AgentRequest):
             self.queue_subagent(
                 cnv_stream,
                 conversation,
-                SubAgentRequestedPayload(
-                    turn_id=turn.turn_id,
-                    step_id=action.step_id,
-                    tool_call_id=action.tool_call_id,
-                    child_conversation_id=child_conversation_id,
-                    child_turn_id=child_turn_id,
-                ),
+                action,
                 value,
             )
             return
@@ -292,6 +389,11 @@ class Worker:
         """Execute ready hints, acknowledge stale ones, and defer waiting ones."""
         payload = action.payload
         turn = conversation.turn_state[payload.turn_id]
+        if isinstance(payload, ToolCallPayload) and turn.running:
+            delegated = turn.delegations.get(payload.tool_call_id)
+            if delegated is not None and delegated.step_id == payload.step_id:
+                self.ensure_subagent(conversation, delegated)
+                return True
         match conversation.dispatch_status(payload):
             case "stale":
                 return True
@@ -302,29 +404,18 @@ class Worker:
                 cnv_stream, payload, conversation
             )
 
-        settings = conversation.settings
-        agent = reify_agent(settings.agent)
-        deps = (
-            None
-            if not settings.deps and agent.deps_type is type(None)
-            else TypeAdapter(agent.deps_type).validate_python(settings.deps)
-        )
         if isinstance(payload, ToolCallPayload):
             self.execute_tool_call(
-                agent=agent,
                 conversation=conversation,
                 turn=turn,
                 cnv_stream=cnv_stream,
-                deps=deps,
                 action=payload,
             )
         else:
             self.run_agent_step(
-                agent=agent,
                 conversation=conversation,
                 turn=turn,
                 cnv_stream=cnv_stream,
-                deps=deps,
                 prompt=(
                     turn.prompt
                     if isinstance(payload, ConversationPokePayload)

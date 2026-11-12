@@ -17,7 +17,7 @@ from fallingwater.models import (
     ConversationCreatedPayload,
     Action,
     Event,
-    SubAgentRequestedPayload,
+    AgentRequestedPayload,
     ToolRequestedPayload,
     ToolResultPayload,
     TurnCompletedPayload,
@@ -77,13 +77,16 @@ def _event(event_type: Event, **values):
             tool_call_id="call-1",
             result="tool result",
         )
-    elif event_type == Event.TURN_SUBAGENT_REQUESTED:
-        payload = SubAgentRequestedPayload(
+    elif event_type == Event.TURN_AGENT_REQUESTED:
+        payload = AgentRequestedPayload(
             turn_id="turn-1",
             step_id="step-1",
             tool_call_id="call-1",
             child_conversation_id="child",
             child_turn_id="child-turn",
+            agent_path="example:writer",
+            model="test",
+            prompt="write",
         )
     else:
         raise ValueError(event_type)
@@ -602,7 +605,7 @@ def test_dashboard_message_slot_icons(path) -> None:
         ("2-0", _event(Event.TURN_QUEUED)),
         ("3-0", _event(Event.TURN_COMPLETED)),
         ("4-0", _event(Event.TURN_FAILED)),
-        ("5-0", _event(Event.TURN_SUBAGENT_REQUESTED)),
+        ("5-0", _event(Event.TURN_AGENT_REQUESTED)),
         ("6-0", _event(Event.TURN_TOOL_REQUESTED)),
         ("7-0", _event(Event.TURN_TOOL_RESULT)),
     ]

@@ -10,6 +10,7 @@ from fallingwater.models import (
     ConversationEvent,
     Action,
     AgentResumePayload,
+    AgentRequestedPayload,
     ConversationPokePayload,
     DispatchEvent,
     SubAgentResultPayload,
@@ -70,6 +71,26 @@ def test_legacy_failed_event_without_traceback_decodes() -> None:
     assert isinstance(event.payload, TurnFailedPayload)
     assert event.payload.error == "legacy failure"
     assert event.payload.traceback is None
+
+
+def test_agent_request_event_round_trips_with_its_wire_name() -> None:
+    payload = AgentRequestedPayload(
+        turn_id="turn-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        child_conversation_id="writer",
+        child_turn_id="writer-turn",
+        agent_path="example:writer",
+        model="test",
+        prompt="draft",
+        name="alice",
+        persistent=True,
+    )
+
+    fields = encode_conversation_event(Event.TURN_AGENT_REQUESTED, payload)
+
+    assert fields["type"] == "turn.agent.requested"
+    assert decode_conversation_event("1-0", fields).payload == payload
 
 
 @pytest.mark.parametrize("entry_id", ["1-0", b"1-0"])

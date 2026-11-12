@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Conversation reader group (default: user).",
     )
     chat_parser.add_argument(
+        "--rewind",
+        action="store_true",
+        help="Reset the selected reader group and replay from the beginning.",
+    )
+    chat_parser.add_argument(
         "--msg", help="Send one message, print the response, and exit."
     )
     chat_parser.set_defaults(handler=run_chat)
@@ -335,6 +340,8 @@ def run_chat(args: argparse.Namespace) -> None:
                 "Could not open conversation %s", conversation_id, exc_info=True
             )
             raise SystemExit(f"fw chat: {error}") from None
+        if args.rewind:
+            chat.rewind()
         if args.msg is None:
             chat.run()
         else:

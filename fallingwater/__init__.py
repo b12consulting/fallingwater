@@ -2,6 +2,6 @@
 Fallingwater: Redis-backed conversations for Pydantic AI agents.
 """
 
-from .agent_proxy import SubAgentRequest
+from .agent_proxy import AgentRequest
 
-__all__ = ["SubAgentRequest"]
+__all__ = ["AgentRequest"]

@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -12,7 +12,7 @@ from .models import (
     ConversationEvent,
     DispatchPayloadType,
     ParentToolReference,
-    SubAgentRequestedPayload,
+    AgentRequestedPayload,
     SubAgentResultPayload,
     ToolResultPayload,
     TurnFailedPayload,
@@ -51,9 +51,13 @@ class Conversation(BaseModel):
     conversation_id: str
     settings: ConversationCreatedPayload
     turn_state: dict[str, TurnStateMachine] = Field(default_factory=dict)
+    agent_by_name: dict[str, str] = Field(default_factory=dict)
     last_event_id: str = "0-0"
     _history: MessageHistory = PrivateAttr(default_factory=MessageHistory)
     _latest_completed: TurnStateMachine | None = PrivateAttr(default=None)
+    _agent_specs: dict[str, AgentRequestedPayload] = PrivateAttr(
+        default_factory=dict
+    )
 
     def prepare(self, payload: TurnPayload) -> PreparedEvent:
         """Validate a proposed fact without registering or advancing a turn."""
@@ -64,9 +68,25 @@ class Conversation(BaseModel):
             turn = TurnStateMachine(
                 self.conversation_id,
                 payload.turn_id,
-                parent=self.settings.parent,
+                parent=payload.parent or self.settings.parent,
             )
+        if isinstance(payload, AgentRequestedPayload):
+            self._validate_registration(payload)
         return PreparedEvent(payload, turn.preview(payload))
+
+    def _validate_registration(self, payload: AgentRequestedPayload) -> None:
+        if payload.persistent and payload.name is not None:
+            registered = self.agent_by_name.get(payload.name)
+            if registered not in (None, payload.child_conversation_id):
+                raise ValueError(
+                    f"Agent name is already registered: {payload.name}"
+                )
+            previous = self._agent_specs.get(payload.name)
+            if previous is not None and not previous.has_same_settings(payload):
+                raise ValueError("Registered agent settings cannot change")
+
+    def agent_spec(self, name: str) -> AgentRequestedPayload:
+        return self._agent_specs[name]
 
     def dispatch_status(
         self, action: DispatchPayloadType
@@ -89,29 +109,34 @@ class Conversation(BaseModel):
 
     def prepare_subagent(
         self,
-        request: SubAgentRequestedPayload,
-        *,
-        agent: str,
-        model: str,
-        deps: dict[str, Any],
-        prompt: str,
+        request: AgentRequestedPayload,
     ) -> tuple[ConversationCreatedPayload, TurnQueuedPayload, PreparedEvent]:
         prepared = self.prepare(request)
+        settings, queued = self.subagent_payloads(request)
+        return settings, queued, prepared
+
+    def subagent_payloads(
+        self,
+        request: AgentRequestedPayload,
+    ) -> tuple[ConversationCreatedPayload, TurnQueuedPayload]:
+        parent = ParentToolReference(
+            conversation_id=self.conversation_id,
+            turn_id=request.turn_id,
+            step_id=request.step_id,
+            tool_call_id=request.tool_call_id,
+        )
         settings = ConversationCreatedPayload(
-            agent=agent,
-            model=model,
-            deps=deps,
-            parent=ParentToolReference(
-                conversation_id=self.conversation_id,
-                turn_id=request.turn_id,
-                step_id=request.step_id,
-                tool_call_id=request.tool_call_id,
-            ),
+            agent=request.agent_path,
+            model=request.model,
+            deps=request.deps,
+            parent=None if request.persistent else parent,
         )
         queued = TurnQueuedPayload(
-            turn_id=request.child_turn_id, message=prompt
+            turn_id=request.child_turn_id,
+            message=request.prompt,
+            parent=parent,
         )
-        return settings, queued, prepared
+        return settings, queued
 
     def apply(self, event: ConversationEvent) -> None:
         payload = event.payload
@@ -124,7 +149,7 @@ class Conversation(BaseModel):
             self.turn_state[payload.turn_id] = TurnStateMachine(
                 self.conversation_id,
                 payload.turn_id,
-                parent=self.settings.parent,
+                parent=payload.parent or self.settings.parent,
                 history=self._history,
                 usage=(
                     self._latest_completed.usage
@@ -134,7 +159,17 @@ class Conversation(BaseModel):
             )
         turn = self.turn_state[payload.turn_id]
         was_running = turn.running
+        if isinstance(payload, AgentRequestedPayload) and was_running:
+            self._validate_registration(payload)
         turn.replay(event)
+        if (
+            isinstance(payload, AgentRequestedPayload)
+            and payload.persistent
+            and payload.name is not None
+            and turn.delegations.get(payload.tool_call_id) == payload
+        ):
+            self.agent_by_name[payload.name] = payload.child_conversation_id
+            self._agent_specs.setdefault(payload.name, payload)
         if was_running and turn.completed:
             self._history = MessageHistory(
                 previous=self._history, messages=tuple(turn.turn_messages)

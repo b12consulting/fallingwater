@@ -9,11 +9,10 @@ revisited. Close or revise an item when the code resolves it.
 ## Risks
 
 - **R1 — Duplicate external effects (open).** Workers skip results already
-  visible when they load a turn, and `save_tool_result` uses a cursor-checked
-  Lua append to reject concurrently saved results and avoid duplicate fan-in
-  actions from concurrent tool-result saves. Other checkpoints and external
-  execution remain unguarded, so concurrent workers can still duplicate
-  model runs, tool effects, terminal events, or other dispatch actions. A crash
+  visible when they load a turn. Cursor-checked Lua appends guard result
+  fan-in, persistent registrations, and agent initialization.
+  External execution remains unguarded, so concurrent workers can still
+  duplicate model runs, tool effects, or dispatch actions. A crash
   after a tool's external side effect but before saving its result can
   also run the tool again. Attached tools need their own idempotency
   strategy for effects that must occur once; D72 defines the execution
@@ -60,8 +59,10 @@ revisited. Close or revise an item when the code resolves it.
   request, child request, or child terminal event without the action
   needed to continue it. Recovery of the original dispatch action may
   skip saved events and will not necessarily recreate the missing
-  action. Add repair or transactional writes before relying on
-  unattended recovery.
+  action. Replaying a saved delegation can now complete child setup and
+  republish a ready child's poke, but there is no general reconciliation
+  scanner. Add repair or transactional writes before relying on unattended
+  recovery.
 ## Assumptions
 
 - **A1 — Serialized prompts when required (accepted).** A sender that
@@ -95,11 +96,13 @@ revisited. Close or revise an item when the code resolves it.
 - **I5 — Dispatch stream retention (open).** `XACK` clears pending
   status but leaves the entry in `fw:dispatch`; decide when
   acknowledged entries are deleted without losing recoverable work.
-- **I6 — Redis integration coverage (open).** Unit tests exercise
-  sequential result writes and recovery with an in-memory Redis
-  implementation, but do not exercise worker restart, pending-entry
-  claims, or concurrent workers against a real Redis server. Add
-  integration coverage for those paths.
+- **I6 — Redis integration coverage (partially addressed).** Isolated
+  real-Redis tests cover concurrent result saves and duplicate calls,
+  concurrent named-agent registration through separate worker instances,
+  and reader-group rewind with pending entries owned by different consumers.
+  In-memory tests cover replay after interrupted child setup. End-to-end
+  worker restart, dispatch reclamation, ownership loss, and full partial-write
+  recovery still need real-Redis coverage.
 - **I7 — Per-tool-call dispatch (closed).** Implemented one dispatch
   entry per deferred call. Result fan-in compares unique call IDs from
   the persisted request and result events, then separately queues a
@@ -217,12 +220,12 @@ revisited. Close or revise an item when the code resolves it.
   event types as SSE event names. A packaged Jinja2 template renders
   the read-only monitoring page. Cursor-based reconnection remains
   open in I3.
-- **D18 — CLI reader recovery (amended by D60).** Use a consumer group
-  on each conversation stream for one logical terminal reader,
+- **D18 — CLI reader recovery (amended by D60, D98, and D99).** Use a
+  consumer group on each conversation stream for one logical terminal reader,
   defaulting to `user` and configurable with `--group`. Reuse the
   stable `terminal` consumer name to read pending entries after
-  restart. Acknowledge queued and other non-result events as read;
-  print completed or failed events before acknowledging them. On
+  restart. Print queued prompts and completed or failed outcomes before
+  acknowledging them; acknowledge other events as read. On
   startup, process available pending and new events without waiting
   for unfinished turns, so a new prompt may overlap an older
   turn. One-shot `--msg` mode uses the same group; independent readers
@@ -248,8 +251,8 @@ revisited. Close or revise an item when the code resolves it.
   turn state is available. Runtime failures after reconstruction write
   `turn.failed`; Redis read or write errors propagate and leave the
   action pending.
-- **D23 — Loaded conversation value (decided).**
-  `turn_state.reconstruct_turn` returns a frozen Pydantic
+- **D23 — Loaded conversation value (superseded by D83 and D87).**
+  The former `turn_state.reconstruct_turn` returned a frozen Pydantic
   `Conversation` model containing the agent path, model, next prompt,
   current turn ID, prior history, dependencies, and latest
   usage. Named fields make the loaded work explicit at the processing
@@ -346,7 +349,7 @@ revisited. Close or revise an item when the code resolves it.
   D64).** Store each model step's full deferred request set, then
   enqueue one dispatch action per call. Save results by call ID and
   queue an agent-resume action when every requested call has a
-  result. A tool can return `SubAgentRequest(agent_path, prompt,
+  result. A tool can return `AgentRequest(agent_path, prompt,
   model?, deps?)`; Fallingwater creates a deterministic child
   conversation, records parent correlation, and queues the child turn
   without blocking the parent worker. Child completion or failure
@@ -357,11 +360,11 @@ revisited. Close or revise an item when the code resolves it.
 - **D41 — Conversation-scoped client identity (superseded).** The
   optional default conversation ID is replaced by a
   `ConversationStream` bound to exactly one ID; see D44.
-- **D42 — Pure turn reconstruction (decided).** Keep Redis pagination
-  in `ConversationStream.iter_events` and fold ordered, decoded events
-  in `turn_state.reconstruct_turn`. This isolates turn-state rules
-  from Redis access; `Worker` calls the pure function with the stream
-  iterator.
+- **D42 — Pure turn reconstruction (amended by D83 and D87).** Keep Redis
+  pagination in `ConversationStream.iter_events` and fold ordered, decoded
+  events in the pure `conversation.reconstruct_conversation`. This replaces
+  the former single-turn reconstruction with all-turn replay, isolating
+  workflow rules from Redis access; `Worker` supplies the stream iterator.
 - **D43 — Worker naming (decided).** Name the Pydantic AI adapter
   `agent_proxy.py`, the dispatch consumer `Worker` in `worker.py`, and
   the thread and signal supervisor `WorkerPool` in
@@ -491,17 +494,19 @@ revisited. Close or revise an item when the code resolves it.
   and log it at debug level; log and propagate other Redis response
   errors. `Chat` and `Worker` call their stream's `create_group`
   without duplicating this policy.
-- **D64 — Direct stream writes (decided).** Remove Redis pipelines,
-  watched transactions, and the renewable agent-run lock from
-  `stream.py` and `worker.py`. Write conversation events before the
-  corresponding dispatch actions with direct `XADD` calls, and use
-  ordinary event reads for sequential result fan-in. This favors a
-  small implementation during development. Writes across streams are
-  no longer atomic: a crash or Redis error between them may strand a
-  turn or child, while concurrent workers may duplicate results,
-  terminal events, resume actions, or model runs. Revisit these
-  guarantees before depending on automatic recovery or concurrent
-  worker correctness.
+- **D64 — Direct stream writes (amended by D88 and D97).** Remove Redis
+  pipelines, watched transactions, and the renewable agent-run lock from
+  `stream.py` and `worker.py`. Write conversation events before their
+  corresponding dispatch actions. The initial implementation used direct
+  `XADD` calls and ordinary event reads for result fan-in to keep development
+  simple, allowing duplicate results and resume actions under concurrency.
+  D88 adds cursor-checked result appends; D97 extends
+  them to delegation registration and child setup. General checkpoints
+  retain prepare/append/publish without a cursor check, and publication
+  across streams remains non-atomic. Concurrent workers can still duplicate
+  terminal events, dispatch actions, or external execution, and a crash between
+  writes can strand work. Revisit these guarantees before depending on automatic
+  recovery or broader concurrent worker correctness.
 - **D65 — Stream append methods (amended by D79).** Route dispatch writes
   through `DispatchStream.append_event(action_type, payload)` and
   conversation writes through
@@ -510,18 +515,17 @@ revisited. Close or revise an item when the code resolves it.
   event encoding at their respective stream boundaries without
   changing write order or making related writes atomic.
 - **D66 — Recoverable write order and duplicate-tolerant replay
-  (proposed).** Persist enough conversation state before each
-  dependent dispatch action so a future recovery command can recreate
-  missing work. Recovery must reconcile incomplete turns and calls by
+  (partially implemented by D83 and D97).** Persist enough conversation
+  state before each dependent dispatch action so a future recovery command
+  can recreate missing work. Recovery must reconcile incomplete turns and calls by
   their turn, step, and call IDs; the last entry of each stream is
-  insufficient when turns and tool calls overlap. The current
-  `turn.subagent.requested` event stores child IDs but not the agent,
-  model, dependencies, or prompt, so it cannot rebuild a child after a
-  partial creation. D74 defines the durable child intent needed before
-  relying on recovery. Replay should choose one canonical terminal outcome and
-  one result per call, ignoring later duplicates. D83 implements canonical
-  result/terminal replay and skips identical current request checkpoints;
-  partial-write reconciliation remains unimplemented.
+  insufficient when turns and tool calls overlap. D97 implements D74's
+  complete parent-side `turn.agent.requested` intent before child setup,
+  allowing replay to finish missing creation or queueing without rerunning
+  the parent tool. D83 implements canonical result/terminal replay and
+  skips identical current request checkpoints, keeping one result per call
+  and the first terminal outcome. General partial-write reconciliation
+  remains unimplemented.
 - **D67 — Per-call request events (declined).** One conversation event
   per deferred tool call would pair each durable request with its
   dispatch action. The existing `turn.tool.requested` event already
@@ -538,29 +542,29 @@ revisited. Close or revise an item when the code resolves it.
   no tool work to dispatch; the former immediate resume action is
   removed.
 - **D69 — Child conversation ID field (decided).** Name the child ID in
-  `SubAgentRequestedPayload` `child_conversation_id` rather than the
+  `AgentRequestedPayload` `child_conversation_id` rather than the
   ambiguous `conversation_id`. `ParentToolReference.conversation_id`
   continues to identify the parent. This changes the serialized field
   directly; no legacy format is supported before production. The
   rename alone does not repair partial child creation; see D70.
-- **D70 — Recovery checklist and child write order (decided).** Add a
-  no-op `recover()` in `recovery.py` with the reconciliation work listed
-  in comments. No recovery command is implemented yet. Write child
-  `conversation.created`, child `turn.queued`, parent
-  `turn.subagent.requested`, then child `conversation.poke`.
-  After the child turn is queued, its stream has the configuration,
-  prompt, turn ID, and parent reference needed to repair later writes.
-  A crash after only `conversation.created` still needs safe rollback
-  (for example XDEL of a proven orphan) and replay of the parent tool
-  action; reordering alone cannot make every prefix forward-recoverable.
-- **D71 — Cursor-based result fan-in (decided).** Keep the last conversation
-  event ID in reconstructed turn state. When saving a tool result, combine
-  the reconstructed results with only events written after that ID, then
-  scan the short tail again after the append to include concurrent sibling
-  results. Child-result actions carry the child's terminal event ID so their
-  parent can read that event directly. This reduces repeated full-stream
-  scans; the separate reads and writes still permit duplicate results or
-  resume actions under concurrent workers.
+- **D70 — Recovery checklist and child write order (partly superseded by D97).**
+  Add a no-op `recover()` in `recovery.py` with the reconciliation work listed
+  in comments. No recovery command is implemented yet. The original order was
+  child `conversation.created`, child `turn.queued`, parent
+  `turn.agent.requested`, then child `conversation.poke`.
+  This child-first order could leave incomplete setup without a durable
+  parent intent. D74/D97 replace it with parent intent first, followed by
+  idempotent child creation, queueing, and dispatch. The no-op recovery
+  placeholder remains; replay repairs setup only when the original tool
+  action is processed again.
+- **D71 — Cursor-based result fan-in (superseded by D88).** The original
+  implementation kept the last replayed event ID, read newer results before
+  saving a result, and scanned the tail again afterward for concurrent siblings.
+  This read/append/read approach permitted duplicate results or resume actions;
+  D88 replaces it with cursor-checked appends and replay through the exact
+  successful append. Child-result actions still carry the child's terminal
+  event ID so their parent can read that event directly, avoiding full-stream
+  scans. Result persistence and dispatch publication remain separate writes.
 - **D72 — Stable tool execution identity (decided; implementation pending).**
   Provide tools with enough context to derive a scoped idempotency key from
   the namespace, conversation ID, turn ID, step ID, and tool call ID.
@@ -586,8 +590,8 @@ revisited. Close or revise an item when the code resolves it.
   outside the machine.
   The caller publishes returned payloads; the machine performs no Redis I/O.
   D83 integrates durable replay and parallel tool/child transitions.
-  Concurrent checkpoint protection remains design work.
-- **D74 — Durable parent-side child intent (decided; implementation pending).**
+  General checkpoint protection remains design work.
+- **D74 — Durable parent-side child intent (implemented by D97).**
   Persist the full child delegation intent in the parent conversation stream
   before creating or dispatching the child. Include the child conversation
   and turn IDs, agent import path, effective model, serialized dependencies,
@@ -596,9 +600,13 @@ revisited. Close or revise an item when the code resolves it.
   the same identities without rerunning the parent tool to rediscover its
   delegation result. This makes the parent intent a durable checkpoint of that
   result and avoids orphan rollback for crashes during subsequent child setup.
-  It does not cover a crash before the intent is saved. The event schema and
-  idempotent child materialization remain to be implemented; D70 describes the
-  current child-first write order, which this decision will replace.
+  It does not cover a crash before the intent is saved. `AgentRequestedPayload`
+  now holds that specification; cursor-checked registration and child
+  materialization replace D70's child-first order. Reprocessing a saved
+  delegation invokes `ensure_subagent` without executing the parent tool again,
+  validates existing settings and queued requests, and republishes a poke
+  when the child turn is ready. This is replay repair, not a general recovery
+  scanner or exactly-once dispatch guarantee.
 - **D75 — Scoped message payload names (decided).** Rename
   `ToolRequestedPayload.history` to `step_messages` and
   `TurnCompletedPayload.history` to `turn_messages`. The former holds one
@@ -705,10 +713,12 @@ revisited. Close or revise an item when the code resolves it.
   current request checkpoints without repeating messages or resetting results,
   obsolete results, and late work after a terminal outcome. Child results are
   normalized through child transitions without importing the parent's agent.
-  No Redis transaction, lock, recovery implementation, or wire-schema change
-  is introduced. D64, D71, D72, and D74 still apply. A future recovery pass
-  should enumerate enabled actions from machines and reconcile missing writes;
-  atomic checkpoint bundles or compare-and-set protection remain to be designed.
+  This integration introduced no Redis transaction, lock, recovery implementation,
+  or wire-schema change. D88 later adds cursor-checked result saving and D97
+  implements D74's durable delegation setup; D72 remains pending. A future
+  recovery pass should enumerate enabled actions from machines and reconcile
+  missing writes. General checkpoints still lack cursor checks, and cross-stream
+  checkpoint/dispatch bundles are not atomic.
 - **D84 — Transition context validation (decided and implemented).** Add
   `Transition.validate_context(machine)` and move agent-readiness, pending-call,
   repeated-step, and delegation guards out of `emit()` into that hook. Shared
@@ -863,3 +873,71 @@ revisited. Close or revise an item when the code resolves it.
   Default to null for older events and failures without a captured exception.
   Tracebacks can expose source paths and exception details; they are retained
   and exposed wherever complete conversation payloads are available.
+- **D97 — Explicit persistent named agent sessions (implemented).**
+  Add optional `name` and opt-in `persistent=True` to `AgentRequest`.
+  Ephemeral requests retain fresh-conversation behavior even when named.
+  Persistent creation uses the explicit name or agent definition's name;
+  name-only follow-ups reuse the registered session and reject unknown names
+  or conflicting explicit settings. Replay parent delegation events into
+  `Conversation.agent_by_name` and resolved specifications, rather than storing
+  mutable state in Deps or making the model track raw conversation IDs.
+  Keep answer-only results and store parent routing on each queued agent turn.
+  Persistent agent turns may overlap and retain queue-time history/usage
+  snapshots. The initial automatic FIFO policy was removed to keep agents
+  aligned with ordinary conversations; callers order dependent follow-ups by
+  waiting for results. Each new turn dispatches independently.
+  Reuse cursor-checked appends for atomic registration and idempotent setup.
+  General checkpointing retains the simpler prepare/append/publish sequence;
+  cursor-checked retry and refresh are deferred. Concurrent checkpoints can
+  append competing outcomes, with the first terminal outcome retained on replay.
+  Replaying a saved delegation can finish
+  missing initialization without rerunning its tool, but a full reconciliation
+  scanner and ownership renewal remain unimplemented. This replaces the
+  initial raw-ID/reject-overlap proposal. The runnable
+  `fallingwater/demo/editor_writers.py` demonstrates creation and named reuse.
+  Persistence means reusable identity, not stream retention or exactly-once
+  external effects; closure/cancellation APIs remain out of scope.
+  The delegation payload is `AgentRequestedPayload`, registered under
+  `Event.TURN_AGENT_REQUESTED` with wire name `turn.agent.requested`. The old
+  request model and payload/event names have no compatibility aliases or
+  migration.
+  The former `sequential` creation setting is removed without migration.
+- **D98 — Nonblocking terminal input and timestamped replies (implemented).**
+  Use synchronous `prompt_toolkit` input in the main thread and preserved edits
+  while one background thread reads the existing conversation consumer group.
+  Replace the initial asyncio orchestration with a stop event and joined reader
+  thread. Queue reader errors and invalidate the prompt; its render hook ends
+  input so the main thread can raise the saved error.
+  Submission does not wait for an answer; reader and submission failures
+  propagate, and EOF/Ctrl-C stops and joins the reader without cancelling
+  submitted work. Keep `Chat.ask`, `receive`, and one-shot CLI behavior blocking.
+  Derive submission labels from the queued Redis ID in local time. At formatting
+  time, use `HH:MM:SS` for today's date and `YYYY/MM/DD HH:MM:SS` otherwise.
+  Cache that label and reuse it for replies and failures, rather than displaying
+  completion time. Put each unstyled timestamp on its own line, right-aligned
+  to the current terminal width, without brackets or a `reply to` prefix.
+  Prefix queued message bodies with `SESSION_PROMPT` and highlight only those
+  bodies with a light-grey background and contrasting dark text; replies and
+  failures have no additional speaker label or background.
+  Let the terminal wrap message bodies naturally,
+  without padding rows or inserting width-dependent line breaks; measure width
+  only for timestamp alignment. Use `prompt_toolkit` formatted output so styling
+  does not leak into replies.
+  Use the same formatted output for interactive and one-shot readers without
+  an instance-wide display mode. Remember queued-event timestamps and scan
+  retained events only when a missing timestamp must be recovered, including
+  acknowledged prompts whose answers remain unread. These scans grow with
+  conversation history.
+  Timestamps can coincide and change with the local time zone; they are display
+  labels only, while routing retains turn IDs. No automatic serialization or
+  history refresh is introduced for overlapping turns.
+- **D99 — Explicit reader-group rewind (implemented).**
+  Add `fw chat --rewind` to reset the selected conversation group with
+  `XGROUP SETID` at `0`, then read at `>` rather than replaying pending entries
+  first. This displays retained conversation events once in stream order,
+  even when later outcomes remain pending under the same or another consumer.
+  Keep the existing group and pending entries; acknowledge replayed entries
+  normally. Apply rewind before interactive or one-shot startup, without
+  changing conversation data, other groups, or worker dispatch. The position
+  is shared by all readers in the selected group; independent replays should
+  use another group. This replays saved output, not agent or tool execution.

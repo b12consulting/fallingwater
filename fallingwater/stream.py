@@ -13,10 +13,10 @@ from .models import (
     ConversationPayloadType,
     DispatchEvent,
     DispatchPayloadType,
-    DISPATCH_PAYLOAD_MODELS,
     Event,
-    PAYLOAD_MODELS,
     InvalidDispatchEvent,
+    get_dispatch_action,
+    get_cnv_event,
 )
 from .stream_utils import (
     decode_conversation_event,
@@ -110,14 +110,8 @@ class DispatchStream:
 
     def append_payload(self, payload: DispatchPayloadType) -> str:
         """Append a supplied payload using its registered wire action type."""
-        return self.append_event(
-            next(
-                action
-                for action, model in DISPATCH_PAYLOAD_MODELS.items()
-                if isinstance(payload, model)
-            ),
-            payload,
-        )
+        action = get_dispatch_action(type(payload))
+        return self.append_event(action, payload)
 
     def read_group(
         self,
@@ -244,14 +238,8 @@ class ConversationStream:
 
     def append_payload(self, payload: ConversationPayloadType) -> str:
         """Append a supplied payload using its registered wire event type."""
-        return self.append_event(
-            next(
-                event
-                for event, model in PAYLOAD_MODELS.items()
-                if isinstance(payload, model)
-            ),
-            payload,
-        )
+        event = get_cnv_event(type(payload))
+        return self.append_event(event, payload)
 
     def append_if_current(
         self,
@@ -283,6 +271,10 @@ class ConversationStream:
 
     def create_group(self, group: str, *, id: str = "0") -> None:
         _create_group(self.redis, self.name, group, id=id)
+
+    def rewind_group(self, group: str) -> None:
+        """Reset a reader group's delivery position to the stream beginning."""
+        self.redis.xgroup_setid(self.name, group, id="0")
 
     def read_group(
         self,

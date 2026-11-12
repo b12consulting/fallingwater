@@ -6,9 +6,9 @@ import json
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from pydantic_ai import (
     Agent,
     CallDeferred,
@@ -21,6 +21,8 @@ from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.tools import Tool
 from pydantic_ai.usage import RunUsage
 
+from fallingwater.catalog import reify_agent
+from fallingwater.conversation import Conversation
 
 _deferred_tool_calls: ContextVar[
     dict[str, tuple[RunContext[Any], dict[str, Any]]] | None
@@ -44,15 +46,27 @@ _tool_hooks = Hooks()
 _tool_hooks.on.before_tool_execute()(_defer_tool_execution)
 
 
-class SubAgentRequest(BaseModel):
-    """Serializable request for a nonblocking child-agent turn."""
+class AgentRequest(BaseModel):
+    """Serializable request for a nonblocking agent turn."""
 
     model_config = ConfigDict(extra="forbid")
 
-    agent_path: str = Field(min_length=1)
+    agent_path: str | None = Field(default=None, min_length=1)
     prompt: str = Field(min_length=1)
     model: str | None = None
     deps: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1)
+    persistent: bool = False
+
+    @model_validator(mode="after")
+    def validate_session(self) -> Self:
+        if self.name is not None and not self.name.strip():
+            raise ValueError("Agent name must not be blank")
+        if self.agent_path is None and not (self.persistent and self.name):
+            raise ValueError(
+                "Provide agent_path or a name with persistent=True"
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -99,17 +113,23 @@ def _execute_tool(
 
 
 def execute_tool(
-    agent: Agent,
+    conversation: Conversation,
     call: ToolCallPart,
     *,
-    deps: Any,
     prompt: str,
     messages: Sequence[ModelMessage],
-    model: Any,
     usage: RunUsage,
-    conversation_id: str,
 ) -> Any:
     """Resolve a deferred attached tool and restore its runtime context."""
+
+    settings = conversation.settings
+    agent = reify_agent(settings.agent)
+    deps = (
+        None
+        if not settings.deps and agent.deps_type is type(None)
+        else TypeAdapter(agent.deps_type).validate_python(settings.deps)
+    )
+    model = conversation.settings.model or None
     tool = _find_attached_tool(agent, call.tool_name)
     args = call.args
     if isinstance(args, str):
@@ -126,7 +146,7 @@ def execute_tool(
             messages=list(messages),
             tool_call_id=call.tool_call_id,
             tool_name=call.tool_name,
-            conversation_id=conversation_id,
+            conversation_id=conversation.conversation_id,
         )
         if tool.takes_ctx
         else None

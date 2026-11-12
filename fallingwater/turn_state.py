@@ -27,7 +27,7 @@ from .models import (
     ConversationPokePayload,
     DispatchPayloadType,
     ParentToolReference,
-    SubAgentRequestedPayload,
+    AgentRequestedPayload,
     SubAgentResultPayload,
     ToolCallPayload,
     ToolRequestedPayload,
@@ -42,7 +42,7 @@ TurnPayload: TypeAlias = (
     TurnQueuedPayload
     | ToolRequestedPayload
     | ToolResultPayload
-    | SubAgentRequestedPayload
+    | AgentRequestedPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
@@ -50,7 +50,7 @@ ActivePayload: TypeAlias = (
     TurnQueuedPayload
     | ToolRequestedPayload
     | ToolResultPayload
-    | SubAgentRequestedPayload
+    | AgentRequestedPayload
 )
 requests_adapter = TypeAdapter(DeferredToolRequests)
 
@@ -229,7 +229,7 @@ class RequestTools(Transition):
 
 
 class ResolveTool(Transition):
-    start: ToolRequestedPayload | ToolResultPayload | SubAgentRequestedPayload
+    start: ToolRequestedPayload | ToolResultPayload | AgentRequestedPayload
     stop: ToolResultPayload
 
     def validate_context(self, machine: "TurnStateMachine") -> None:
@@ -250,8 +250,8 @@ class ResolveTool(Transition):
 
 
 class DelegateTool(Transition):
-    start: ToolRequestedPayload | ToolResultPayload | SubAgentRequestedPayload
-    stop: SubAgentRequestedPayload
+    start: ToolRequestedPayload | ToolResultPayload | AgentRequestedPayload
+    stop: AgentRequestedPayload
 
     def validate_context(self, machine: "TurnStateMachine") -> None:
         self.require_pending_call(
@@ -274,7 +274,7 @@ class DelegateTool(Transition):
 
 
 class ChildOutcome(Transition):
-    start: SubAgentRequestedPayload
+    start: AgentRequestedPayload
     stop: TurnCompletedPayload | TurnFailedPayload
 
     @model_validator(mode="after")
@@ -390,7 +390,7 @@ class TurnStateMachine:
         self.request: ToolRequestedPayload | None = None
         self.calls: dict[str, ToolCallPart] = {}
         self.results: dict[str, ToolResultPayload] = {}
-        self.delegations: dict[str, SubAgentRequestedPayload] = {}
+        self.delegations: dict[str, AgentRequestedPayload] = {}
         self.step_ids: set[str] = set()
         self.turn_messages: list[ModelMessage] = []
         self.terminal_event_id: str | None = None
@@ -526,11 +526,12 @@ class TurnStateMachine:
             self.usage = deepcopy(payload.usage)
         elif isinstance(payload, ToolResultPayload):
             self.results[payload.tool_call_id] = payload
-        elif isinstance(payload, SubAgentRequestedPayload):
+        elif isinstance(payload, AgentRequestedPayload):
             self.delegations[payload.tool_call_id] = payload
         elif isinstance(payload, TurnQueuedPayload):
             self.queued = payload
             self.turn_id = payload.turn_id
+            self.parent = payload.parent or self.parent
         elif isinstance(payload, TurnCompletedPayload):
             self.turn_messages = ModelMessagesTypeAdapter.validate_python(
                 payload.turn_messages
@@ -550,7 +551,7 @@ class TurnStateMachine:
             payload
         ):
             return
-        if isinstance(payload, SubAgentRequestedPayload) and (
+        if isinstance(payload, AgentRequestedPayload) and (
             not self.running
             or self.request is None
             or payload.step_id != self.request.step_id

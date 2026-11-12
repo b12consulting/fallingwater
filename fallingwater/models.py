@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cache
 from typing import Any, Self, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,7 +21,7 @@ class Event(StrEnum):
     TURN_QUEUED = "turn.queued"
     TURN_TOOL_REQUESTED = "turn.tool.requested"
     TURN_TOOL_RESULT = "turn.tool.result"
-    TURN_SUBAGENT_REQUESTED = "turn.subagent.requested"
+    TURN_AGENT_REQUESTED = "turn.agent.requested"
     TURN_COMPLETED = "turn.completed"
     TURN_FAILED = "turn.failed"
 
@@ -80,6 +81,17 @@ DISPATCH_PAYLOAD_MODELS: dict[Action, type[DispatchPayloadType]] = {
 }
 
 
+@cache
+def get_dispatch_action(payload_model: type[DispatchPayloadType]) -> Action:
+    """
+    Return dispatch action to send to dispatch stream based on
+    payload model
+    """
+    for action, model in DISPATCH_PAYLOAD_MODELS.items():
+        if issubclass(payload_model, model):
+            return action
+
+
 class DispatchEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -126,10 +138,19 @@ class ConversationCreatedPayload(ConversationPayload):
     deps: dict[str, Any] = Field(default_factory=dict)
     parent: ParentToolReference | None = None
 
+    def has_same_settings(self, other: Self) -> bool:
+        """Compare execution settings without parent routing."""
+        return (
+            self.agent == other.agent
+            and self.model == other.model
+            and self.deps == other.deps
+        )
+
 
 class TurnQueuedPayload(ConversationPayload):
     turn_id: str
     message: str
+    parent: ParentToolReference | None = None
 
 
 class ToolRequestedPayload(ConversationPayload):
@@ -147,12 +168,32 @@ class ToolResultPayload(ConversationPayload):
     result: Any
 
 
-class SubAgentRequestedPayload(ConversationPayload):
+class AgentRequestedPayload(ConversationPayload):
     turn_id: str
     step_id: str
     tool_call_id: str
     child_conversation_id: str
     child_turn_id: str
+    agent_path: str
+    model: str
+    prompt: str
+    deps: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1)
+    persistent: bool = False
+
+    def has_same_settings(self, other: Self) -> bool:
+        """Compare agent settings without delegation identity or prompt."""
+        return (
+            self.agent_path == other.agent_path
+            and self.model == other.model
+            and self.deps == other.deps
+        )
+
+    @model_validator(mode="after")
+    def validate_name(self) -> Self:
+        if self.persistent and (self.name is None or not self.name.strip()):
+            raise ValueError("Persistent delegation requires an agent name")
+        return self
 
 
 class TurnCompletedPayload(ConversationPayload):
@@ -184,7 +225,7 @@ ConversationPayloadType: TypeAlias = (
     | TurnQueuedPayload
     | ToolRequestedPayload
     | ToolResultPayload
-    | SubAgentRequestedPayload
+    | AgentRequestedPayload
     | TurnCompletedPayload
     | TurnFailedPayload
 )
@@ -194,10 +235,21 @@ PAYLOAD_MODELS: dict[Event, type[ConversationPayloadType]] = {
     Event.TURN_QUEUED: TurnQueuedPayload,
     Event.TURN_TOOL_REQUESTED: ToolRequestedPayload,
     Event.TURN_TOOL_RESULT: ToolResultPayload,
-    Event.TURN_SUBAGENT_REQUESTED: SubAgentRequestedPayload,
+    Event.TURN_AGENT_REQUESTED: AgentRequestedPayload,
     Event.TURN_COMPLETED: TurnCompletedPayload,
     Event.TURN_FAILED: TurnFailedPayload,
 }
+
+
+@cache
+def get_cnv_event(cnv_payload: type[ConversationPayloadType]) -> Event:
+    """
+    Return event to put in conversation stream based on given
+    payload type
+    """
+    for event, payload in PAYLOAD_MODELS.items():
+        if issubclass(cnv_payload, payload):
+            return event
 
 
 class ConversationEvent(BaseModel):
@@ -210,5 +262,7 @@ class ConversationEvent(BaseModel):
     @model_validator(mode="after")
     def validate_payload_type(self) -> Self:
         if not isinstance(self.payload, PAYLOAD_MODELS[self.type]):
-            raise ValueError(f"invalid payload for conversation event {self.type}")
+            raise ValueError(
+                f"invalid payload for conversation event {self.type}"
+            )
         return self

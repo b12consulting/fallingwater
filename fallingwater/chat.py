@@ -1,9 +1,19 @@
 """Terminal and library workflows for Redis-backed conversations."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextvars import copy_context
+from datetime import datetime
+from functools import partial
+from queue import Queue
+from shutil import get_terminal_size
+from threading import Event as ThreadEvent, Thread
 from typing import cast
 from uuid import uuid4
 
+from prompt_toolkit import PromptSession, print_formatted_text
+from prompt_toolkit.application import Application
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.patch_stdout import patch_stdout
 from redis import Redis
 
 from .stream import DispatchStream
@@ -17,6 +27,9 @@ from .models import (
     TurnQueuedPayload,
 )
 from .utils import logger, check_agent
+
+
+SESSION_PROMPT = "› " # "▸ "
 
 
 class Chat:
@@ -40,6 +53,7 @@ class Chat:
             raise ValueError("chat group must be nonempty")
         self.group = group
         self.cursor = "0"
+        self._turn_timestamps: dict[str, str] = {}
         self.conversation_id = conversation_id or str(uuid4())
         self.stream = DispatchStream(
             redis, namespace=namespace
@@ -119,21 +133,60 @@ class Chat:
         """Submit a new turn and wait for its result."""
         return self.receive(*self.send(prompt))
 
-    def _handle_group_event(self, event: ConversationEvent) -> str | None:
+    @staticmethod
+    def timestamp(entry_id: str) -> str:
+        milliseconds = int(entry_id.split("-", 1)[0])
+        timestamp = datetime.fromtimestamp(milliseconds / 1000)
+        format = (
+            "%H:%M:%S"
+            if timestamp.date() == datetime.now().date()
+            else "%Y/%m/%d %H:%M:%S"
+        )
+        return timestamp.strftime(format)
+
+    @staticmethod
+    def print_message(
+        timestamp: str, message: str, *, queued: bool = False
+    ) -> None:
+        width = get_terminal_size().columns
+        print_formatted_text(f"{timestamp:>{width}}")
+
+        style = ""
+        if queued:
+            style = "bg:#e5e5e5 #202020"
+            message = SESSION_PROMPT + message
+        print_formatted_text(FormattedText([(style, message)]))
+
+    def handle_group_event(self, event: ConversationEvent) -> str | None:
         event_type = event.type
         payload = event.payload
         turn_id = getattr(payload, "turn_id", None)
         if event_type == Event.TURN_QUEUED and turn_id is not None:
+            queued = cast(TurnQueuedPayload, payload)
+            timestamp = self.timestamp(event.entry_id)
+            self._turn_timestamps[turn_id] = timestamp
+            self.print_message(
+                timestamp, queued.message, queued=True
+            )
             self.stream.acknowledge(self.group, event.entry_id)
             return None
 
         if event_type in (Event.TURN_COMPLETED, Event.TURN_FAILED):
+            if turn_id not in self._turn_timestamps:
+                for record in self.stream.iter_events():
+                    if isinstance(record.payload, TurnQueuedPayload):
+                        self._turn_timestamps[
+                            record.payload.turn_id
+                        ] = self.timestamp(record.entry_id)
             if event_type == Event.TURN_COMPLETED:
                 completed = cast(TurnCompletedPayload, payload)
-                print(completed.message)
+                message = completed.message
             else:
                 failed = cast(TurnFailedPayload, payload)
-                print(f"Turn failed: {failed.error}")
+                message = f"Turn failed: {failed.error}"
+            self.print_message(
+                self._turn_timestamps[turn_id], message
+            )
             self.stream.acknowledge(self.group, event.entry_id)
             return turn_id
 
@@ -167,7 +220,7 @@ class Chat:
 
             # process events
             for event in entries:
-                turn_id = self._handle_group_event(event)
+                turn_id = self.handle_group_event(event)
                 if pending:
                     self.cursor = event.entry_id
                 if turn_id is not None:
@@ -180,6 +233,11 @@ class Chat:
         """Read available events before accepting another turn."""
         for _ in self.read(ffwd=True):
             pass
+
+    def rewind(self) -> None:
+        """Replay retained events from the beginning for this reader group."""
+        self.stream.rewind_group(self.group)
+        self.cursor = ">"
 
     def send_and_wait(self, prompt: str) -> None:
         turn_id, _ = self.send(prompt)
@@ -197,14 +255,71 @@ class Chat:
         self.send_and_wait(prompt)
 
     def run(self) -> None:
-        """Run a small terminal chat; Ctrl-C leaves the conversation intact."""
+        """Accept overlapping prompts while displaying results as they arrive."""
         print(f"Conversation: {self.conversation_id}")
         print(f"Model: {self.model}")
         print(f"Agent: {self.agent_path}")
         try:
+            self.run_terminal()
+        except KeyboardInterrupt:
+            pass
+        print("Bye.")
+
+    def run_terminal(self) -> None:
+        stop = ThreadEvent()
+        failures: Queue[Exception] = Queue()
+        session = PromptSession(erase_when_done=True)
+
+        session.app.before_render += partial(
+            self._check_reader, failures=failures
+        )
+
+        with patch_stdout():
             self.resume_group()
-            while True:
-                prompt = input("> ")
-                self.send_and_wait(prompt)
-        except (EOFError, KeyboardInterrupt):
-            print("\nConversation left open.")
+            # Keep prompt_toolkit's application session in the reader thread.
+            reader = Thread(
+                target=copy_context().run,
+                args=(
+                    self._read_replies,
+                    stop,
+                    failures,
+                    session.app.invalidate,
+                ),
+            )
+            reader.start()
+            try:
+                while not stop.is_set():
+                    prompt = session.prompt(SESSION_PROMPT)
+                    if not stop.is_set():
+                        self.send(prompt)
+            except (EOFError, KeyboardInterrupt):
+                pass
+            finally:
+                stop.set()
+                reader.join()
+            if not failures.empty():
+                raise failures.get()
+
+    @staticmethod
+    def _check_reader(
+        app: Application[str], failures: Queue[Exception]
+    ) -> None:
+        if not failures.empty() and not app.is_done:
+            app.exit(exception=EOFError)
+
+    def _read_replies(
+        self,
+        stop: ThreadEvent,
+        failures: Queue[Exception],
+        invalidate: Callable[[], None],
+    ) -> None:
+        try:
+            while not stop.is_set():
+                for _ in self.read():
+                    if stop.is_set():
+                        return
+        except Exception as error:
+            logger.exception("Conversation reader failed: %s", self.events)
+            failures.put(error)
+            stop.set()
+            invalidate()
