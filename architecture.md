@@ -279,10 +279,10 @@ acknowledged normally as events replay. Other reader groups, worker dispatch,
 and conversation events remain unchanged; readers sharing this group share
 the reset position. Both interactive and one-shot startup use this replay.
 
-The CLI acknowledges `conversation.created`, `turn.queued`, and unrecognized
-events as it reads them. It prints each `turn.completed` or `turn.failed` event
-before acknowledging it, so a terminal exit between printing and acknowledgement
-can cause the result to be printed again. A single `Chat.read` method reads
+The CLI prints queued prompts, completed answers, and failures before
+acknowledging their events. It acknowledges `conversation.created` and other
+non-displayed events as read. A terminal exit between printing and acknowledgement
+can cause a message to be printed again. A single `Chat.read` method reads
 pending entries for the stable consumer, then new entries. With `ffwd=True`, it
 handles all available events without blocking; normal reads wait up to one
 second for new events and return after a batch. On startup it handles
@@ -302,14 +302,18 @@ submitted turns; reader or submission errors terminate the input session and
 propagate rather than silently leaving a disconnected terminal open.
 Reader failures go through a thread-safe queue; invalidating the prompt wakes
 its render hook to end input, then the main thread joins the reader and raises
-the saved error.
+the saved error. The reader runs with a copy of the main thread's context so
+formatted output uses the same `prompt_toolkit` application session.
 
-All displayed prompts use the local `HH:MM:SS` derived from their
-`turn.queued` Redis ID. Answers and failures reference that submission time,
-not their completion time. Timestamp headers appear on separate lines,
-right-aligned to the current terminal width, above the left-aligned messages.
-Queued text and its timestamp use a light-grey background; replies and failures
-retain the default background. All displayed messages use `prompt_toolkit`
+`Chat.timestamp` derives local time from the `turn.queued` Redis ID. It returns
+`HH:MM:SS` when that date is today, otherwise `YYYY/MM/DD HH:MM:SS`, comparing
+local dates at formatting time. Answers and failures reuse the cached submission
+label, not their completion time. Timestamp headers appear on separate lines,
+right-aligned to the current terminal width, above the left-aligned messages,
+without brackets or a `reply to` prefix. Queued message bodies carry the
+`SESSION_PROMPT` marker and a light-grey background with dark text; timestamp
+headers, replies, and failures retain the default style. There are no additional
+`You:` or `Agent:` labels. All displayed messages use `prompt_toolkit`
 formatted output. Only timestamp alignment measures the terminal width;
 message bodies retain their original text and use natural terminal wrapping,
 without manual line breaks or full-width background padding.
@@ -591,6 +595,14 @@ delegation events hold the complete resolved specification and rebuild
 `Conversation.agent_by_name` plus its original specifications across parent
 steps and turns. Deps and answer-only results are unchanged. Persistence means
 reusable identity, not different retention.
+
+For a new agent conversation, an omitted or empty request model falls back to
+the parent's saved model; request dependencies default to an empty mapping,
+not the parent's dependencies. Reuse takes omitted settings from the saved
+registration and checks explicitly supplied dependencies, including an empty
+mapping, for conflicts. The editor/writers demo exposes one `ask_writer` tool
+that always supplies the writer path and `persistent=True`, creating or reusing
+the explicit name or the writer definition's default name.
 
 Persistent agent conversations allow overlapping turns, just like ordinary
 conversations. Every queued turn emits its own poke and captures history/usage

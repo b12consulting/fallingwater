@@ -13,10 +13,10 @@ This is the quick-start guide for agents working in this repository. See
 |-- README.md                 Project overview and local development
 |-- Makefile                  Compile D2 diagrams to SVGs beside their sources
 |-- architecture.md           Architecture decisions and conventions
+|-- backlog.md                Open ideas and todos, plus completed/rejected items
 |-- pyproject.toml            Package, dependencies, CLI entry point, pytest setup
 |-- compose.yaml              Local Redis service
 |-- raid.md                   Technical risks, issues, assumptions, decisions
-|-- roadmap.md                High-level features and milestone outcomes
 |-- concept/
 |   |-- pydantic-ai-agent.md   Agent specs and conversation turns
 |   `-- redis-streams.md      Redis Streams concepts and examples
@@ -90,8 +90,8 @@ This is the quick-start guide for agents working in this repository. See
     `-- test_worker.py        Dispatch and isolated Redis concurrency checks
 ```
 
-`roadmap.md` tracks high-level features and decisions visible to users or
-developers integrating the library. `raid.md` tracks technical risks,
+`backlog.md` tracks future ideas and todos under Open, and completed or rejected
+items under Closed. `raid.md` tracks technical risks,
 assumptions, issues, and implementation choices, including their outcomes and
 reasons. Add a RAID decision when a technical choice is discussed or an
 implementation must be revisited. `architecture.md` records the implemented
