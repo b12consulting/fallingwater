@@ -75,6 +75,7 @@ def _failed(turn_id: str, error: str):
 
 def _empty_chat(redis: Redis, **kwargs) -> Chat:
     redis.xrange.return_value = []
+    redis.xadd.return_value = "1-0"
     return Chat(
         ConversationClient(
             redis,

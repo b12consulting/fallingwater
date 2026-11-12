@@ -57,7 +57,7 @@ Art Nouveau architecture, comic-strip murals, and foods such as waffles, chocola
 ...
 ```
 
-Resumed chats always use their saved agent and model; `--agent` and
+Resumed chats always use their latest saved agent and model; `--agent` and
 `--model` apply only when starting a new conversation. If set, the
 `FW_AGENT` and `FW_MODEL` environment variables provide defaults for
 those options.

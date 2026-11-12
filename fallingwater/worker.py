@@ -14,7 +14,7 @@ from redis.exceptions import RedisError
 
 from fallingwater.catalog import reify_agent
 from fallingwater.agent_proxy import AgentRequest, execute_tool, run
-from fallingwater.conversation import Conversation, reconstruct_conversation
+from fallingwater.conversation import Conversation
 from fallingwater.stream import ConversationStream, DispatchStream
 from fallingwater.models import (
     ConversationPokePayload,
@@ -69,10 +69,9 @@ class Worker:
     def refresh(
         cnv_stream: ConversationStream, conversation: Conversation
     ) -> None:
-        for event in cnv_stream.iter_events(
-            after_id=conversation.last_event_id
-        ):
-            conversation.apply(event)
+        conversation.apply(
+            cnv_stream.iter_events(after_id=conversation.last_event_id)
+        )
 
     @staticmethod
     def publish(
@@ -107,9 +106,7 @@ class Worker:
                 prepared.payload,
                 after_id=conversation.last_event_id,
             )
-            for event in events:
-                # Resume the conversation state on new events
-                conversation.apply(event)
+            conversation.apply(events)
             if entry_id is not None:
                 # We received an entry, so our result was appended.
                 # Check readiness without reading later writes, which
@@ -140,8 +137,7 @@ class Worker:
                 prepared.payload,
                 after_id=conversation.last_event_id,
             )
-            for event in events:
-                conversation.apply(event)
+            conversation.apply(events)
             if entry_id is not None:
                 self.ensure_subagent(conversation, request)
                 return
@@ -224,7 +220,7 @@ class Worker:
                 Event.CONVERSATION_CREATED, settings, after_id="0-0"
             )
             events = list(child_stream.iter_events())
-        child_conversation = reconstruct_conversation(
+        child_conversation = Conversation(
             events, conversation_id=request.child_conversation_id
         )
         saved = child_conversation.settings
@@ -248,8 +244,7 @@ class Worker:
                 prepared.payload,
                 after_id=child_conversation.last_event_id,
             )
-            for event in tail:
-                child_conversation.apply(event)
+            child_conversation.apply(tail)
             if entry_id is not None:
                 self.publish(child_stream, prepared.dispatch(entry_id))
                 return
@@ -263,13 +258,12 @@ class Worker:
         prompt: str | None,
     ) -> None:
         requests = turn.requests
-        agent = reify_agent(conversation.settings.agent)
+        settings = conversation.settings
+        agent = reify_agent(settings.agent)
         deps = (
             None
-            if not conversation.settings.deps and agent.deps_type is type(None)
-            else TypeAdapter(agent.deps_type).validate_python(
-                conversation.settings.deps
-            )
+            if not settings.deps and agent.deps_type is type(None)
+            else TypeAdapter(agent.deps_type).validate_python(settings.deps)
         )
 
         result = run(
@@ -284,7 +278,7 @@ class Worker:
                 else None
             ),
             deps=deps,
-            model=conversation.settings.model or None,
+            model=settings.model or None,
             usage=turn.usage,
             conversation_id=cnv_stream.conversation_id,
         )
@@ -457,7 +451,7 @@ class Worker:
             )
             cnv_stream = self.dsp_stream.conversation_stream(conversation_id)
             try:
-                conversation = reconstruct_conversation(
+                conversation = Conversation(
                     cnv_stream.iter_events(), conversation_id=conversation_id
                 )
                 if turn_id not in conversation.turn_state:

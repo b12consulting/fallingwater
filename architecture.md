@@ -94,8 +94,8 @@ serialization includes the ID; Redis payload serialization does not.
 Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in a following write. The
 entries have different Redis stream IDs but share a turn ID. A worker uses the
-conversation ID and turn ID to load the queued prompt, fixed agent and model,
-and prior history from the conversation stream. It writes `turn.tool.requested`
+conversation ID and turn ID to load the queued prompt, latest saved agent and
+model, and prior history from the conversation stream. It writes `turn.tool.requested`
 after a run returns deferred calls and `turn.tool.result` after each tool call
 completes. It writes `turn.completed` or `turn.failed` when the turn ends. Each
 dispatch action is acknowledged after its own event checkpoint; a logical turn
@@ -114,9 +114,9 @@ the canonical delta for later turns. Deferred request payloads use
 the full conversation history.
 
 `ConversationStream.iter_events()` pages through the event stream and supplies
-decoded events to `conversation.reconstruct_conversation`. That pure function
-returns a `Conversation` containing the configuration, conversation ID, replay
-cursor, and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
+decoded events to `Conversation(events, conversation_id=...)`. Its constructor
+passes the iterable to `apply`, building the configuration, replay cursor,
+and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
 prompt, prior-history snapshot, accumulated turn messages, usage, active tool
 request, per-call results, and child delegations. All conversations capture
 history and usage when the queued event is replayed, including persistent
@@ -136,8 +136,30 @@ conversations follow the same policy.
 The CLI instead generates a readable `qualifier_scientist` ID for each new chat
 and accepts that ID as the positional argument to resume it. The first
 conversation event stores the agent import path and model.
+An empty `Conversation` is valid, with no settings and replay cursor `0-0`.
+The first event in a nonempty conversation must be a
+`ConversationCreatedPayload`. Later payloads of that same type replace
+`settings` and advance the replay cursor without resetting turns, accumulated
+history, usage, or named-agent registrations. The existing payload name and
+`conversation.created` wire type are retained; B1's rename remains deferred.
+Settings are stored privately in `_settings` and updated by `apply`.
+The read-only `settings` property returns the applied settings or raises
+`ValueError` if absent. `get_settings()` returns settings or `None` without
+raising; client initialization uses this optional lookup to detect emptiness.
+
+Workers use the latest replayed agent, model, and dependencies for each
+execution step, including turns queued before the settings change. An
+already-running invocation is not modified, but a later tool call or agent
+resumption can use newer settings. History and usage remain queue-time
+snapshots; already queued parent-routing references are unchanged. Changing
+agent definitions between steps may make outstanding tool calls incompatible,
+which fails explicitly rather than falling back to an older definition.
+
 `ConversationClient` validates the effective agent and model before creating
-a conversation or resuming one. On resume it uses the saved values, ignoring
+a conversation or resuming one. It constructs `Conversation` directly from the
+event iterator, then validates the latest settings. If the result is empty, it
+validates, persists, and applies the initial settings without a separate
+first-record query. On resume it uses the latest saved values, ignoring
 supplied agent and model options. The CLI passes its arguments to
 `ConversationClient` in both cases and defaults to `pydantic_ai:Agent` when
 `FW_AGENT` is unset; a new chat needs a model on its agent, in `FW_MODEL`, or
@@ -308,9 +330,29 @@ terminal input, rendering, formatted timestamp labels, and the reader thread.
 The CLI opens the client, optionally rewinds it, then constructs `Chat(client)`.
 The client owns settings, submission, blocking result reads, reader-group
 cursors, acknowledgement, rewind, and retained-prompt lookup. It has no terminal
-I/O. Submission uses a fresh settings-only `Conversation` for pure preparation;
-it does not expose a stale replay snapshot or share mutable turn state between
-the input and reader threads.
+I/O. On opening it reconstructs `client.conversation` from all retained events,
+independently of consumer-group delivery. `settings` exposes that conversation's
+settings rather than a separate copy. The initial replay costs time and memory
+proportional to retained history; malformed nonempty history raises an error.
+
+`client.refresh()` explicitly applies the unseen tail in stream order after
+`conversation.last_event_id`. That replay cursor is separate from the
+reader-group cursor: group delivery can omit acknowledged events, revisit older
+entries, or divide work among readers, so it never drives canonical replay.
+Submission, `read`, `receive`, and `ask` do not implicitly refresh the snapshot.
+Rewind resets delivery only; it neither resets nor replays the local state.
+The snapshot is accurate through its replay cursor, not guaranteed current
+against concurrent writers. Refresh does not publish dispatch actions or
+acknowledge events. If reading fails partway through, the error propagates and
+the next refresh starts after the last successfully applied event.
+
+A per-client lock serializes refreshes and submission preparation. Submission
+prepares through the exposed `Conversation` without optimistically applying the
+new payload; only persisted-event replay advances state. Stream writes and
+blocking delivery reads do not hold that lock. The exposed conversation is
+read-only by convention; callers inspecting it during a concurrent explicit
+refresh must coordinate access themselves. No additional synchronization thread
+is started, and Chat does not refresh state in its background delivery reader.
 
 Interactive `Chat.run` uses synchronous `prompt_toolkit` input in the main
 thread and one background Redis reader thread, without application-level
@@ -513,15 +555,24 @@ workflow payload; `append_event` retains explicit type/payload writes.
 `stream.py` has no dependency on `Conversation`, turn machines, or notification
 intents.
 
-`conversation.py` defines `Conversation`, `PreparedEvent`, and
-`reconstruct_conversation`, depending only on payload models and the pure
-turn-state module. `Conversation` exposes pure preparation, dispatch eligibility, result
+`conversation.py` defines `Conversation` and `PreparedEvent`, depending only on
+payload models and the pure turn-state module. Its iterable constructor uses
+`apply` for both settings and turn events; the separate reconstruction function
+is removed. `apply(events)` consumes an iterable lazily and in order.
+`apply_one(event)` wraps a single event and delegates to `apply`. Client and
+worker refreshes pass stream iterators directly; cursor-checked writes pass
+their returned event lists. Empty batches do nothing. If iteration or replay
+fails, the error propagates and the successfully applied prefix remains;
+the batch is not atomic.
+`Conversation` exposes pure preparation, dispatch eligibility, result
 eligibility, child-outcome normalization, and post-replay resumption decisions.
 `prepare` returns a `PreparedEvent` containing the validated payload and
 emissions without advancing state. Its `dispatch(entry_id)` binds terminal
 notification intents to the actual persisted event ID. New-turn preparation
-uses an unregistered machine, allowing `ConversationClient` to submit turns
-without replaying history or optimistically adding them to canonical state.
+uses an unregistered machine, so submission does not optimistically add the
+turn to canonical state. The client reconstructs history on opening and
+advances its snapshot only through explicit refresh; preparation itself
+requires no fresh replay.
 
 `ConversationClient` and `Worker` coordinate reads and writes. Chat determines
 when a displayed event is safe to acknowledge through the client.

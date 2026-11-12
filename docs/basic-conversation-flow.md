@@ -87,7 +87,41 @@ dispatch stream.
 `Chat(client)` adds terminal input and rendering around a `ConversationClient`.
 The client owns Redis access and reader-group operations; neither its submission
 nor its result-reading methods print output. `Conversation` remains the pure
-workflow model used to prepare a new turn, without requiring full-history replay.
+workflow model used to prepare turns and reconstruct persisted state.
+`Conversation(events, conversation_id=...)` replays the supplied iterable by
+passing it to `apply(events)`. `apply_one(event)` wraps a single event and calls
+`apply`. Both replay settings and turn events without emitting dispatch actions.
+An empty iterable is valid and leaves settings unset; preparing or applying a
+turn before settings raises an error. Batches are consumed lazily and in order;
+if an event or its source fails, the successfully applied prefix remains and
+the error propagates.
+
+## Client state snapshot
+
+Opening a client replays all retained events into `client.conversation`,
+including events already acknowledged by its reader group. To update that
+snapshot later, explicitly call `refresh()`:
+
+```python
+client = ConversationClient(redis, conversation_id="my-conversation")
+answer = client.ask("Hello")
+client.refresh()
+turns = client.conversation.turn_state
+```
+
+Submission, `read`, `receive`, and `ask` do not update this snapshot themselves.
+`refresh()` reads events after `client.conversation.last_event_id` and applies
+them in stream order without dispatching work or acknowledging deliveries.
+This replay cursor is independent of the consumer group's delivery position.
+Rewind replays output only; it does not reset or reapply the conversation state.
+The snapshot is accurate through its last replayed ID, not necessarily through
+the current stream head.
+
+Concurrent refreshes and submission preparation are serialized internally.
+Treat the exposed conversation as read-only and coordinate inspection if
+another thread explicitly refreshes it. Opening replays the entire retained
+history, increasing startup time and memory use; replay and Redis errors
+propagate rather than returning an incomplete successful snapshot.
 
 ## Later turns and resumption
 
@@ -118,9 +152,18 @@ Replay retains the first terminal outcome for each turn, so duplicate
 completions do not repeat its history.
 
 Opening `ConversationClient` with an existing conversation ID uses its saved
-agent and model, ignoring supplied replacements. Initial dependencies remain
-in the creation event; supplying new dependencies on resume is rejected.
+latest agent and model, ignoring supplied replacements. Dependencies come from
+the latest saved settings; supplying new dependencies on resume is rejected.
 Resumption does not append another `conversation.created` event.
+
+The first event must be a `ConversationCreatedPayload`, still stored under
+`conversation.created`. Additional payloads of that type are allowed and replace
+the conversation's settings without resetting turns or history. Workers use the
+latest replayed agent, model, and dependencies whenever they execute an agent
+step or tool call, even for an already queued turn. This does not change an
+invocation already in progress, queue-time message history, or a queued turn's
+parent-routing reference. Changing agents can make outstanding tool calls
+incompatible; those execution errors propagate normally.
 
 The interactive CLI accepts new prompts without waiting for earlier outcomes.
 A background reader prints answers or failures while `prompt_toolkit` preserves

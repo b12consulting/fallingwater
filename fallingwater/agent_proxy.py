@@ -129,7 +129,7 @@ def execute_tool(
         if not settings.deps and agent.deps_type is type(None)
         else TypeAdapter(agent.deps_type).validate_python(settings.deps)
     )
-    model = conversation.settings.model or None
+    model = settings.model or None
     tool = _find_attached_tool(agent, call.tool_name)
     args = call.args
     if isinstance(args, str):

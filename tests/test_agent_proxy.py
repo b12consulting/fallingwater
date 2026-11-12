@@ -1,14 +1,26 @@
 """Checks that the runner executes exactly one agent step."""
 
+from unittest.mock import Mock
+
 import pytest
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 
 from fallingwater.agent_proxy import (
     AgentRequest,
     _execute_tool,
     _find_attached_tool,
+    execute_tool,
     run,
+)
+from fallingwater.conversation import Conversation
+from fallingwater.models import (
+    ConversationCreatedPayload,
+    ConversationEvent,
+    Event,
+    TurnQueuedPayload,
 )
 
 
@@ -99,6 +111,56 @@ def test_unattached_tool_fails_clearly() -> None:
 
     with pytest.raises(ValueError, match="No directly attached function tool"):
         _find_attached_tool(agent, "missing")
+
+
+def test_execute_tool_uses_settings_changed_after_the_turn_was_queued(
+    monkeypatch,
+) -> None:
+    agent = Agent(TestModel(), deps_type=dict[str, int])
+
+    @agent.tool
+    def value(ctx: RunContext[dict[str, int]]) -> int:
+        return ctx.deps["value"]
+
+    load_agent = Mock(return_value=agent)
+    monkeypatch.setattr("fallingwater.agent_proxy.reify_agent", load_agent)
+    conversation = Conversation(
+        [
+            ConversationEvent(
+                entry_id="1-0",
+                type=Event.CONVERSATION_CREATED,
+                payload=ConversationCreatedPayload(
+                    agent="example:first", model="test", deps={"value": 1}
+                ),
+            ),
+            ConversationEvent(
+                entry_id="2-0",
+                type=Event.TURN_QUEUED,
+                payload=TurnQueuedPayload(
+                    turn_id="turn-1", message="read value"
+                ),
+            ),
+            ConversationEvent(
+                entry_id="3-0",
+                type=Event.CONVERSATION_CREATED,
+                payload=ConversationCreatedPayload(
+                    agent="example:second", model="test", deps={"value": 42}
+                ),
+            ),
+        ],
+        conversation_id="conversation",
+    )
+
+    result = execute_tool(
+        conversation,
+        ToolCallPart("value", {}, tool_call_id="call-1"),
+        prompt="read value",
+        messages=[],
+        usage=RunUsage(),
+    )
+
+    assert result == 42
+    load_agent.assert_called_once_with("example:second")
 
 
 @pytest.mark.parametrize(

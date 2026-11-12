@@ -1,6 +1,7 @@
 """Client workflows for Redis-backed conversations, without terminal I/O."""
 
 from collections.abc import Iterator, Mapping
+from threading import Lock
 from uuid import uuid4
 
 from redis import Redis
@@ -9,6 +10,7 @@ from .conversation import Conversation
 from .models import (
     ConversationCreatedPayload,
     ConversationEvent,
+    Event,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -18,7 +20,11 @@ from .utils import check_agent, logger
 
 
 class ConversationClient:
-    """Open conversations, submit turns, and read their persisted events."""
+    """Open conversations, submit turns, and read their persisted events.
+
+    ``conversation`` is reconstructed on opening. Call ``refresh`` explicitly
+    to apply later persisted events; submission and delivery do not refresh it.
+    """
 
     consumer = "terminal"
 
@@ -37,24 +43,22 @@ class ConversationClient:
             raise ValueError("conversation reader group must be nonempty")
         self.group = group
         self.cursor = "0"
+        self._state_lock = Lock()
         self._queued_event_ids: dict[str, str] = {}
         self.conversation_id = conversation_id or str(uuid4())
         self.stream = DispatchStream(
             redis, namespace=namespace
         ).conversation_stream(self.conversation_id)
 
-        records = self.stream.read_conversation_range(count=1)
-        record = records[0] if records else None
-        if record:
-            if not isinstance(record.payload, ConversationCreatedPayload):
-                raise ValueError(
-                    f"{self.stream.name} is not a Fallingwater conversation"
-                )
+        self.conversation = Conversation(
+            self.stream.iter_events(), conversation_id=self.conversation_id
+        )
+        settings = self.conversation.get_settings()
+        if settings is not None:
             if deps:
                 raise ValueError(
                     "dependencies can only be set for a new conversation"
                 )
-            settings = record.payload
         else:
             if agent_path is None:
                 raise ValueError("agent is required for a new conversation")
@@ -63,20 +67,41 @@ class ConversationClient:
             )
 
         check_agent(settings.agent, settings.model)
-        if not record:
-            self.stream.append_payload(settings)
-        self.settings = settings
+        if self.conversation.get_settings() is None:
+            entry_id = self.stream.append_payload(settings)
+            self.conversation.apply_one(
+                ConversationEvent(
+                    entry_id=entry_id,
+                    type=Event.CONVERSATION_CREATED,
+                    payload=settings,
+                )
+            )
         self.stream.create_group(self.group, id="0")
+
+    @property
+    def settings(self) -> ConversationCreatedPayload:
+        return self.conversation.settings
+
+    def refresh(self) -> None:
+        """
+        Replay the unseen stream tail without changing delivery or dispatch.
+
+        Refresh calls and submission preparation are serialized. Treat the
+        exposed conversation as read-only and coordinate inspection with any
+        concurrent refresh; its cursor is not a guarantee of current freshness.
+        """
+        with self._state_lock:
+            self.conversation.apply(
+                self.stream.iter_events(
+                    after_id=self.conversation.last_event_id
+                )
+            )
 
     def send(self, prompt: str) -> tuple[str, str]:
         """Queue a prompt as a new turn and return its ID and event cursor."""
         turn_id = str(uuid4())
         logger.debug("SEND (stream: %s): %.20s", self.stream.name, prompt)
-        # Fresh-turn preparation needs settings, not a replayed conversation.
-        conversation = Conversation(
-            conversation_id=self.conversation_id, settings=self.settings
-        )
-        prepared = conversation.prepare(
+        prepared = self.conversation.prepare(
             TurnQueuedPayload(turn_id=turn_id, message=prompt)
         )
         queued_id = self.stream.append_payload(prepared.payload)
@@ -102,7 +127,8 @@ class ConversationClient:
         return self.receive(*self.send(prompt))
 
     def read(self, *, ffwd: bool = False) -> Iterator[ConversationEvent]:
-        """Yield group events; callers acknowledge them after handling them.
+        """
+        Yield group events; callers acknowledge them after handling them.
 
         Drain available events without blocking when ffwd is true. Otherwise,
         drain pending events, then wait up to one second for a new batch.

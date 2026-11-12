@@ -360,11 +360,12 @@ revisited. Close or revise an item when the code resolves it.
 - **D41 — Conversation-scoped client identity (superseded).** The
   optional default conversation ID is replaced by a
   `ConversationStream` bound to exactly one ID; see D44.
-- **D42 — Pure turn reconstruction (amended by D83 and D87).** Keep Redis
+- **D42 — Pure turn reconstruction (amended by D83, D87, and D102).** Keep Redis
   pagination in `ConversationStream.iter_events` and fold ordered, decoded
   events in the pure `conversation.reconstruct_conversation`. This replaces
   the former single-turn reconstruction with all-turn replay, isolating
   workflow rules from Redis access; `Worker` supplies the stream iterator.
+  D102 moves that fold into the iterable `Conversation` constructor.
 - **D43 — Worker naming (decided).** Name the Pydantic AI adapter
   `agent_proxy.py`, the dispatch consumer `Worker` in `worker.py`, and
   the thread and signal supervisor `WorkerPool` in
@@ -760,7 +761,8 @@ revisited. Close or revise an item when the code resolves it.
   message prefixes, and per-turn machines in `turn_state.py`. Conversation
   depends on turn state, never the reverse; both remain I/O-free and streams
   depend on neither. Update callers and import-boundary checks without
-  compatibility re-exports or behavior changes.
+  compatibility re-exports or behavior changes. D102 later replaces
+  `reconstruct_conversation` with the iterable `Conversation` constructor.
 - **D88 — Cursor-checked tool-result append (implemented).**
   `ConversationStream.append_if_current` uses a single-key Lua script to check
   for events after the caller's replay cursor. If stale, return up to 100
@@ -957,3 +959,51 @@ revisited. Close or revise an item when the code resolves it.
   D86 and D98's client ownership without restoring the former combined
   conversation/worker-dispatch client described in D24/D25. It adds no recovery,
   atomicity, or shared mutable replay state between threads.
+- **D101 — Explicitly refreshed client conversation snapshot (implemented).**
+  Supersede D100's settings-only preparation object with a public
+  `client.conversation`, reconstructed from all retained events on opening.
+  Expose settings through that object and add `refresh()` to apply the unseen
+  stream tail after `conversation.last_event_id`. Keep replay independent of
+  reader-group delivery, pending entries, acknowledgements, and rewind.
+  Submission and result delivery do not implicitly refresh; rewind changes
+  delivery only. Replay emits no dispatch actions and acknowledges nothing.
+  Prepare submissions through the snapshot without applying proposed payloads.
+  Serialize explicit refreshes and submission preparation with one client lock,
+  without holding it during blocking delivery reads or submission writes.
+  Callers treat the exposed object as read-only and coordinate concurrent
+  inspection. No extra reader thread or continuous-freshness guarantee is added.
+  Opening now requires complete replayable retained history and incurs its
+  time/memory cost. Errors propagate; a partial failed refresh retains its
+  successfully applied prefix for retry from the replay cursor. This adds no
+  transactional snapshot, cross-stream repair, or automatic state refresh.
+- **D102 — Iterable conversation initialization and repeatable settings
+  (implemented).** Replace `reconstruct_conversation` with
+  `Conversation(events, conversation_id=...)`; its constructor simply applies
+  the iterable. Empty conversations have no settings and are valid. Nonempty
+  streams still require a settings event first; turn preparation and replay
+  fail explicitly until settings exist. `apply` accepts repeated
+  `ConversationCreatedPayload` events, replaces settings, and advances the
+  replay cursor without resetting turns, history, usage, or registrations.
+  Keep the payload, enum, and `conversation.created` wire names for this
+  refactor; B1 retains the rename work.
+  Clients construct the conversation before deciding whether creation is
+  needed, then validate the latest saved settings or persist and apply initial
+  settings. Workers and tool executors use the latest replayed agent, model,
+  and dependencies at each execution step, including already queued turns.
+  There is no per-turn configuration pinning or hot-swapping of an invocation
+  already running. Existing queue-time history/usage and parent routing remain
+  unchanged. Changing agents between steps can invalidate outstanding tools,
+  and those errors surface normally. Explicit refresh and delivery cursors
+  remain independent as in D101; the UI still cannot change settings on resume.
+  Settings are stored privately in `_settings`. The read-only `settings`
+  property raises if absent; `get_settings()` returns the settings or `None`.
+  Initialization uses optional access, while execution uses the strict property.
+- **D103 — Iterable event application with a singleton wrapper (implemented).**
+  `Conversation.apply(events)` owns ordered, lazy iteration for both initial
+  reconstruction and incremental replay. `apply_one(event)` wraps one event
+  and delegates to that same path. Constructors, refreshes, and cursor-checked
+  worker writes pass their iterables directly; initial client settings use
+  `apply_one`. Empty batches are no-ops, settings events do not end a batch,
+  and a failure preserves the successfully applied prefix and its replay
+  cursor. This removes caller-owned replay loops without introducing batch
+  atomicity, dispatch publication, or new concurrency guarantees.
