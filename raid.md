@@ -941,3 +941,19 @@ revisited. Close or revise an item when the code resolves it.
   changing conversation data, other groups, or worker dispatch. The position
   is shared by all readers in the selected group; independent replays should
   use another group. This replays saved output, not agent or tool execution.
+- **D100 — Separate conversation client and terminal UI (implemented).**
+  Extract `ConversationClient` into `conversation_client.py` for opening and
+  validating settings, turn submission, blocking results, reader-group cursors,
+  acknowledgements, rewind, and retained-prompt lookup. `Chat(client)` owns
+  terminal input, rendering, formatted timestamp caches, and the managed reader
+  thread. The CLI constructs both explicitly; library callers use the client's
+  `send`, `receive`, and `ask` rather than Chat methods.
+  Keep `Conversation` pure: prepare each fresh turn from settings without
+  loading history or retaining a misleading unreplayed conversation snapshot.
+  Group reads yield typed events without automatic acknowledgement; Chat
+  acknowledges through the client after rendering succeeds. Cache raw queued
+  event IDs in the client and formatted labels in Chat. Preserve pending-first
+  reads, rewind ordering, overlapping input, and one-shot output. This updates
+  D86 and D98's client ownership without restoring the former combined
+  conversation/worker-dispatch client described in D24/D25. It adds no recovery,
+  atomicity, or shared mutable replay state between threads.

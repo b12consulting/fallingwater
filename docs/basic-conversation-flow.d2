@@ -9,7 +9,7 @@ creation: Creation and first turn {
   dispatch: Shared dispatch
   workers: Workers
 
-  client -> conversation: Create Chat
+  client -> conversation: Create ConversationClient
   conversation.created: "conversation.created\nagent, model, deps"
   submission: "send(prompt): successive writes" {
     client -> conversation: Queue prompt

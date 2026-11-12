@@ -47,9 +47,10 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
 |   |-- archive.py            Conversation archive export and restore
 |   |-- catalog.py            Agent import-path loading
-|   |-- chat.py               Nonblocking terminal chat and blocking library workflows
+|   |-- chat.py               Terminal input, event rendering, and reader thread
 |   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
 |   |-- conversation.py       Pure decisions, agent registry, and conversation replay
+|   |-- conversation_client.py Conversation access, submission, and reader groups
 |   |-- models.py             Conversation and dispatch event/payload schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
@@ -80,9 +81,10 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_agent_proxy.py   Single-call deferred agent checks
     |-- test_archive.py       Zstandard archive export and restore checks
     |-- test_catalog.py       Agent import-path checks
-    |-- test_chat.py          Chat submission, terminal input, and reader lifecycle checks
+    |-- test_chat.py          Terminal rendering, input, and reader lifecycle checks
     |-- test_cli.py           CLI smoke checks
     |-- test_conversation.py  Dispatch and conversation stream checks
+    |-- test_conversation_client.py Client submission, results, and reader-group checks
     |-- test_demo.py          Jeopardy and editor/writer request checks
     |-- test_streams.py       Conversation event codec and naming checks
     |-- test_turn_state.py    Transition validation and all-turn reconstruction checks

@@ -1,4 +1,4 @@
-"""Checks for submitting a turn and observing compressed conversation events."""
+"""Checks for terminal display, input, and reader-thread lifecycle."""
 
 from contextlib import nullcontext
 from datetime import datetime
@@ -24,9 +24,9 @@ from redis import Redis
 from redis.exceptions import RedisError
 
 from fallingwater.chat import Chat
+from fallingwater.conversation_client import ConversationClient
 from fallingwater.models import (
     ConversationCreatedPayload,
-    Action,
     Event,
     TurnCompletedPayload,
     TurnFailedPayload,
@@ -76,11 +76,13 @@ def _failed(turn_id: str, error: str):
 def _empty_chat(redis: Redis, **kwargs) -> Chat:
     redis.xrange.return_value = []
     return Chat(
-        redis,
-        conversation_id="abc",
-        agent_path="pydantic_ai:Agent",
-        model="test",
-        **kwargs,
+        ConversationClient(
+            redis,
+            conversation_id="abc",
+            agent_path="pydantic_ai:Agent",
+            model="test",
+            **kwargs,
+        )
     )
 
 
@@ -119,169 +121,6 @@ def test_timestamp_includes_date_only_outside_today(
     entry_id = f"{int(timestamp.timestamp() * 1000)}-7"
 
     assert Chat.timestamp(entry_id) == expected
-
-
-def test_send_pokes_dispatch_with_only_conversation_and_turn_ids() -> None:
-    redis = MagicMock(spec=Redis)
-    chat = _empty_chat(redis)
-    redis.xadd.return_value = "2-0"
-
-    turn_id, cursor = chat.send("hello")
-
-    assert cursor == "2-0"
-    queued_stream, queued_fields = redis.xadd.call_args_list[-2].args
-    queued = decode_conversation_event(cursor, queued_fields)
-    assert queued_stream == "fw:conversation:abc:events"
-    assert queued.type == Event.TURN_QUEUED
-    assert queued.payload.turn_id == turn_id
-    assert queued.payload.message == "hello"
-    dispatch_stream, dispatch_fields = redis.xadd.call_args_list[-1].args
-    assert dispatch_stream == "fw:dispatch"
-    assert dispatch_fields == {
-        "type": Action.CONVERSATION_POKE,
-        "turn_id": turn_id,
-        "conversation_id": "abc",
-    }
-    redis.pipeline.assert_not_called()
-
-
-def test_send_queues_repeated_prompts_as_distinct_turns() -> None:
-    redis = MagicMock(spec=Redis)
-    chat = _empty_chat(redis)
-    redis.xadd.side_effect = ["2-0", "1-0", "3-0", "2-0"]
-
-    first_turn, first_cursor = chat.send("hello")
-    second_turn, second_cursor = chat.send("hello")
-
-    assert first_turn != second_turn
-    assert (first_cursor, second_cursor) == ("2-0", "3-0")
-    queued = [
-        decode_conversation_event(cursor, call.args[1]).payload
-        for cursor, call in zip(
-            (first_cursor, second_cursor), redis.xadd.call_args_list[-4::2]
-        )
-    ]
-    assert queued == [
-        TurnQueuedPayload(turn_id=first_turn, message="hello"),
-        TurnQueuedPayload(turn_id=second_turn, message="hello"),
-    ]
-    assert chat.conversation.turn_state == {}
-
-
-def test_send_does_not_dispatch_when_persistence_fails() -> None:
-    redis = MagicMock(spec=Redis)
-    chat = _empty_chat(redis)
-    redis.xadd.reset_mock()
-    redis.xadd.side_effect = RuntimeError("write failed")
-
-    with pytest.raises(RuntimeError, match="write failed"):
-        chat.send("hello")
-
-    assert redis.xadd.call_count == 1
-    assert redis.xadd.call_args.args[0] == "fw:conversation:abc:events"
-    assert chat.conversation.turn_state == {}
-
-
-def test_named_new_conversation_uses_supplied_agent_and_model() -> None:
-    redis = MagicMock(spec=Redis)
-    redis.xrange.return_value = []
-    chat = Chat(
-        redis,
-        conversation_id="test",
-        agent_path="pydantic_ai:Agent",
-        model="test",
-    )
-
-    assert chat.conversation_id == "test"
-    assert (chat.agent_path, chat.model) == ("pydantic_ai:Agent", "test")
-    _stream, fields = redis.xadd.call_args.args
-    created = decode_conversation_event("1-0", fields)
-    assert created.type == Event.CONVERSATION_CREATED
-    assert created.payload.agent == "pydantic_ai:Agent"
-    assert created.payload.model == "test"
-    redis.xgroup_create.assert_called_once_with(
-        "fw:conversation:test:events", "user", id="0"
-    )
-
-
-def test_receive_reads_completed_message() -> None:
-    redis = MagicMock(spec=Redis)
-    stream = "fw:conversation:abc:events"
-    redis.xread.return_value = [
-        (
-            stream,
-            [
-                ("3-0", _queued("other")),
-                ("4-0", _completed("turn-1", "answer")),
-            ],
-        )
-    ]
-    chat = _empty_chat(redis)
-
-    assert chat.receive("turn-1", "2-0") == "answer"
-    redis.xread.assert_called_once_with({stream: "2-0"}, block=1000)
-
-
-def test_invalid_agent_does_not_create_conversation() -> None:
-    redis = MagicMock(spec=Redis)
-    redis.xrange.return_value = []
-
-    with pytest.raises(ValueError, match="cannot instantiate agent"):
-        Chat(
-            redis,
-            conversation_id="test",
-            agent_path="fallingwater.demo:missing_agent",
-            model="test",
-        )
-
-    redis.xadd.assert_not_called()
-
-
-def test_new_conversation_requires_model_when_agent_has_none() -> None:
-    redis = MagicMock(spec=Redis)
-    redis.xrange.return_value = []
-
-    with pytest.raises(ValueError, match="pass --model"):
-        Chat(
-            redis,
-            conversation_id="test",
-            agent_path="fallingwater.demo:haiku_master",
-        )
-
-    redis.xadd.assert_not_called()
-
-
-def test_resume_uses_saved_agent_and_model_and_validates_them() -> None:
-    redis = MagicMock(spec=Redis)
-    redis.xrange.return_value = [("1-0", _created())]
-
-    chat = Chat(
-        redis,
-        conversation_id="test",
-        agent_path="fallingwater.demo:missing_agent",
-        model="another-model",
-    )
-
-    assert (chat.agent_path, chat.model) == ("pydantic_ai:Agent", "test")
-    redis.xadd.assert_not_called()
-
-
-def test_resume_rejects_unavailable_saved_agent() -> None:
-    redis = MagicMock(spec=Redis)
-    redis.xrange.return_value = [
-        (
-            "1-0",
-            _created(agent="fallingwater.demo:missing_agent"),
-        )
-    ]
-
-    with pytest.raises(ValueError, match="cannot instantiate agent"):
-        Chat(
-            redis,
-            conversation_id="test",
-            agent_path="pydantic_ai:Agent",
-            model="test",
-        )
 
 
 @pytest.mark.parametrize("exit_error", [EOFError, KeyboardInterrupt])
@@ -326,6 +165,36 @@ def test_cli_group_replays_unread_completed_turn(
         "terminal",
         {stream: ">"},
     )
+
+
+@pytest.mark.parametrize("print_fails", [False, True])
+def test_read_acknowledges_only_after_successful_rendering(
+    monkeypatch, print_fails
+) -> None:
+    redis = MagicMock(spec=Redis)
+    chat = _empty_chat(redis)
+    stream = chat.client.stream.name
+    redis.xreadgroup.side_effect = [
+        [(stream, [("1-0", _created()), ("2-0", _queued("turn-1"))])],
+        [],
+        [],
+    ]
+
+    def print_message(*args, **kwargs):
+        redis.xack.assert_called_once_with(stream, "user", "1-0")
+        if print_fails:
+            raise RuntimeError("display failed")
+
+    monkeypatch.setattr(chat, "print_message", print_message)
+
+    if print_fails:
+        with pytest.raises(RuntimeError, match="display failed"):
+            list(chat.read(ffwd=True))
+        redis.xack.assert_called_once_with(stream, "user", "1-0")
+    else:
+        assert list(chat.read(ffwd=True)) == []
+        assert redis.xack.call_count == 2
+        redis.xack.assert_called_with(stream, "user", "2-0")
 
 
 @pytest.mark.parametrize("columns", [40, 72])
@@ -380,7 +249,7 @@ def test_terminal_accepts_overlapping_prompts_and_labels_out_of_order_answers(
         monkeypatch.setattr(
             "fallingwater.chat.PromptSession", lambda **kwargs: session
         )
-        monkeypatch.setattr(chat, "send", MagicMock(side_effect=send))
+        monkeypatch.setattr(chat.client, "send", MagicMock(side_effect=send))
 
         def acknowledge(_stream, _group, entry_id):
             if entry_id == first_answer_id:
@@ -393,21 +262,20 @@ def test_terminal_accepts_overlapping_prompts_and_labels_out_of_order_answers(
     output = capsys.readouterr().out
     lines = output.splitlines()
     for timestamp, message in (
-        ("[11:27:38]", "You: first request"),
-        ("[11:27:42]", "You: second request"),
-        ("[reply to 11:27:42]", "Agent: second answer"),
-        ("[reply to 11:27:38]", "Agent: first answer"),
+        (Chat.timestamp(first_id), "› first request"),
+        (Chat.timestamp(second_id), "› second request"),
+        (Chat.timestamp(second_id), "second answer"),
+        (Chat.timestamp(first_id), "first answer"),
     ):
         index = next(
-            index
+            index - 1
             for index, line in enumerate(lines)
-            if line.strip() == timestamp
+            if line.rstrip() == message
         )
+        assert lines[index].strip() == timestamp
         assert len(lines[index]) == columns
         assert lines[index + 1].rstrip() == message
-    assert output.index("Agent: second answer") < output.index(
-        "Agent: first answer"
-    )
+    assert output.index("second answer") < output.index("first answer")
 
 
 def test_queued_message_background_preserves_message_text(
@@ -449,12 +317,11 @@ def test_queued_message_background_preserves_message_text(
     )
     lines = highlighted.replace("\r", "").splitlines()
     assert lines == [
-        " " * 14 + "[11:27:38]",
-        "You: " + "\u754c" * 12,
+        "› " + "\u754c" * 12,
         "",
         "last\tline",
     ]
-    assert "Agent: answer" in fragment_list_to_text(fragments)
+    assert "answer" in fragment_list_to_text(fragments)
     assert "answer" not in highlighted
 
 
@@ -488,7 +355,9 @@ def test_cli_group_replays_pending_failure(monkeypatch, capsys) -> None:
 
     chat.run()
 
-    assert "[reply to 11:27:38]\nTurn failed: boom" in capsys.readouterr().out
+    assert [line.strip() for line in capsys.readouterr().out.splitlines()][
+        3:5
+    ] == [Chat.timestamp(queued_id), "Turn failed: boom"]
     redis.xack.assert_any_call(stream, "user", failed_id)
 
 
@@ -530,7 +399,7 @@ def test_terminal_send_failure_stops_reader(monkeypatch) -> None:
     session = _terminal(monkeypatch)
     session.prompt.side_effect = ["hello", EOFError]
     monkeypatch.setattr(
-        chat, "send", MagicMock(side_effect=RedisError("send failed"))
+        chat.client, "send", MagicMock(side_effect=RedisError("send failed"))
     )
 
     with pytest.raises(RedisError, match="send failed"):
@@ -549,12 +418,12 @@ def test_terminal_does_not_wait_for_existing_or_submitted_turns(
     session = _terminal(monkeypatch)
     session.prompt.side_effect = ["hello", EOFError]
     send = MagicMock(return_value=("turn-1", "2-0"))
-    monkeypatch.setattr(chat, "send", send)
+    monkeypatch.setattr(chat.client, "send", send)
 
     chat.run()
 
     send.assert_called_once_with("hello")
-    assert "Conversation left open." in capsys.readouterr().out
+    assert "Bye." in capsys.readouterr().out
 
 
 def test_read_keeps_new_event_cursor_across_calls(capsys) -> None:
@@ -572,16 +441,16 @@ def test_read_keeps_new_event_cursor_across_calls(capsys) -> None:
         [],
     ]
 
-    assert chat.cursor == "0"
+    assert chat.client.cursor == "0"
     assert list(chat.read(ffwd=True)) == []
-    assert chat.cursor == ">"
+    assert chat.client.cursor == ">"
     assert list(chat.read()) == ["new"]
     timestamp = Chat.timestamp("2-1")
     assert [line.strip() for line in capsys.readouterr().out.splitlines()] == [
-        f"[{timestamp}]",
-        "You: hello",
-        f"[reply to {timestamp}]",
-        "Agent: answer",
+        timestamp,
+        "› hello",
+        timestamp,
+        "answer",
     ]
     assert [call.args[2] for call in redis.xreadgroup.call_args_list] == [
         {stream: "0"},
@@ -604,7 +473,7 @@ def test_rewind_replays_once_in_order_without_changing_other_groups_or_work(
     isolated_redis, capsys, pending_consumer
 ) -> None:
     redis = isolated_redis
-    chat = Chat(
+    client = ConversationClient(
         redis,
         namespace="fw-test",
         conversation_id="abc",
@@ -612,36 +481,38 @@ def test_rewind_replays_once_in_order_without_changing_other_groups_or_work(
         model="test",
         group="reader-one",
     )
-    first_turn, _ = chat.send("first prompt")
-    redis.xadd(chat.events, _completed(first_turn, "first answer"))
-    second_turn, _ = chat.send("second prompt")
-    redis.xadd(chat.events, _completed(second_turn, "second answer"))
-    acknowledged = chat.stream.read_group(
-        chat.group, chat.consumer, ">", count=3
+    chat = Chat(client)
+    stream = client.stream
+    first_turn, _ = client.send("first prompt")
+    redis.xadd(stream.name, _completed(first_turn, "first answer"))
+    second_turn, _ = client.send("second prompt")
+    redis.xadd(stream.name, _completed(second_turn, "second answer"))
+    acknowledged = stream.read_group(
+        client.group, client.consumer, ">", count=3
     )
-    chat.stream.acknowledge(
-        chat.group, *(event.entry_id for event in acknowledged)
+    stream.acknowledge(
+        client.group, *(event.entry_id for event in acknowledged)
     )
-    pending = chat.stream.read_group(chat.group, pending_consumer, ">")
+    pending = stream.read_group(client.group, pending_consumer, ">")
     assert len(pending) == 2
-    chat.stream.create_group("other-group", id="$")
-    dispatch = chat.stream.dispatch
+    stream.create_group("other-group", id="$")
+    dispatch = stream.dispatch
     dispatch.create_group("workers", mkstream=True)
     dispatch.read_group("workers", "worker-one", ">", count=1)
-    events_before = redis.xrange(chat.events)
+    events_before = redis.xrange(stream.name)
     dispatch_before = redis.xrange(dispatch.name)
     workers_before = redis.xinfo_groups(dispatch.name)
     other_before = next(
         group
-        for group in redis.xinfo_groups(chat.events)
+        for group in redis.xinfo_groups(stream.name)
         if group["name"] == b"other-group"
     )
 
     for _ in range(2):
-        chat.rewind()
+        client.rewind()
         selected = next(
             group
-            for group in redis.xinfo_groups(chat.events)
+            for group in redis.xinfo_groups(stream.name)
             if group["name"] == b"reader-one"
         )
         assert selected["last-delivered-id"] == b"0-0"
@@ -650,38 +521,24 @@ def test_rewind_replays_once_in_order_without_changing_other_groups_or_work(
 
         lines = capsys.readouterr().out.splitlines()
         assert len(lines) == 8
-        assert [
-            line for line in lines if line.startswith(("You:", "Agent:"))
-        ] == [
-            "You: first prompt",
-            "Agent: first answer",
-            "You: second prompt",
-            "Agent: second answer",
+        assert lines[1::2] == [
+            "› first prompt",
+            "first answer",
+            "› second prompt",
+            "second answer",
         ]
-        assert redis.xpending(chat.events, chat.group)["pending"] == 0
-        assert redis.xrange(chat.events) == events_before
+        assert redis.xpending(stream.name, client.group)["pending"] == 0
+        assert redis.xrange(stream.name) == events_before
         assert redis.xrange(dispatch.name) == dispatch_before
         assert redis.xinfo_groups(dispatch.name) == workers_before
         assert (
             next(
                 group
-                for group in redis.xinfo_groups(chat.events)
+                for group in redis.xinfo_groups(stream.name)
                 if group["name"] == b"other-group"
             )
             == other_before
         )
-
-
-def test_rewind_failure_does_not_change_local_reader_cursor() -> None:
-    redis = MagicMock(spec=Redis)
-    chat = _empty_chat(redis)
-    chat.cursor = "123-0"
-    redis.xgroup_setid.side_effect = RedisError("rewind failed")
-
-    with pytest.raises(RedisError, match="rewind failed"):
-        chat.rewind()
-
-    assert chat.cursor == "123-0"
 
 
 def test_run_once_prints_its_response_and_acknowledges_it(
@@ -705,17 +562,17 @@ def test_run_once_prints_its_response_and_acknowledges_it(
     ]
     chat = _empty_chat(redis)
     send = MagicMock(return_value=("turn-1", "2-0"))
-    monkeypatch.setattr(chat, "send", send)
+    monkeypatch.setattr(chat.client, "send", send)
 
     chat.run_once("Hello")
 
     send.assert_called_once_with("Hello")
     timestamp = Chat.timestamp("2-0")
     assert [line.strip() for line in capsys.readouterr().out.splitlines()] == [
-        f"[{timestamp}]",
-        "You: Hello",
-        f"[reply to {timestamp}]",
-        "Agent: answer",
+        timestamp,
+        "› Hello",
+        timestamp,
+        "answer",
     ]
     redis.xack.assert_any_call(stream, "user", "2-0")
     redis.xack.assert_any_call(stream, "user", "3-0")
@@ -750,21 +607,23 @@ def test_run_once_prints_prior_answers_before_new_answer(
         ],
     ]
     chat = _empty_chat(redis)
-    monkeypatch.setattr(chat, "send", MagicMock(return_value=("new", "4-0")))
+    monkeypatch.setattr(
+        chat.client, "send", MagicMock(return_value=("new", "4-0"))
+    )
 
     chat.run_once("Hello again")
 
     output = capsys.readouterr()
     timestamp = Chat.timestamp("2-0")
     assert [line.strip() for line in output.out.splitlines()] == [
-        f"[{timestamp}]",
-        "You: hello",
-        f"[reply to {timestamp}]",
-        "Agent: earlier answer",
-        f"[{timestamp}]",
-        "You: Hello again",
-        f"[reply to {timestamp}]",
-        "Agent: new answer",
+        timestamp,
+        "› hello",
+        timestamp,
+        "earlier answer",
+        timestamp,
+        "› Hello again",
+        timestamp,
+        "new answer",
     ]
     assert output.err == ""
     redis.xack.assert_any_call(stream, "user", "2-0")

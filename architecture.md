@@ -16,7 +16,8 @@ and its tests can share a Redis instance without mixing their data.
 ## AD2 — Library first
 
 Fallingwater's core is an importable Python library. Applications can create a
-`Chat` with a Redis client, submit turns, and run `WorkerPool` in their own process.
+`ConversationClient` with a Redis client, submit turns, and run `WorkerPool` in
+their own process. `Chat(client)` adds terminal interaction to that client.
 The bundled `fw` CLI calls these same library classes; its chat input and
 responses pass through Redis.
 
@@ -48,25 +49,27 @@ Pydantic AI's run ID.
 Redis Streams connect message submitters, workers, and readers. The shared
 `fw:dispatch` stream distributes turns through the `workers` consumer group. A
 per-conversation stream records the creation event, queued prompts, outcomes,
-and history needed for the next turn. `Chat.receive` reads that stream through
-`ConversationStream` with `XREAD`; the CLI uses a separate consumer group on
-the same stream.
+and history needed for the next turn. `ConversationClient.receive` reads that
+stream through `ConversationStream` with `XREAD`; the CLI uses a separate
+consumer group on the same stream.
 
 `DispatchStream` owns the shared dispatch key, consumer-group reads, claims,
 and acknowledgements. It decodes each dispatch entry into a typed action or an
 invalid-entry value that the worker acknowledges. It creates a
 `ConversationStream` bound to an ID; that object owns typed event reads and
-writes and its reader groups. `Chat` keeps one bound
+writes and its reader groups. `ConversationClient` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
 `models.py` defines the event and action schemas; `stream_utils.py`
-handles naming validation and wire codecs. `Chat` and `Worker` decide when to
-acknowledge entries; `Conversation` and its turn machines decide which work
-is enabled.
+handles naming validation and wire codecs. `ConversationClient` owns client
+stream operations; `Chat` requests acknowledgement after rendering an event.
+`Worker` decides when to acknowledge dispatch entries; `Conversation` and its
+turn machines decide which work is enabled.
 
-`Chat.send` prepares a queued event through `Conversation`, then writes the
-event and dispatch poke through the two stream objects with successive `XADD`
-commands. Group and consumer names remain explicit on stream operations.
+`ConversationClient.send` prepares a queued event through `Conversation`, then
+writes the event and dispatch poke through the two stream objects with
+successive `XADD` commands. Group and consumer names remain explicit on stream
+operations.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -81,8 +84,8 @@ reads.
 The dispatch stream stays text based because its action entries only carry
 routing identifiers. Stream reads attach Redis entry IDs to decoded dispatch
 actions and conversation events as metadata; those IDs are excluded from the
-Pydantic payload serialization. `Chat` uses event IDs for cursors and
-acknowledgements, while `Worker` uses action IDs for acknowledgements.
+Pydantic payload serialization. `ConversationClient` uses event IDs for cursors
+and acknowledgements, while `Worker` uses action IDs for acknowledgements.
 All conversation reads, CLI inspection, web feeds, and archives use one
 `ConversationEvent` model with a required `entry_id`. The decoder attaches the
 Redis ID to that model, rather than returning a separate tuple. Event envelope
@@ -129,19 +132,22 @@ conversations follow the same policy.
 
 ## AD5 — Conversation identity and configuration
 
-`Chat` generates a UUID when called without a conversation ID. The CLI instead
-generates a readable `qualifier_scientist` ID for each new chat and accepts that
-ID as the positional argument to resume it. The first conversation event stores
-the agent import path and model. `Chat` validates the effective agent and model
-before creating a conversation or resuming one. On resume it uses the saved
-values, ignoring supplied agent and model options. The CLI passes its arguments
-to `Chat` in both cases and defaults to `pydantic_ai:Agent` when `FW_AGENT` is
-unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
+`ConversationClient` generates a UUID when called without a conversation ID.
+The CLI instead generates a readable `qualifier_scientist` ID for each new chat
+and accepts that ID as the positional argument to resume it. The first
+conversation event stores the agent import path and model.
+`ConversationClient` validates the effective agent and model before creating
+a conversation or resuming one. On resume it uses the saved values, ignoring
+supplied agent and model options. The CLI passes its arguments to
+`ConversationClient` in both cases and defaults to `pydantic_ai:Agent` when
+`FW_AGENT` is unset; a new chat needs a model on its agent, in `FW_MODEL`, or
+through `-m`.
 
-`Chat.send(prompt)` generates a fresh UUID turn ID on every call and returns
-that ID with the queued event cursor. `Chat.ask(prompt)` submits through `send`
-and waits for the result through `receive`. Repeated prompts create separate
-turns; client submission deduplication is deferred until its behavior is needed.
+`ConversationClient.send(prompt)` generates a fresh UUID turn ID on every call
+and returns that ID with the queued event cursor.
+`ConversationClient.ask(prompt)` submits through `send` and waits for the result
+through `receive`. Repeated prompts create separate turns; client submission
+deduplication is deferred until its behavior is needed.
 
 ## AD6 — Worker pool lifecycle
 
@@ -262,16 +268,16 @@ stream length, unlike the bounded overview. Fragment routes live outside
 
 ## AD8 — CLI reader groups
 
-`Chat` creates or reuses a consumer group on the conversation stream during
-initialization, starting at ID `0`. The default group is `user`;
+`ConversationClient` creates or reuses a consumer group on the conversation
+stream during initialization, starting at ID `0`. The default group is `user`;
 `fw chat --group` selects another. Terminal reads use the stable consumer name
 `terminal` so a later CLI process can read entries left pending by an
-interrupted session. Each `Chat` starts with a reader cursor at `0`, advances
+interrupted session. Each client starts with a reader cursor at `0`, advances
 through pending entries, and switches to `>` when the pending read is empty.
 Later reads on that instance stay on `>`.
 
-`fw chat --rewind` calls `Chat.rewind` before reading. It uses `XGROUP SETID`
-to reset only the selected conversation reader group to `0`, then starts the
+`fw chat --rewind` calls `ConversationClient.rewind` before reading. It uses
+`XGROUP SETID` to reset only the selected conversation reader group to `0`, then starts the
 local reader at `>`. Reading redelivered entries rather than draining pending
 entries first preserves stream order and avoids printing pending outcomes
 twice during replay. It keeps the group and its pending entries, which are
@@ -282,16 +288,29 @@ the reset position. Both interactive and one-shot startup use this replay.
 The CLI prints queued prompts, completed answers, and failures before
 acknowledging their events. It acknowledges `conversation.created` and other
 non-displayed events as read. A terminal exit between printing and acknowledgement
-can cause a message to be printed again. A single `Chat.read` method reads
-pending entries for the stable consumer, then new entries. With `ffwd=True`, it
-handles all available events without blocking; normal reads wait up to one
+can cause a message to be printed again. `ConversationClient.read` yields typed
+events without printing or automatically acknowledging them. `Chat.read`
+renders each event and calls the client's `acknowledge` only after successful
+handling, including non-displayed events. The client reads pending entries
+for the stable consumer, then new entries. With `ffwd=True`, it
+reads all available events without blocking; normal reads wait up to one
 second for new events and return after a batch. On startup it handles
 events that are available and returns without waiting for queued turns whose
 results have not arrived; a new prompt can therefore overlap such a turn. Each
 group represents one logical terminal reader. In one-shot mode, `--msg` prints
 earlier results read during startup catch-up and the new turn's result to stdout.
 Results that arrive after the new prompt is queued use the same output.
-The library's `Chat.receive` and the web feed still use independent `XREAD` calls.
+The library's `ConversationClient.receive` and the web feed still use independent
+`XREAD` calls.
+
+`Chat` accepts a `ConversationClient`, not Redis connection options. It owns
+terminal input, rendering, formatted timestamp labels, and the reader thread.
+The CLI opens the client, optionally rewinds it, then constructs `Chat(client)`.
+The client owns settings, submission, blocking result reads, reader-group
+cursors, acknowledgement, rewind, and retained-prompt lookup. It has no terminal
+I/O. Submission uses a fresh settings-only `Conversation` for pure preparation;
+it does not expose a stale replay snapshot or share mutable turn state between
+the input and reader threads.
 
 Interactive `Chat.run` uses synchronous `prompt_toolkit` input in the main
 thread and one background Redis reader thread, without application-level
@@ -317,14 +336,14 @@ headers, replies, and failures retain the default style. There are no additional
 formatted output. Only timestamp alignment measures the terminal width;
 message bodies retain their original text and use natural terminal wrapping,
 without manual line breaks or full-width background padding.
-The reader records timestamps from queued events. If an outcome references an
-uncached prompt, it scans retained queued events to recover the timestamp,
-including prompts already acknowledged by this group. A history scan is only
-needed for such cache misses.
+Chat records formatted timestamps from queued events. If an outcome references
+an uncached prompt, it asks the client for the queued event ID. The client
+caches raw queued IDs while reading and scans retained events only on a cache
+miss, including prompts already acknowledged by this group.
 Timestamps are presentation labels, not unique identifiers; internal routing
 continues to use turn IDs. Interactive and one-shot readers use the same output
 format without a mode flag; `--msg` still waits for one result and exits.
-`Chat.ask` and `receive` continue to return answer strings without printing.
+`ConversationClient.ask` and `receive` return answer strings without printing.
 Overlapping submissions retain the queue-time history policy in AD4.
 
 ## AD9 — Compressed conversation payloads
@@ -501,10 +520,11 @@ eligibility, child-outcome normalization, and post-replay resumption decisions.
 `prepare` returns a `PreparedEvent` containing the validated payload and
 emissions without advancing state. Its `dispatch(entry_id)` binds terminal
 notification intents to the actual persisted event ID. New-turn preparation
-uses an unregistered machine, allowing `Chat` to submit turns without replaying
-history or optimistically adding them to canonical state.
+uses an unregistered machine, allowing `ConversationClient` to submit turns
+without replaying history or optimistically adding them to canonical state.
 
-`Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
+`ConversationClient` and `Worker` coordinate reads and writes. Chat determines
+when a displayed event is safe to acknowledge through the client.
 Worker checkpointing prepares a fact, appends it, then publishes its actions.
 It does not refresh or advance the replayed state; only applying persisted
 events does that. General checkpoints have no cursor check, so concurrent

@@ -12,6 +12,7 @@ from importlib.metadata import version
 from redis import Redis
 
 from .chat import Chat
+from .conversation_client import ConversationClient
 from .names import generate_name
 from .stream_utils import (
     decode_conversation_event,
@@ -73,23 +74,21 @@ def build_parser() -> argparse.ArgumentParser:
     ls_parser = subparsers.add_parser("ls", help="List conversations.")
     ls_parser.set_defaults(handler=run_ls)
 
-    archive_parser = subparsers.add_parser("archive", help="Archive conversation")
+    archive_parser = subparsers.add_parser(
+        "archive", help="Archive conversation"
+    )
     archive_parser.add_argument("conversation", help="Conversation ID.")
     archive_parser.add_argument(
-        "-s",
-        "--store",
-        help="Store URI.",
-        default=".fw-store"
+        "-s", "--store", help="Store URI.", default=".fw-store"
     )
     archive_parser.set_defaults(handler=run_archive)
 
-    restore_parser = subparsers.add_parser("restore", help="Restore conversation")
+    restore_parser = subparsers.add_parser(
+        "restore", help="Restore conversation"
+    )
     restore_parser.add_argument("conversation", help="Conversation ID.")
     restore_parser.add_argument(
-        "-s",
-        "--store",
-        help="Store URI.",
-        default=".fw-store"
+        "-s", "--store", help="Store URI.", default=".fw-store"
     )
     restore_parser.set_defaults(handler=run_restore)
 
@@ -326,7 +325,7 @@ def run_chat(args: argparse.Namespace) -> None:
                     "fw chat: could not find an unused conversation name"
                 )
         try:
-            chat = Chat(
+            client = ConversationClient(
                 redis,
                 namespace=args.namespace,
                 conversation_id=conversation_id,
@@ -341,12 +340,15 @@ def run_chat(args: argparse.Namespace) -> None:
             )
             raise SystemExit(f"fw chat: {error}") from None
         if args.rewind:
-            chat.rewind()
+            client.rewind()
+        chat = Chat(client)
         if args.msg is None:
             chat.run()
         else:
             if args.conversation is None:
-                print(f"Conversation: {chat.conversation_id}", file=sys.stderr)
+                print(
+                    f"Conversation: {client.conversation_id}", file=sys.stderr
+                )
             chat.run_once(args.msg)
 
 

@@ -23,7 +23,7 @@ append new actions.
 Client                       Conversation events       Shared dispatch          Workers
 ------                       -------------------       ---------------          -------
 
-Create Chat ---------------> conversation.created
+Create client -------------> conversation.created
   agent, model, deps
 
 send(prompt)
@@ -45,14 +45,14 @@ receive(turn_id, cursor) ---> XREAD after cursor
   return answer                                        conversation.poke <------ Acknowledge action
 ```
 
-Creating a new `Chat` validates the selected agent and available model, then
-appends `conversation.created`. This event stores the agent import path, model,
+Creating a new `ConversationClient` validates the selected agent and available
+model, then appends `conversation.created`. This event stores the agent import path, model,
 and initial dependencies. Creating the conversation does not dispatch an agent
 run. Library-created conversations use a UUID by default; the CLI generates a
 readable conversation ID.
 
-`Chat.send(prompt)` generates a fresh UUID turn ID and writes two entries
-in order:
+`ConversationClient.send(prompt)` generates a fresh UUID turn ID and writes two
+entries in order:
 
 1. Conversation: `turn.queued`, containing the turn ID and prompt message.
 2. Dispatch: `conversation.poke`, containing the conversation and turn IDs.
@@ -77,11 +77,17 @@ the turn ID, display message, new structured message history, and usage. It
 then acknowledges the dispatch action. For a basic conversation, completion
 does not append a new dispatch action.
 
-`Chat.receive(turn_id, cursor)` follows the conversation stream after the
-cursor using `XREAD`. It returns the matching completed message or raises
-`RuntimeError` for a matching failed turn. `Chat.ask(prompt)` combines submission
-and result reading as `receive(*send(prompt))`. Reading the result does not
-consume work from the dispatch stream.
+`ConversationClient.receive(turn_id, cursor)` follows the conversation stream
+after the cursor using `XREAD`. It returns the matching completed message or
+raises `RuntimeError` for a matching failed turn.
+`ConversationClient.ask(prompt)` combines submission and result reading as
+`receive(*send(prompt))`. Reading the result does not consume work from the
+dispatch stream.
+
+`Chat(client)` adds terminal input and rendering around a `ConversationClient`.
+The client owns Redis access and reader-group operations; neither its submission
+nor its result-reading methods print output. `Conversation` remains the pure
+workflow model used to prepare a new turn, without requiring full-history replay.
 
 ## Later turns and resumption
 
@@ -111,10 +117,10 @@ earlier completed usage, so usage accumulates across sequential turns.
 Replay retains the first terminal outcome for each turn, so duplicate
 completions do not repeat its history.
 
-Opening `Chat` with an existing conversation ID uses its saved agent and model,
-ignoring supplied replacements. Initial dependencies remain in the creation
-event; supplying new dependencies on resume is rejected. Resumption does not
-append another `conversation.created` event.
+Opening `ConversationClient` with an existing conversation ID uses its saved
+agent and model, ignoring supplied replacements. Initial dependencies remain
+in the creation event; supplying new dependencies on resume is rejected.
+Resumption does not append another `conversation.created` event.
 
 The interactive CLI accepts new prompts without waiting for earlier outcomes.
 A background reader prints answers or failures while `prompt_toolkit` preserves
@@ -158,12 +164,14 @@ events, printing unread answers or failures before accepting another prompt.
 It prints results before acknowledging them, so an interrupted session can
 print a result again after restart. Startup catch-up does not wait for turns
 whose results have not yet arrived. The library's `receive` and the web event
-feeds use independent `XREAD` cursors instead. The group reader remembers
-timestamps from queued events and scans saved events when an outcome's prompt
-is missing from its cache, including already acknowledged prompts. `Chat.ask`
+feeds use independent `XREAD` cursors instead. `ConversationClient.read` yields
+typed events for Chat to render and explicitly acknowledge after successful
+handling. The client caches raw queued event IDs and scans saved events on a
+cache miss, including already acknowledged prompts; Chat owns formatted
+timestamp labels. `ConversationClient.ask`
 and the CLI's `--msg` mode remain blocking. One-shot output uses the same
 timestamp headers, message labels, and queued-message styling as interactive
-chat, while `Chat.ask` returns the answer without printing.
+chat, while `ConversationClient.ask` returns the answer without printing.
 
 `fw chat <id> --rewind` resets the selected reader group's delivery position
 and replays retained events in stream order, including already acknowledged
