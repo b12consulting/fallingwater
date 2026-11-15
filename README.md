@@ -10,6 +10,10 @@ Use a virtual environment, then run `python -m pip install -e '.[test]'`. Start
 local Redis with `docker compose up -d redis`. Run tests with `pytest`, and
 inspect the CLI with `fw --help`.
 
+The default test suite covers `tests/` only. Run experimental executor tests
+separately with `pytest contrib/tests`; they are not part of the production
+suite.
+
 
 ## CLI test drive
 

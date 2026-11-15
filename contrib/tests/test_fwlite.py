@@ -1,4 +1,4 @@
-"""Exercise the toy executor without Redis or a model provider."""
+"""Exercise the contrib toy executor without Redis or a model provider."""
 
 import tomllib
 from textwrap import dedent

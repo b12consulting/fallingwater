@@ -1090,3 +1090,17 @@ revisited. Close or revise an item when the code resolves it.
   Recreate workers after stream deletion, replacement, restore, or trimming.
   Memory and clone cost still grow with retained turns in cached conversations.
   This does not add execution ownership, atomic writes, or exactly-once effects.
+- **D111 — Opt-in contrib executor tests (implemented).** Keep the `fwlite`
+  and `fwflash` prototype tests alongside experiments in `contrib/tests/`.
+  Default pytest discovery remains limited to `tests/`; run prototype checks
+  explicitly with `pytest contrib/tests`. Production helper tests remain in
+  the main suite. Moving prototype checks does not fix or suppress their
+  failures when explicitly selected.
+- **D112 — Defer web CLI auto-reload (implemented).** Remove `fw web --reload`
+  and omit Uvicorn's reload argument for now. Revisit auto-reload support
+  separately from the current app-instance startup and Redis client lifecycle.
+- **D113 — Keep Jeopardy demo output and termination minimal (accepted).**
+  The standalone demo prints event types and the first completed turn's answer,
+  then exits without filtering by the submitted turn ID. Tests cover this
+  deliberate simplification rather than requiring JSON output or correlated
+  turn completion. This is demo behavior, not a production client guarantee.

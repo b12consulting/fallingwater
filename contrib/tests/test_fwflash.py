@@ -1,4 +1,4 @@
-"""Conversation-backed prototype checks without Redis or model providers."""
+"""Contrib conversation-backed prototype checks without Redis or providers."""
 
 from dataclasses import dataclass, field
 

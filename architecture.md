@@ -762,6 +762,10 @@ conflicts are rejected during shared resolution and conversation preparation.
 The prototype shares `fwlite`'s trace renderer but does not replace it.
 Exceptions propagate without recovery or failed-event conversion.
 
+Both FIFO prototypes keep their tests in `contrib/tests/`. They run explicitly
+with `pytest contrib/tests`, while default pytest discovery remains limited to
+the production suite in `tests/`.
+
 ## AD20 — Shared execution helpers, adapter-owned policies
 
 `agent_proxy.run_agent_step` assembles a turn's model inputs and returns an
