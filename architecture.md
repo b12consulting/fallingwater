@@ -121,6 +121,10 @@ agent sessions. Later outcomes do not change an already queued turn's snapshot.
 Snapshots share immutable `MessageHistory` prefixes. Replay appends one completed
 message chunk at a time rather than retaining a full history copy for every
 turn; the worker materializes only its selected turn's history for execution.
+Message objects, their parts and nested contents, settings, and replayed payloads
+are read-only by contract, including when exposed to agents, tools, or hooks.
+`Conversation.clone()` copies turn machines, mutable bookkeeping containers,
+registries, and usage while sharing these read-only values and history prefixes.
 
 Senders wait for a turn to finish before submitting the next prompt when they
 need sequential history. Workers can process overlapping turns from the same
@@ -159,6 +163,19 @@ worker has a new consumer ID and recovers eligible dispatch entries with
 `XAUTOCLAIM`. Acknowledged entries remain in the dispatch stream. Malformed or
 stale actions are logged and acknowledged. `Worker.run` records non-Redis
 processing errors as `turn.failed`; Redis failures leave actions pending.
+
+Workers in one pool share a lock-protected LRU cache of up to 128 replayed
+conversation snapshots, keyed by namespaced stream name. Standalone workers
+own their own cache. Loads clone the cached snapshot, replay only events after
+its `last_event_id`, and publish only a newer cursor, comparing Redis IDs
+numerically. Cache entries are never used as execution instances: a separate
+clone is returned to the worker, so execution-time usage changes and writes
+not yet replayed cannot contaminate the snapshot. Child setup uses the same
+cache. Locks cover only cache lookup/replacement, not cloning, Redis I/O, or
+execution. Concurrent loads may duplicate replay, but cannot regress a cached
+cursor. Streams must remain append-only for the lifetime of the workers;
+recreate workers after destructive stream operations. This is a local replay
+optimization, not a distributed execution lock or a durable checkpoint.
 
 ## AD7 — Web conversation feed
 

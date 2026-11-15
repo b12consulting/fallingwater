@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event as ThreadEvent
 from typing import Any
 from unittest.mock import Mock
 
@@ -24,7 +24,8 @@ from redis.exceptions import (
     ResponseError,
 )
 
-from fallingwater.worker import Worker
+from fallingwater.worker import ConversationCache, Worker
+from fallingwater.worker_pool import WorkerPool
 from fallingwater.agent_proxy import AgentRunResult, AgentRequest
 from fallingwater.conversation import Conversation, reconstruct_conversation
 from fallingwater.models import (
@@ -175,10 +176,7 @@ def _process(worker: Worker, fields: dict[str, str]) -> bool:
     cnv_stream = worker.dsp_stream.conversation_stream(
         action.payload.conversation_id
     )
-    conversation = reconstruct_conversation(
-        cnv_stream.iter_events(),
-        conversation_id=action.payload.conversation_id,
-    )
+    conversation = worker.conversation_cache.load(cnv_stream)
     return worker.process(action, cnv_stream, conversation)
 
 
@@ -192,6 +190,124 @@ def _events(redis: MemoryRedis, conversation_id: str = "abc"):
 
 def _dispatch(redis: MemoryRedis):
     return [fields for _, fields in redis.streams.get("fw:dispatch", [])]
+
+
+def test_cache_refreshes_only_the_tail_and_isolates_execution(monkeypatch):
+    redis = MemoryRedis(_base_entries())
+    worker = Worker(redis)
+    stream = worker.dsp_stream.conversation_stream("abc")
+    tracked = Mock(wraps=stream.iter_events)
+    monkeypatch.setattr(stream, "iter_events", tracked)
+    first: Conversation = worker.conversation_cache.load(stream)
+    first.turn_state["turn-1"].turn_messages.extend(_messages("local"))
+    worker.checkpoint(
+        stream,
+        first,
+        TurnCompletedPayload(
+            turn_id="turn-1",
+            message="answer",
+            turn_messages=ModelMessagesTypeAdapter.dump_python(
+                _messages("hello"), mode="json"
+            ),
+            usage=RunUsage(requests=1),
+        ),
+    )
+
+    second = worker.conversation_cache.load(stream)
+    assert tracked.call_args.kwargs == {"after_id": "2-0"}
+    assert second.last_event_id == "3-0"
+    assert second.turn_state["turn-1"].completed
+    assert len(second.turn_state["turn-1"].turn_messages) == 1
+    second.turn_state["turn-1"].usage.requests = 100
+    third = worker.conversation_cache.load(stream)
+    assert tracked.call_args.kwargs == {"after_id": "3-0"}
+    assert third.turn_state["turn-1"].usage.requests == 1
+
+
+def test_cache_lru_eviction_and_namespaced_keys(monkeypatch):
+    redis = MemoryRedis(_base_entries())
+    worker = Worker(redis)
+    cache = ConversationCache(maxsize=2)
+    first = worker.dsp_stream.conversation_stream("abc")
+    other_namespace = Worker(redis, namespace="other").dsp_stream
+    second = other_namespace.conversation_stream("abc")
+    third = worker.dsp_stream.conversation_stream("child")
+    redis.streams[second.name] = _base_entries(prompt="other namespace")
+    redis.streams[third.name] = _base_entries(prompt="child")
+    tracked = Mock(wraps=second.iter_events)
+    monkeypatch.setattr(second, "iter_events", tracked)
+
+    cache.load(first)
+    assert cache.load(second).turn_state["turn-1"].prompt == "other namespace"
+    cache.load(first)
+    cache.load(third)
+    cache.load(second)
+    assert tracked.call_args.kwargs == {}
+
+
+def test_concurrent_cache_load_cannot_replace_a_newer_cursor(monkeypatch):
+    redis = MemoryRedis(_base_entries())
+    worker = Worker(redis)
+    cache = worker.conversation_cache
+    stream = worker.dsp_stream.conversation_stream("abc")
+    cache.load(stream)
+    older_entry = _entry(
+        "9-0",
+        Event.TURN_QUEUED,
+        TurnQueuedPayload(turn_id="turn-2", message="second"),
+    )
+    redis.streams[stream.name].extend(
+        [
+            older_entry,
+            _entry(
+                "10-0",
+                Event.TURN_QUEUED,
+                TurnQueuedPayload(turn_id="turn-3", message="third"),
+            ),
+        ]
+    )
+    slow_stream = worker.dsp_stream.conversation_stream("abc")
+    replaying = ThreadEvent()
+    release = ThreadEvent()
+
+    def slow_events(*, after_id="0-0", page_size=100):
+        assert after_id == "2-0"
+        yield decode_conversation_event(*older_entry)
+        replaying.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(slow_stream, "iter_events", slow_events)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        slow = executor.submit(cache.load, slow_stream)
+        try:
+            assert replaying.wait(5)
+            newer = executor.submit(cache.load, stream).result(timeout=5)
+            assert newer.last_event_id == "10-0"
+        finally:
+            release.set()
+        assert slow.result(timeout=5).last_event_id == "9-0"
+
+    tracked = Mock(wraps=stream.iter_events)
+    monkeypatch.setattr(stream, "iter_events", tracked)
+    assert cache.load(stream).last_event_id == "10-0"
+    assert tracked.call_args.kwargs == {"after_id": "10-0"}
+
+
+def test_worker_pool_shares_only_its_own_cache():
+    redis = MemoryRedis(_base_entries())
+    pool = WorkerPool(redis, worker_count=2)
+    assert (
+        pool.workers[0].conversation_cache is pool.workers[1].conversation_cache
+    )
+    assert (
+        Worker(redis).conversation_cache
+        is not pool.workers[0].conversation_cache
+    )
+
+
+def test_cache_rejects_nonpositive_capacity():
+    with pytest.raises(ValueError, match="maxsize"):
+        ConversationCache(maxsize=0)
 
 
 def _delegating_worker(*call_ids: str) -> tuple[Worker, MemoryRedis]:

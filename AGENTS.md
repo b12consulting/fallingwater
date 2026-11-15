@@ -68,8 +68,8 @@ This is the quick-start guide for agents working in this repository. See
 |   |       |-- dashboard_conversation.html Full-history page with inline details
 |   |       |-- dashboard_event.html Selected event details
 |   |       `-- monitor.html  Read-only recent conversation monitor
-|   |-- worker.py             Action execution and persistence/replay coordination
-|   |-- worker_pool.py        Worker threads and graceful shutdown
+|   |-- worker.py             Action execution, replay cache, and persistence
+|   |-- worker_pool.py        Worker threads, shared cache, and graceful shutdown
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
 |       |-- editor_writers.py Editor delegating to fresh or persistent writers

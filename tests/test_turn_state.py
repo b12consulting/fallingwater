@@ -153,6 +153,75 @@ def _child_action(**updates):
     )
 
 
+def test_conversation_clone_isolates_turn_state_and_shares_messages():
+    conversation = reconstruct_conversation(
+        [
+            _event("1-0", ConversationCreatedPayload(agent="example:agent")),
+            _event("2-0", _queued()),
+            _event("3-0", _completed()),
+            _event("4-0", _queued("turn-2")),
+            _event("5-0", _request("call-1", turn_id="turn-2")),
+        ],
+        conversation_id="conversation",
+    )
+    cloned = conversation.clone()
+    original = conversation.turn_state["turn-2"]
+    working = cloned.turn_state["turn-2"]
+
+    assert cloned.settings is conversation.settings
+    assert cloned._history is conversation._history
+    assert working.history is original.history
+    assert working.turn_messages is not original.turn_messages
+    assert working.turn_messages[0] is original.turn_messages[0]
+    assert working.request is original.request
+    assert cloned._latest_completed is cloned.turn_state["turn-1"]
+    assert cloned._latest_completed is not conversation._latest_completed
+    assert working.usage is not None
+    working.usage.requests += 5
+    assert working.usage != original.usage
+
+    cloned.apply(_event("6-0", _result("call-1", turn_id="turn-2")))
+    working.calls.clear()
+    working.delegations["call-1"] = _delegation()
+    working.step_ids.add("another-step")
+    working.turn_messages.clear()
+    cloned.agent_by_name["writer"] = "child"
+    cloned._agent_specs["writer"] = _delegation()
+    cloned.apply(_event("7-0", _queued("turn-3")))
+
+    assert original.results == {}
+    assert original.calls.keys() == {"call-1"}
+    assert original.delegations == {}
+    assert original.step_ids == {"step-1"}
+    assert len(original.turn_messages) == 1
+    assert conversation.agent_by_name == {}
+    assert conversation._agent_specs == {}
+    assert "turn-3" not in conversation.turn_state
+    assert conversation.last_event_id == "5-0"
+
+
+def test_clone_replay_extends_only_its_own_history_and_usage():
+    conversation = reconstruct_conversation(
+        [
+            _event("1-0", ConversationCreatedPayload(agent="example:agent")),
+            _event("2-0", _queued()),
+            _event("3-0", _completed()),
+        ],
+        conversation_id="conversation",
+    )
+    cloned = conversation.clone()
+    completed = cloned._latest_completed
+    assert completed is not None and completed.usage is not None
+    completed.usage.requests = 7
+    cloned.apply(_event("4-0", _queued("turn-2")))
+    assert cloned.turn_state["turn-2"].usage.requests == 7
+    cloned.apply(_event("5-0", _completed("turn-2")))
+    assert len(cloned._history) == 2 * len(conversation._history)
+    conversation.apply(_event("4-0", _queued("turn-2")))
+    assert conversation.turn_state["turn-2"].usage.requests == 2
+    assert conversation.turn_state["turn-2"].history is not cloned._history
+
+
 @pytest.mark.parametrize(
     ("start", "stop", "transition_type"),
     [

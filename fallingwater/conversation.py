@@ -59,6 +59,23 @@ class Conversation(BaseModel):
         default_factory=dict
     )
 
+    def clone(self) -> "Conversation":
+        """Isolate replay state while sharing read-only messages and payloads."""
+        cloned = self.model_copy(
+            update={
+                "turn_state": {
+                    key: turn.clone() for key, turn in self.turn_state.items()
+                },
+                "agent_by_name": self.agent_by_name.copy(),
+            }
+        )
+        cloned._agent_specs = self._agent_specs.copy()
+        if self._latest_completed is not None:
+            cloned._latest_completed = cloned.turn_state[
+                self._latest_completed.turn_id
+            ]
+        return cloned
+
     def prepare(self, payload: TurnPayload) -> PreparedEvent:
         """Validate a proposed fact without registering or advancing a turn."""
         turn = self.turn_state.get(payload.turn_id)

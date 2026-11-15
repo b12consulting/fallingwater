@@ -23,10 +23,10 @@ revisited. Close or revise an item when the code resolves it.
   different behavior.
 - **R3 — Event volume (open).** Each deferred model step and each tool
   result adds a conversation event, while every tool call also adds a
-  dispatch entry. Long conversations make turn reconstruction and the
-  event scan used for result fan-in increasingly expensive. Measure
-  stream size and processing cost before choosing retention,
-  snapshots, or incremental reconstruction.
+  dispatch entry. D100's bounded worker cache avoids full reconstruction
+  on cache hits, but cold loads, retained turn state, and clone costs still
+  grow with conversation length. Measure stream size and processing cost
+  before choosing retention or durable snapshots.
 - **R4 — Claimed work can stall (closed).** The worker uses
   `XAUTOCLAIM` to recover dispatch entries after a configurable idle
   period. A pending item still waits until the configured threshold
@@ -941,3 +941,17 @@ revisited. Close or revise an item when the code resolves it.
   changing conversation data, other groups, or worker dispatch. The position
   is shared by all readers in the selected group; independent replays should
   use another group. This replays saved output, not agent or tool execution.
+- **D100 — Incremental worker cache and shallow replay clones (implemented).**
+  Share a bounded, lock-protected LRU of replay-only conversation snapshots
+  across a pool's workers. Refresh from `last_event_id` and replace only with
+  numerically newer Redis cursors, without holding the cache lock during Redis
+  I/O, cloning, or execution. Return separate working clones and never cache
+  execution-mutated state. Clone turn machines, bookkeeping containers,
+  registries, and usage, but share historical messages and replayed payloads.
+  Messages, their parts and nested contents, settings, and event payloads must
+  not be mutated by agents, tools, hooks, or capabilities; callers must copy
+  values they need to modify. This contract avoids deep-copying all history.
+  Cache at most 128 conversations per pool; eviction rebuilds from Redis.
+  Recreate workers after stream deletion, replacement, restore, or trimming.
+  Memory and clone cost still grow with retained turns in cached conversations.
+  This does not add execution ownership, atomic writes, or exactly-once effects.

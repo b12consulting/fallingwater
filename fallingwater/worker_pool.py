@@ -8,7 +8,7 @@ from threading import Thread, current_thread, main_thread
 
 from redis import Redis
 
-from .worker import Worker
+from .worker import ConversationCache, Worker
 from .utils import logger
 
 
@@ -27,8 +27,14 @@ class WorkerPool:
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
+        conversation_cache = ConversationCache()
         self.workers = [
-            Worker(redis, namespace=namespace, claim_idle_ms=claim_idle_ms)
+            Worker(
+                redis,
+                namespace=namespace,
+                claim_idle_ms=claim_idle_ms,
+                conversation_cache=conversation_cache,
+            )
             for _ in range(worker_count)
         ]
 

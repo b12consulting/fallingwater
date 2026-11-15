@@ -120,7 +120,7 @@ def execute_tool(
     messages: Sequence[ModelMessage],
     usage: RunUsage,
 ) -> Any:
-    """Resolve a deferred attached tool and restore its runtime context."""
+    """Restore tool context; historical messages and parts are read-only."""
 
     settings = conversation.settings
     agent = reify_agent(settings.agent)
@@ -173,6 +173,7 @@ def run(
 
     Attached function tools are deferred so the caller can persist the request,
     execute its calls, and resume the agent in a later invocation.
+    Historical messages and their parts are shared and must not be mutated.
     """
     captured_calls: dict[str, tuple[RunContext[Any], dict[str, Any]]] = {}
     calls_token = _deferred_tool_calls.set(captured_calls)
