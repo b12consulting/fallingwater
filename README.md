@@ -10,6 +10,10 @@ Use a virtual environment, then run `python -m pip install -e '.[test]'`. Start
 local Redis with `docker compose up -d redis`. Run tests with `pytest`, and
 inspect the CLI with `fw --help`.
 
+The default test suite covers `tests/` only. Run experimental executor tests
+separately with `pytest contrib/tests`; they are not part of the production
+suite.
+
 
 ## CLI test drive
 
@@ -171,6 +175,21 @@ fw chat --agent fallingwater.demo:editor --model <model>
 
 Worker ownership renewal and complete cross-stream crash recovery remain
 unimplemented; this is not exactly-once model or tool execution.
+
+## Shared history and worker caching
+
+Historical model messages, their parts, and nested contents are read-only.
+Agents, tools, hooks, and capabilities must not mutate supplied history,
+including messages exposed through `RunContext.messages`. Copy any message
+you need to modify. Replayed settings and event payloads are also read-only.
+
+Workers in a pool share an in-memory LRU cache of up to 128 conversation
+snapshots. Each action receives a shallow clone with independent turn
+bookkeeping and usage; messages and replayed payloads remain shared. Workers
+read only events after the cached `last_event_id`. Redis remains authoritative,
+and caching does not serialize execution or prevent duplicate external effects.
+Streams must remain append-only while workers run: stop and recreate workers
+after deleting, replacing, restoring, or trimming conversation streams.
 
 ## Web
 

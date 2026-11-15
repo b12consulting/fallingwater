@@ -1,6 +1,7 @@
 """Execute actions enabled by turn machines and checkpoint their outcomes."""
 
-from threading import Event as ThreadEvent
+from collections import OrderedDict
+from threading import Event as ThreadEvent, Lock
 from traceback import format_exc
 from typing import Any
 from uuid import uuid4
@@ -43,6 +44,44 @@ from fallingwater.utils import logger
 _json_value_adapter = TypeAdapter(Any)
 
 
+class ConversationCache:
+    """Bounded replay snapshots for workers sharing one Redis database."""
+
+    def __init__(self, *, maxsize: int = 128) -> None:
+        if maxsize < 1:
+            raise ValueError("maxsize must be at least 1")
+        self.maxsize = maxsize
+        self._snapshots: OrderedDict[str, Conversation] = OrderedDict()
+        self._lock = Lock()
+
+    def load(self, stream: ConversationStream) -> Conversation:
+        """Replay the unseen tail and return an isolated working clone."""
+        with self._lock:
+            cached = self._snapshots.get(stream.name)
+            if cached is not None:
+                self._snapshots.move_to_end(stream.name)
+        if cached is None:
+            snapshot = Conversation(
+                stream.iter_events(), conversation_id=stream.conversation_id
+            )
+        else:
+            snapshot = cached.clone()
+            snapshot.apply(stream.iter_events(after_id=snapshot.last_event_id))
+
+        with self._lock:
+            current = self._snapshots.get(stream.name)
+            # A concurrent load may already have cached a newer snapshot.
+            if current is None or tuple(
+                map(int, snapshot.last_event_id.split("-"))
+            ) > tuple(map(int, current.last_event_id.split("-"))):
+                self._snapshots[stream.name] = snapshot
+                self._snapshots.move_to_end(stream.name)
+                if len(self._snapshots) > self.maxsize:
+                    self._snapshots.popitem(last=False)
+        # Keep worker mutations separate from the snapshot owned by the cache.
+        return snapshot.clone()
+
+
 class Worker:
     """Claim independent agent, tool, and child-result actions."""
 
@@ -54,10 +93,16 @@ class Worker:
         *,
         namespace: str = "fw",
         claim_idle_ms: int = 300_000,
+        conversation_cache: ConversationCache | None = None,
     ) -> None:
         if claim_idle_ms < 0:
             raise ValueError("claim_idle_ms must be nonnegative")
         self.dsp_stream = DispatchStream(redis, namespace=namespace)
+        self.conversation_cache = (
+            conversation_cache
+            if conversation_cache is not None
+            else ConversationCache()
+        )
         self.claim_idle_ms = claim_idle_ms
         self.consumer = str(uuid4())
         self.stop_event = ThreadEvent()
@@ -173,15 +218,11 @@ class Worker:
         child_stream = self.dsp_stream.conversation_stream(
             request.child_conversation_id
         )
-        events = list(child_stream.iter_events())
-        if not events:
+        if not child_stream.read_conversation_range(count=1):
             child_stream.append_if_current(
                 Event.CONVERSATION_CREATED, settings, after_id="0-0"
             )
-            events = list(child_stream.iter_events())
-        child_conversation = Conversation(
-            events, conversation_id=request.child_conversation_id
-        )
+        child_conversation = self.conversation_cache.load(child_stream)
         saved = child_conversation.settings
         if not saved.has_same_settings(settings):
             raise ValueError("Agent conversation has conflicting settings")
@@ -374,9 +415,7 @@ class Worker:
             )
             cnv_stream = self.dsp_stream.conversation_stream(conversation_id)
             try:
-                conversation = Conversation(
-                    cnv_stream.iter_events(), conversation_id=conversation_id
-                )
+                conversation = self.conversation_cache.load(cnv_stream)
                 if turn_id not in conversation.turn_state:
                     raise ValueError(f"No prompt found for turn: {turn_id}")
             except ValueError:

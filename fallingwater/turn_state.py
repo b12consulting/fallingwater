@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from typing import Literal, Self, TypeAlias, overload
 
@@ -57,7 +57,7 @@ requests_adapter = TypeAdapter(DeferredToolRequests)
 
 @dataclass(frozen=True, eq=False)
 class MessageHistory(Sequence[ModelMessage]):
-    """An immutable prefix chain shared by queue-time history snapshots."""
+    """Shared history; contained messages and their parts must not be mutated."""
 
     previous: "MessageHistory | None" = None
     messages: tuple[ModelMessage, ...] = ()
@@ -394,6 +394,17 @@ class TurnStateMachine:
         self.step_ids: set[str] = set()
         self.turn_messages: list[ModelMessage] = []
         self.terminal_event_id: str | None = None
+
+    def clone(self) -> "TurnStateMachine":
+        """Copy mutable bookkeeping, sharing read-only messages and payloads."""
+        cloned = copy(self)
+        cloned.calls = self.calls.copy()
+        cloned.results = self.results.copy()
+        cloned.delegations = self.delegations.copy()
+        cloned.step_ids = self.step_ids.copy()
+        cloned.turn_messages = self.turn_messages.copy()
+        cloned.usage = deepcopy(self.usage)
+        return cloned
 
     @property
     def completed(self) -> bool:

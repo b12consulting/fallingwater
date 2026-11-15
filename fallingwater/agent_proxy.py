@@ -133,7 +133,7 @@ def execute_tool(
     model: Any = None,
     conversation_id: str | None = None,
 ) -> Any:
-    """Reconstruct a deferred tool's basic context, then invoke it."""
+    """Restore tool context; historical messages and parts are read-only."""
 
     tool = _find_attached_tool(agent, call.tool_name)
     args = call.args
@@ -178,6 +178,7 @@ def run(
 
     Attached function tools are deferred so the caller can persist the request,
     execute its calls, and resume the agent in a later invocation.
+    Historical messages and their parts are shared and must not be mutated.
     """
     captured_calls: ToolContexts = {}
     calls_token = _deferred_tool_calls.set(captured_calls)

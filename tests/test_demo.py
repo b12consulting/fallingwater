@@ -1,6 +1,5 @@
 """Demo tools return nonblocking agent requests."""
 
-import json
 from runpy import run_path
 from unittest.mock import MagicMock
 
@@ -16,7 +15,6 @@ from fallingwater.models import (
     ConversationCreatedPayload,
     ConversationEvent,
     TurnCompletedPayload,
-    TurnFailedPayload,
     TurnQueuedPayload,
     get_cnv_event,
 )
@@ -53,9 +51,9 @@ def test_contestant_tool_uses_configured_child_model(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("configured_redis", [False, True])
-@pytest.mark.parametrize("failed", [False, True])
-def test_jeopardy_main_sends_prompt_and_prints_all_events_until_its_outcome(
-    monkeypatch, capsys, configured_redis, failed
+@pytest.mark.parametrize("completed_turn_id", ["host-turn", "other"])
+def test_jeopardy_main_prints_event_types_until_first_completed_turn(
+    monkeypatch, capsys, configured_redis, completed_turn_id
 ) -> None:
     redis_url = (
         "redis://example:6379/1"
@@ -76,31 +74,20 @@ def test_jeopardy_main_sends_prompt_and_prints_all_events_until_its_outcome(
     from_url = MagicMock(return_value=connection)
     client = MagicMock()
     client.send.return_value = ("host-turn", "4-0")
-    outcome = (
-        TurnFailedPayload(turn_id="host-turn", error="host failed")
-        if failed
-        else TurnCompletedPayload(
-            turn_id="host-turn",
-            message="Clues and contestant responses",
-            turn_messages=[],
-            usage=RunUsage(),
-        )
-    )
     payloads = [
         ConversationCreatedPayload(
             agent="fallingwater.demo:jeopardy_host", model="test"
         ),
-        TurnQueuedPayload(turn_id="other", message="Other prompt"),
-        TurnCompletedPayload(
-            turn_id="other",
-            message="Other answer",
-            turn_messages=[],
-            usage=RunUsage(),
-        ),
         TurnQueuedPayload(
             turn_id="host-turn", message="Start a Jeopardy game about science."
         ),
-        outcome,
+        TurnQueuedPayload(turn_id="other", message="Other prompt"),
+        TurnCompletedPayload(
+            turn_id=completed_turn_id,
+            message="Clues and contestant responses",
+            turn_messages=[],
+            usage=RunUsage(),
+        ),
         TurnQueuedPayload(turn_id="later", message="Another prompt"),
     ]
     events = [
@@ -111,14 +98,12 @@ def test_jeopardy_main_sends_prompt_and_prints_all_events_until_its_outcome(
         )
         for index, payload in enumerate(payloads, 1)
     ]
-    client.read.side_effect = [events[:4], [], events[4:]]
-    printed = []
+    client.read.side_effect = [events[:2], [], events[2:]]
+    acknowledged = []
 
     def acknowledge(event):
-        assert json.loads(capsys.readouterr().out) == event.model_dump(
-            mode="json"
-        )
-        printed.append(event)
+        assert capsys.readouterr().out == f"Event Type: {event.type}\n"
+        acknowledged.append(event)
 
     client.acknowledge.side_effect = acknowledge
     client_class = MagicMock(return_value=client)
@@ -138,7 +123,8 @@ def test_jeopardy_main_sends_prompt_and_prints_all_events_until_its_outcome(
     )
     client.send.assert_called_once_with("Start a Jeopardy game about science.")
     client.ask.assert_not_called()
-    assert printed == events
+    assert acknowledged == events[:-1]
+    assert capsys.readouterr().out == "Clues and contestant responses\n"
     assert client.read.call_count == 3
     connection.__exit__.assert_called_once()
 

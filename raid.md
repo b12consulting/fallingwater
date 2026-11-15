@@ -23,10 +23,10 @@ revisited. Close or revise an item when the code resolves it.
   different behavior.
 - **R3 — Event volume (open).** Each deferred model step and each tool
   result adds a conversation event, while every tool call also adds a
-  dispatch entry. Long conversations make turn reconstruction and the
-  event scan used for result fan-in increasingly expensive. Measure
-  stream size and processing cost before choosing retention,
-  snapshots, or incremental reconstruction.
+  dispatch entry. D110's bounded worker cache avoids full reconstruction
+  on cache hits, but cold loads, retained turn state, and clone costs still
+  grow with conversation length. Measure stream size and processing cost
+  before choosing retention or durable snapshots.
 - **R4 — Claimed work can stall (closed).** The worker uses
   `XAUTOCLAIM` to recover dispatch entries after a configurable idle
   period. A pending item still waits until the configured threshold
@@ -1076,3 +1076,31 @@ revisited. Close or revise an item when the code resolves it.
   Delegation effects and stream/dispatch coupling are not refactored here.
   Consolidate the helpers in the existing agent module rather than introducing
   a separate execution module; state machines still do not execute agents.
+- **D110 — Incremental worker cache and shallow replay clones (implemented).**
+  Share a bounded, lock-protected LRU of replay-only conversation snapshots
+  across a pool's workers. Refresh from `last_event_id` and replace only with
+  numerically newer Redis cursors, without holding the cache lock during Redis
+  I/O, cloning, or execution. Return separate working clones and never cache
+  execution-mutated state. Clone turn machines, bookkeeping containers,
+  registries, and usage, but share historical messages and replayed payloads.
+  Messages, their parts and nested contents, settings, and event payloads must
+  not be mutated by agents, tools, hooks, or capabilities; callers must copy
+  values they need to modify. This contract avoids deep-copying all history.
+  Cache at most 128 conversations per pool; eviction rebuilds from Redis.
+  Recreate workers after stream deletion, replacement, restore, or trimming.
+  Memory and clone cost still grow with retained turns in cached conversations.
+  This does not add execution ownership, atomic writes, or exactly-once effects.
+- **D111 — Opt-in contrib executor tests (implemented).** Keep the `fwlite`
+  and `fwflash` prototype tests alongside experiments in `contrib/tests/`.
+  Default pytest discovery remains limited to `tests/`; run prototype checks
+  explicitly with `pytest contrib/tests`. Production helper tests remain in
+  the main suite. Moving prototype checks does not fix or suppress their
+  failures when explicitly selected.
+- **D112 — Defer web CLI auto-reload (implemented).** Remove `fw web --reload`
+  and omit Uvicorn's reload argument for now. Revisit auto-reload support
+  separately from the current app-instance startup and Redis client lifecycle.
+- **D113 — Keep Jeopardy demo output and termination minimal (accepted).**
+  The standalone demo prints event types and the first completed turn's answer,
+  then exits without filtering by the submitted turn ID. Tests cover this
+  deliberate simplification rather than requiring JSON output or correlated
+  turn completion. This is demo behavior, not a production client guarantee.
