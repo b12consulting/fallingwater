@@ -1056,3 +1056,23 @@ revisited. Close or revise an item when the code resolves it.
   conversation's names, settings validation, fan-in, and child-outcome conversion
   rather than maintaining a second turn machine. Redis, threads, crash recovery,
   and production error handling remain outside this happy-path prototype.
+  Session creation takes an import-path string, including in tests; keep test
+  agents at module scope rather than accepting inline instances for testing.
+- **D109 — Three shared execution extension points (implemented).**
+  Keep shared agent-step outcome construction and subagent resolution in
+  `agent_proxy.py`, alongside public `agent_proxy.invoke_tool` for captured
+  contexts. Reconstructed tool execution takes explicit runtime inputs instead
+  of loading a Conversation; adapters resolve agents and validate dependencies.
+  Keep `AgentRequest` in the models layer with its existing import re-exported.
+  Shared resolution checks explicit settings, including an explicitly empty
+  dependency mapping, without registering names or importing agent definitions.
+  Share production's existing UUID5 child-session and child-turn recipes in
+  the resolver rather than accepting caller-owned ID factories; `fwflash`
+  uses the same identities without adding configuration. Root sessions and
+  user-submitted turns retain fresh IDs. Copy step usage before running a model so
+  proposed outcomes do not mutate canonical turn usage before application.
+  Both Worker and `fwflash` use these boundaries, but retain their own storage,
+  commit/retry ordering, scheduling, context lifetime, and error handling.
+  Delegation effects and stream/dispatch coupling are not refactored here.
+  Consolidate the helpers in the existing agent module rather than introducing
+  a separate execution module; state machines still do not execute agents.

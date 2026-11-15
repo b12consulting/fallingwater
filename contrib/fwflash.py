@@ -21,19 +21,19 @@ from itertools import count
 from typing import Any
 from uuid import uuid4
 
-from pydantic import TypeAdapter
-from pydantic_ai import Agent, DeferredToolRequests, RunContext
-from pydantic_ai.messages import ModelMessagesTypeAdapter
+from pydantic_ai import Agent
 
 from fallingwater.agent_proxy import (
-    AgentRequest,
-    _execute_tool,
-    _find_attached_tool,
-    run,
+    ToolContexts,
+    invoke_tool,
+    resolve_subagent,
+    run_agent_step,
+    validate_deps,
 )
 from fallingwater.catalog import reify_agent
 from fallingwater.conversation import Conversation
 from fallingwater.models import (
+    AgentRequest,
     AgentRequestedPayload,
     AgentResumePayload,
     ConversationCreatedPayload,
@@ -43,13 +43,11 @@ from fallingwater.models import (
     DispatchPayloadType,
     SubAgentResultPayload,
     ToolCallPayload,
-    ToolRequestedPayload,
     ToolResultPayload,
     TurnCompletedPayload,
     TurnQueuedPayload,
     get_cnv_event,
 )
-from fallingwater.turn_state import requests_adapter
 
 if __package__:
     from .fwlite import print_trace
@@ -64,9 +62,7 @@ class Session:
     deps: Any = None
     pending: list[TurnQueuedPayload] = field(default_factory=list)
     events: dict[str, ConversationEvent] = field(default_factory=dict)
-    tool_contexts: dict[str, tuple[RunContext[Any], dict[str, Any]]] = field(
-        default_factory=dict
-    )
+    tool_contexts: ToolContexts = field(default_factory=dict)
 
 
 class Executor:
@@ -77,34 +73,29 @@ class Executor:
 
     def create(
         self,
-        agent: Agent | str,
+        agent: str,
         *,
         model: str | None = None,
         deps: dict[str, Any] | None = None,
     ) -> str:
-        path = agent if isinstance(agent, str) else agent.name or "<inline>"
-        instance = reify_agent(agent) if isinstance(agent, str) else agent
-        return self._create(
-            instance,
+        return self._create_session(
+            reify_agent(agent),
             ConversationCreatedPayload(
-                agent=path, model=model or "", deps=deps or {}
+                agent=agent, model=model or "", deps=deps or {}
             ),
             str(uuid4()),
         )
 
-    def _create(
+    def _create_session(
         self,
         agent: Agent,
         settings: ConversationCreatedPayload,
         session_id: str,
     ) -> str:
-        deps = (
-            None
-            if not settings.deps and agent.deps_type is type(None)
-            else TypeAdapter(agent.deps_type).validate_python(settings.deps)
-        )
         self.registry[session_id] = Session(
-            agent, Conversation(conversation_id=session_id), deps
+            agent,
+            Conversation(conversation_id=session_id),
+            validate_deps(agent, settings.deps),
         )
         self.record(session_id, settings)
         return session_id
@@ -181,65 +172,31 @@ class Executor:
             name=session.agent.name or "unnamed",
             **({"resume": True} if prompt is None else {"prompt": prompt}),
         )
-        requests = turn.requests
-        result = run(
+        outcome = run_agent_step(
             session.agent,
-            prompt,
-            message_history=[*turn.history, *turn.turn_messages],
-            deferred_tool_results=(
-                requests.build_results(calls=turn.tool_results)
-                if requests is not None
-                else None
-            ),
+            turn,
+            prompt=prompt,
             deps=session.deps,
             model=session.conversation.settings.model or None,
-            usage=turn.usage,
-            conversation_id=action.conversation_id,
         )
-        if isinstance(result.output, DeferredToolRequests):
-            session.tool_contexts.update(result.tool_contexts)
-            self.record(
-                action.conversation_id,
-                ToolRequestedPayload(
-                    turn_id=action.turn_id,
-                    step_id=str(uuid4()),
-                    requests=requests_adapter.dump_python(
-                        result.output, mode="json"
-                    ),
-                    step_messages=ModelMessagesTypeAdapter.dump_python(
-                        result.new_messages, mode="json"
-                    ),
-                    usage=result.usage,
-                ),
-            )
-        else:
-            self.record(
-                action.conversation_id,
-                TurnCompletedPayload(
-                    turn_id=action.turn_id,
-                    message=str(result.output),
-                    turn_messages=ModelMessagesTypeAdapter.dump_python(
-                        [*turn.turn_messages, *result.new_messages], mode="json"
-                    ),
-                    usage=result.usage,
-                ),
-            )
+        session.tool_contexts.update(outcome.tool_contexts)
+        self.record(action.conversation_id, outcome.payload)
 
     def call_tool(self, session: Session, action: ToolCallPayload) -> None:
         turn = session.conversation.turn_state[action.turn_id]
         call = turn.calls[action.tool_call_id]
         context, args = session.tool_contexts.pop(action.tool_call_id)
         print_trace("tool", name=call.tool_name, args=args)
-        value = _execute_tool(
-            _find_attached_tool(session.agent, call.tool_name), args, context
-        )
+        value = invoke_tool(session.agent, call.tool_name, args, context)
         if isinstance(value, AgentRequest):
             request = self.resolve_subagent(session.conversation, action, value)
             self.record(action.conversation_id, request)
             settings, queued = session.conversation.subagent_payloads(request)
             child_id = request.child_conversation_id
             if child_id not in self.registry:
-                self._create(reify_agent(settings.agent), settings, child_id)
+                self._create_session(
+                    reify_agent(settings.agent), settings, child_id
+                )
             self.submit(child_id, queued)
         else:
             print_trace("result", value=value)
@@ -259,43 +216,18 @@ class Executor:
         action: ToolCallPayload,
         request: AgentRequest,
     ) -> AgentRequestedPayload:
-        name = request.name
-        if request.persistent and name is None and request.agent_path:
-            name = reify_agent(request.agent_path).name
-        child_id = (
-            conversation.agent_by_name.get(name)
-            if request.persistent and name is not None
+        default_name = (
+            reify_agent(request.agent_path).name
+            if request.persistent
+            and request.name is None
+            and request.agent_path is not None
             else None
         )
-        if child_id is not None:
-            assert name is not None
-            saved = conversation.agent_spec(name)
-            agent_path = request.agent_path or saved.agent_path
-            model = saved.model if request.model is None else request.model
-            deps = (
-                request.deps
-                if "deps" in request.model_fields_set
-                else saved.deps
-            )
-        else:
-            if request.agent_path is None:
-                raise ValueError(f"No registered agent named {name!r}")
-            agent_path = request.agent_path
-            model = request.model or conversation.settings.model
-            deps = request.deps
-            child_id = str(uuid4())
-        return AgentRequestedPayload(
-            turn_id=action.turn_id,
-            step_id=action.step_id,
-            tool_call_id=action.tool_call_id,
-            child_conversation_id=child_id,
-            child_turn_id=str(uuid4()),
-            agent_path=agent_path,
-            model=model,
-            deps=deps,
-            prompt=request.prompt,
-            name=name,
-            persistent=request.persistent,
+        return resolve_subagent(
+            conversation,
+            action,
+            request,
+            default_name=default_name,
         )
 
 

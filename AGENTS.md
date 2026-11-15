@@ -47,14 +47,14 @@ This is the quick-start guide for agents working in this repository. See
 |-- fallingwater/             Importable library and fw CLI
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
-|   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
+|   |-- agent_proxy.py        Agent-step outcomes, tool invocation, and subagent resolution
 |   |-- archive.py            Namespace conversation archives, restore, and stream sync
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal input, event rendering, and reader thread
 |   |-- cli.py                argparse CLI for workers, chat, archive, sync, web, and reset
 |   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
 |   |-- conversation_client.py Replay snapshots, submission, and reader groups
-|   |-- models.py             Conversation and dispatch event/payload schemas
+|   |-- models.py             Agent requests, conversation events, and dispatch schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
 |   |-- stream.py             Low-level typed Redis stream access
@@ -81,7 +81,7 @@ This is the quick-start guide for agents working in this repository. See
 |       `-- time.py           Basic assistant with a current-time tool
 `-- tests/                    Pytest tests; conftest provides shared fixtures
     |-- conftest.py           Typeguard import hook and isolated Redis fixture
-    |-- test_agent_proxy.py   Single-call deferred agent checks
+    |-- test_agent_proxy.py   Agent-step, tool invocation, and subagent resolution checks
     |-- test_archive.py       Zstandard archive export and restore checks
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Terminal rendering, input, and reader lifecycle checks

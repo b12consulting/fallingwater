@@ -36,9 +36,11 @@ are written as separate stream commands; each result is saved by call ID, and
 the last unique result queues one agent resume. A restarted worker reconstructs
 the turn from the conversation stream and recovers pending actions through
 `XAUTOCLAIM`.
-`agent_proxy.execute_tool` resolves attached functions and reconstructs a
-basic `RunContext` for each deferred call. The next turn rebuilds its history
-from completed turns.
+`agent_proxy.invoke_tool` executes attached functions with validated arguments
+and an optional captured context. `agent_proxy.execute_tool` reconstructs a
+basic `RunContext` from explicit runtime inputs; the worker loads the latest
+agent and dependencies before calling it. Neither helper loads conversations.
+The next turn rebuilds its history from completed turns.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -732,11 +734,43 @@ Creation settings are applied directly. Events have counter-generated IDs and
 remain in each session's in-memory journal, including exact child terminal events
 used by `Conversation.child_outcome`. Runtime agent instances, dependencies, and
 captured tool contexts stay outside the pure conversation state.
+Public session creation accepts an agent import-path string. Tests expose
+module-level agents and exercise the same catalog loading path as the CLI.
 
 Pending prompts are applied only when their session's previous turn completes,
 preserving serial history snapshots. Delegation records the parent request,
 then submits the child's queued event; that event emits the child poke instead
 of also publishing the delegation's equivalent intent. Persistent settings
-conflicts are rejected by conversation preparation. The prototype shares
-`fwlite`'s trace renderer but does not replace it or modify the durable worker.
+conflicts are rejected during shared resolution and conversation preparation.
+The prototype shares `fwlite`'s trace renderer but does not replace it.
 Exceptions propagate without recovery or failed-event conversion.
+
+## AD20 — Shared execution helpers, adapter-owned policies
+
+`agent_proxy.run_agent_step` assembles a turn's model inputs and returns an
+`AgentStepOutcome`: a proposed tool-request or completion payload plus ephemeral
+captured tool contexts. It does not record events, apply transitions, or publish
+actions. Usage is copied before execution so the model call cannot advance the
+turn's canonical usage ahead of its event. Both the Redis worker and `fwflash`
+use this helper; each still owns its prepare/record/apply/publish lifecycle.
+
+`agent_proxy.resolve_subagent` resolves parent-scoped names, inherited settings,
+and explicit conflicts without loading agents or changing registrations.
+Callers supply the definition's default name. Both executors use the worker's
+original deterministic UUID5 child-session and child-turn identities, derived
+from the requesting conversation, turn, step, and tool call. Named reuse keeps
+the child session ID while deriving a turn ID for each requesting call. Root
+sessions and user-submitted turns retain fresh IDs. `AgentRequest` lives in
+`models.py`; its existing `agent_proxy`
+import remains available as a re-export.
+
+`agent_proxy.invoke_tool` is the public attached-tool invocation boundary for
+captured contexts. `execute_tool` now accepts an already resolved agent plus
+explicit dependencies, model, conversation ID, prompt, messages, and usage
+instead of a `Conversation`; it restores a basic context and uses the same
+invocation boundary. `validate_deps` shares dependency reconstruction. Catalog
+loading, agent lifetime, event storage, queueing, retries, error conversion, and
+scheduling remain adapter concerns. This does not change delegation effects,
+production queue-time snapshots, or the prototype's serial-session policy.
+Keep these functions in the existing `agent_proxy.py` module rather than adding
+a separate execution module; the shared APIs retain the same role boundaries.
