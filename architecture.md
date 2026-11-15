@@ -704,3 +704,20 @@ Each turn stores its own parent reference, preventing follow-up answers from
 resolving the original creation call. Registration and setup are cursor-checked
 and replayable, but dispatch publication remains separate and ownership renewal,
 exactly-once external effects, and full cross-stream recovery are not provided.
+
+## AD18 — In-memory FIFO prototype
+
+`contrib/fwlite.py` is a separate happy-path executor, not a Redis backend.
+UUIDs identify sessions holding agent instances and history; a parent-scoped
+name service resolves persistent `AgentRequest` sessions. One deque uses
+`appendleft` for all jobs and `pop` for execution. Agent steps defer tools,
+tool results fan in by call ID, and child answers route to the requesting turn
+and tool call. Root answers are printed. Turns within a session are serialized
+and start with its latest completed history, unlike the durable library's
+overlapping queue-time snapshots.
+
+The prototype reuses `agent_proxy.run` and its private attached-tool helpers
+with captured runtime contexts, avoiding replay and persistence models.
+Registered subagents reuse their original settings; subsequent requests do
+not reconfigure them. Exceptions propagate and stop processing, state remains
+in memory, and there is no recovery, cancellation, or execution limit.

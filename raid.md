@@ -1033,3 +1033,14 @@ revisited. Close or revise an item when the code resolves it.
   exactly one trailing colon; other targets select one conversation in the global
   namespace. Reuse existing archive helpers and formats without changing sync.
   Empty or otherwise invalid namespace targets fail normal namespace validation.
+- **D107 — Separate in-memory FIFO prototype (implemented).**
+  Keep the toy executor in `contrib/fwlite.py`, reusing the agent-step runner
+  and captured tool contexts rather than the durable state machines.
+  Schedule agent, tool, and result jobs through `appendleft`/`pop` on one
+  deque without executor threads or Redis. UUIDs identify sessions, persistent
+  names are parent-scoped, and each child turn retains its own return address.
+  Serialize turns per session to make named follow-ups use completed history;
+  other sessions interleave at job boundaries, not during model/tool calls.
+  Reused sessions retain their original settings without conflict checking.
+  Print root output and propagate exceptions; persistence, recovery, cancellation,
+  limits, and production error handling remain deliberately out of scope.
