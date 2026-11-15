@@ -31,8 +31,11 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- tool-call-flow.md     Tool call events, dispatch, and recovery flow
 |   `-- tool-call-flow.svg    Rendered tool call diagrams
 |-- contrib/                  Small component experiments
+|   |-- bench-sync.py         Copy fw to 100 namespaces and time each sync
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment
+|   |-- fwlite.py             In-memory FIFO agent and subagent executor
+|   |-- fwflash.py            FIFO executor using Conversation event validation
 |   |-- turn-state-machine.py Payload-instance transition model example
 |   |-- turn-state-machine2.py Tool and child payload-transition model example
 |   |-- test-compression.py   Compression benchmark for a serialized conversation turn
@@ -44,13 +47,14 @@ This is the quick-start guide for agents working in this repository. See
 |-- fallingwater/             Importable library and fw CLI
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
-|   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
-|   |-- archive.py            Conversation archive export and restore
+|   |-- agent_proxy.py        Agent-step outcomes, tool invocation, and subagent resolution
+|   |-- archive.py            Namespace conversation archives, restore, and stream sync
 |   |-- catalog.py            Agent import-path loading
-|   |-- chat.py               Nonblocking terminal chat and blocking library workflows
-|   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
-|   |-- conversation.py       Pure decisions, agent registry, and conversation replay
-|   |-- models.py             Conversation and dispatch event/payload schemas
+|   |-- chat.py               Terminal input, event rendering, and reader thread
+|   |-- cli.py                argparse CLI for workers, chat, archive, sync, web, and reset
+|   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
+|   |-- conversation_client.py Replay snapshots, submission, and reader groups
+|   |-- models.py             Agent requests, conversation events, and dispatch schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
 |   |-- stream.py             Low-level typed Redis stream access
@@ -73,17 +77,20 @@ This is the quick-start guide for agents working in this repository. See
 |   `-- demo/                 Example client-defined agents
 |       |-- __init__.py       Demo agent exports and small examples
 |       |-- editor_writers.py Editor delegating to fresh or persistent writers
-|       |-- jeopardy.py       Redis-backed Jeopardy host and contestant demos
+|       |-- jeopardy.py       Jeopardy agents and an event-printing client example
 |       `-- time.py           Basic assistant with a current-time tool
 `-- tests/                    Pytest tests; conftest provides shared fixtures
     |-- conftest.py           Typeguard import hook and isolated Redis fixture
-    |-- test_agent_proxy.py   Single-call deferred agent checks
+    |-- test_agent_proxy.py   Agent-step, tool invocation, and subagent resolution checks
     |-- test_archive.py       Zstandard archive export and restore checks
     |-- test_catalog.py       Agent import-path checks
-    |-- test_chat.py          Chat submission, terminal input, and reader lifecycle checks
+    |-- test_chat.py          Terminal rendering, input, and reader lifecycle checks
     |-- test_cli.py           CLI smoke checks
     |-- test_conversation.py  Dispatch and conversation stream checks
+    |-- test_conversation_client.py Client snapshots, submission, and reader-group checks
     |-- test_demo.py          Jeopardy and editor/writer request checks
+    |-- test_fwlite.py        In-memory FIFO executor and named-session checks
+    |-- test_fwflash.py       Conversation-backed FIFO executor checks
     |-- test_streams.py       Conversation event codec and naming checks
     |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks

@@ -6,8 +6,12 @@ Start one or more workers to process the host and contestant turns::
     fw worker -w 2
     fw chat --agent fallingwater.demo:jeopardy_host --model openai:gpt-6-luna
 
-If the worker uses a nondefault Redis URL or namespace, set FW_REDIS_URL and
-FW_NAMESPACE in its environment so this tool submits to the same Redis keys.
+Or print the host conversation's events until its turn finishes::
+
+    FW_MODEL=openai:gpt-6-luna python fallingwater/demo/jeopardy.py
+
+Set FW_REDIS_URL and FW_NAMESPACE consistently for clients and workers when
+using a nondefault Redis URL or namespace.
 """
 
 import os
@@ -15,6 +19,7 @@ import os
 from pydantic_ai import Agent, AgentSpec, RunContext
 
 from fallingwater.agent_proxy import AgentRequest
+from fallingwater.utils import poll
 
 
 jeopardy_contestant = Agent.from_spec(
@@ -38,12 +43,12 @@ jeopardy_host = Agent.from_spec(
             "name": "jeopardy-host",
             "instructions": (
                 "You host a Jeopardy game. When given a theme, generate 3 "
-                "distinct, factual clues related to it. Each clue should hint "
-                "at a specific person, place, thing, or term without naming it. "
+                "distinct, factual clues related to it. "
                 "Formulate each clue like an answer. Call ask_contestant once "
-                "for each clue, passing one clue per call. After receiving the "
-                "responses, present each clue with its contestant's response. "
-                "Do not answer the clues yourself."
+                "for each clue, passing one clue per call. "
+                "After receiving the responses, present each clue "
+                "with its contestant's response. Do not answer the clues "
+                "yourself."
             ),
         }
     )
@@ -68,3 +73,28 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> AgentRequest:
         prompt=clue,
         model=model,
     )
+
+
+if __name__ == "__main__":
+    from redis import Redis
+
+    from fallingwater.conversation_client import ConversationClient
+    from fallingwater.models import Event
+
+    with Redis.from_url(
+        os.getenv("FW_REDIS_URL", "redis://localhost:6379/0")
+    ) as redis:
+        client = ConversationClient(
+            redis,
+            namespace=os.getenv("FW_NAMESPACE", "fw"),
+            agent_path="fallingwater.demo:jeopardy_host",
+            model=os.getenv("FW_MODEL"),
+        )
+        turn_id, _ = client.send("Start a Jeopardy game about science.")
+        events = poll(client.read)
+        for event in events:
+            print(f"Event Type: {event.type}")
+            client.acknowledge(event)
+            if event.type is Event.TURN_COMPLETED:
+                print(event.payload.message)
+                break

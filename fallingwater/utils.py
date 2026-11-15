@@ -10,6 +10,15 @@ import zstandard as zstd
 from fallingwater.catalog import reify_agent
 
 
+fmt = "%(levelname)s:%(asctime).19s: %(message)s"
+logging.basicConfig(format=fmt)
+logger = logging.getLogger("fallingwater")
+logger.setLevel("INFO")
+if os.environ.get("FW_DEBUG"):
+    logger.setLevel("DEBUG")
+    logger.debug("Log level set to debug")
+
+
 def compress(data: bytes) -> bytes:
     """
     Compress a conversation stream payload with Zstandard.
@@ -45,10 +54,9 @@ def check_agent(agent_path: str, model: str | None) -> None:
     )
 
 
-fmt = "%(levelname)s:%(asctime).19s: %(message)s"
-logging.basicConfig(format=fmt)
-logger = logging.getLogger("fallingwater")
-logger.setLevel("INFO")
-if os.environ.get("FW_DEBUG"):
-    logger.setLevel("DEBUG")
-    logger.debug("Log level set to debug")
+def poll(fn):
+    """
+    Infinitly yield from fn()
+    """
+    while True:
+        yield from fn()
