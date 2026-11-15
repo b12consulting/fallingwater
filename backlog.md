@@ -2,9 +2,11 @@
 
 ## B1. Repeatable conversation settings
 
-Rename `conversation.created` to `conversation.settings` and allow multiple
-settings events in a conversation. The first event must still be a settings
-event; preserve the current validation enforcing that requirement.
+Rename `conversation.created` to `conversation.settings` and rename its payload
+and enum accordingly. Repeatable settings are implemented under the existing
+names: replay replaces the latest settings without resetting conversation
+state. An empty conversation is valid; the first event in a nonempty
+conversation must still be a settings event.
 
 ## B3. Agent definition versioning
 
@@ -13,9 +15,10 @@ adopt changes after an upgrade. Saved import paths currently have no version.
 
 ## B4. Change a conversation's model
 
-Support continuing a conversation when its saved model becomes unavailable.
-Define how settings changes affect queued and running turns, preserving the
-model selected for each turn during replay. Relates to repeatable settings.
+Provide a user-facing way to change a conversation's model when its saved model
+becomes unavailable. Replayed settings now take effect at each execution step,
+including already queued turns; models are not pinned per turn. An invocation
+already in progress is unchanged. Relates to repeatable settings.
 
 ## B5. Terminal answer streaming and progress
 

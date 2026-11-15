@@ -49,18 +49,39 @@ class Conversation(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     conversation_id: str
-    settings: ConversationCreatedPayload
     turn_state: dict[str, TurnStateMachine] = Field(default_factory=dict)
     agent_by_name: dict[str, str] = Field(default_factory=dict)
     last_event_id: str = "0-0"
+    _settings: ConversationCreatedPayload | None = PrivateAttr(default=None)
     _history: MessageHistory = PrivateAttr(default_factory=MessageHistory)
     _latest_completed: TurnStateMachine | None = PrivateAttr(default=None)
     _agent_specs: dict[str, AgentRequestedPayload] = PrivateAttr(
         default_factory=dict
     )
 
+    def __init__(
+        self,
+        events: Iterable[ConversationEvent] = (),
+        *,
+        conversation_id: str,
+    ) -> None:
+        super().__init__(conversation_id=conversation_id)
+        self.apply(events)
+
+    @property
+    def settings(self) -> ConversationCreatedPayload:
+        if self._settings is None:
+            raise ValueError(
+                f"Conversation settings not found in {self.conversation_id}"
+            )
+        return self._settings
+
+    def get_settings(self) -> ConversationCreatedPayload | None:
+        return self._settings
+
     def prepare(self, payload: TurnPayload) -> PreparedEvent:
         """Validate a proposed fact without registering or advancing a turn."""
+        settings = self.settings
         turn = self.turn_state.get(payload.turn_id)
         if turn is None:
             if not isinstance(payload, TurnQueuedPayload):
@@ -68,7 +89,7 @@ class Conversation(BaseModel):
             turn = TurnStateMachine(
                 self.conversation_id,
                 payload.turn_id,
-                parent=payload.parent or self.settings.parent,
+                parent=payload.parent or settings.parent,
             )
         if isinstance(payload, AgentRequestedPayload):
             self._validate_registration(payload)
@@ -138,63 +159,51 @@ class Conversation(BaseModel):
         )
         return settings, queued
 
-    def apply(self, event: ConversationEvent) -> None:
-        payload = event.payload
-        if isinstance(payload, ConversationCreatedPayload):
-            raise ValueError("Conversation settings were already loaded")
+    def apply(self, events: Iterable[ConversationEvent]) -> None:
+        """Replay events lazily in order, retaining the prefix on failure."""
+        for event in events:
+            payload = event.payload
+            if isinstance(payload, ConversationCreatedPayload):
+                self._settings = payload
+                self.last_event_id = event.entry_id
+                continue
 
-        if payload.turn_id not in self.turn_state:
-            if not isinstance(payload, TurnQueuedPayload):
-                raise ValueError(f"No prompt found for turn: {payload.turn_id}")
-            self.turn_state[payload.turn_id] = TurnStateMachine(
-                self.conversation_id,
-                payload.turn_id,
-                parent=payload.parent or self.settings.parent,
-                history=self._history,
-                usage=(
-                    self._latest_completed.usage
-                    if self._latest_completed is not None
-                    else None
-                ),
-            )
-        turn = self.turn_state[payload.turn_id]
-        was_running = turn.running
-        if isinstance(payload, AgentRequestedPayload) and was_running:
-            self._validate_registration(payload)
-        turn.replay(event)
-        if (
-            isinstance(payload, AgentRequestedPayload)
-            and payload.persistent
-            and payload.name is not None
-            and turn.delegations.get(payload.tool_call_id) == payload
-        ):
-            self.agent_by_name[payload.name] = payload.child_conversation_id
-            self._agent_specs.setdefault(payload.name, payload)
-        if was_running and turn.completed:
-            self._history = MessageHistory(
-                previous=self._history, messages=tuple(turn.turn_messages)
-            )
-            self._latest_completed = turn
-        self.last_event_id = event.entry_id
+            settings = self.settings
+            if payload.turn_id not in self.turn_state:
+                if not isinstance(payload, TurnQueuedPayload):
+                    raise ValueError(
+                        f"No prompt found for turn: {payload.turn_id}"
+                    )
+                self.turn_state[payload.turn_id] = TurnStateMachine(
+                    self.conversation_id,
+                    payload.turn_id,
+                    parent=payload.parent or settings.parent,
+                    history=self._history,
+                    usage=(
+                        self._latest_completed.usage
+                        if self._latest_completed is not None
+                        else None
+                    ),
+                )
+            turn = self.turn_state[payload.turn_id]
+            was_running = turn.running
+            if isinstance(payload, AgentRequestedPayload) and was_running:
+                self._validate_registration(payload)
+            turn.replay(event)
+            if (
+                isinstance(payload, AgentRequestedPayload)
+                and payload.persistent
+                and payload.name is not None
+                and turn.delegations.get(payload.tool_call_id) == payload
+            ):
+                self.agent_by_name[payload.name] = payload.child_conversation_id
+                self._agent_specs.setdefault(payload.name, payload)
+            if was_running and turn.completed:
+                self._history = MessageHistory(
+                    previous=self._history, messages=tuple(turn.turn_messages)
+                )
+                self._latest_completed = turn
+            self.last_event_id = event.entry_id
 
-
-def reconstruct_conversation(
-    events: Iterable[ConversationEvent], *, conversation_id: str
-) -> Conversation:
-    """Replay all turns without publishing the transitions' dispatch hints."""
-    iterator = iter(events)
-    first = next(iterator, None)
-    if first is None or not isinstance(
-        first.payload, ConversationCreatedPayload
-    ):
-        raise ValueError(
-            f"Conversation settings not found in {conversation_id}"
-        )
-    conversation = Conversation(
-        conversation_id=conversation_id,
-        settings=first.payload,
-        last_event_id=first.entry_id,
-    )
-    for event in iterator:
-        conversation.apply(event)
-    return conversation
+    def apply_one(self, event: ConversationEvent) -> None:
+        self.apply((event,))

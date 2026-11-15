@@ -3,18 +3,21 @@
 from threading import Event as ThreadEvent
 from traceback import format_exc
 from typing import Any
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import uuid4
 
 from pydantic import TypeAdapter
-from pydantic_ai import DeferredToolRequests
-from pydantic_ai.messages import ModelMessagesTypeAdapter
 from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import RedisError
 
 from fallingwater.catalog import reify_agent
-from fallingwater.agent_proxy import AgentRequest, execute_tool, run
-from fallingwater.conversation import Conversation, reconstruct_conversation
+from fallingwater.agent_proxy import (
+    execute_tool,
+    resolve_subagent,
+    run_agent_step,
+    validate_deps,
+)
+from fallingwater.conversation import Conversation
 from fallingwater.stream import ConversationStream, DispatchStream
 from fallingwater.models import (
     ConversationPokePayload,
@@ -24,8 +27,8 @@ from fallingwater.models import (
     InvalidDispatchEvent,
     SubAgentResultPayload,
     AgentRequestedPayload,
+    AgentRequest,
     ToolCallPayload,
-    ToolRequestedPayload,
     ToolResultPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
@@ -33,7 +36,6 @@ from fallingwater.models import (
 from fallingwater.turn_state import (
     TurnPayload,
     TurnStateMachine,
-    requests_adapter,
 )
 from fallingwater.utils import logger
 
@@ -69,10 +71,9 @@ class Worker:
     def refresh(
         cnv_stream: ConversationStream, conversation: Conversation
     ) -> None:
-        for event in cnv_stream.iter_events(
-            after_id=conversation.last_event_id
-        ):
-            conversation.apply(event)
+        conversation.apply(
+            cnv_stream.iter_events(after_id=conversation.last_event_id)
+        )
 
     @staticmethod
     def publish(
@@ -107,9 +108,7 @@ class Worker:
                 prepared.payload,
                 after_id=conversation.last_event_id,
             )
-            for event in events:
-                # Resume the conversation state on new events
-                conversation.apply(event)
+            conversation.apply(events)
             if entry_id is not None:
                 # We received an entry, so our result was appended.
                 # Check readiness without reading later writes, which
@@ -140,8 +139,7 @@ class Worker:
                 prepared.payload,
                 after_id=conversation.last_event_id,
             )
-            for event in events:
-                conversation.apply(event)
+            conversation.apply(events)
             if entry_id is not None:
                 self.ensure_subagent(conversation, request)
                 return
@@ -152,61 +150,18 @@ class Worker:
         action: ToolCallPayload,
         child: AgentRequest,
     ) -> AgentRequestedPayload:
-        name = child.name
-        if child.persistent and name is None and child.agent_path is not None:
-            name = reify_agent(child.agent_path).name
-        if child.persistent and (name is None or not name.strip()):
-            raise ValueError("Persistent agent requires a name")
-        registered = (
-            conversation.agent_by_name.get(name)
-            if child.persistent and name is not None
+        default_name = (
+            reify_agent(child.agent_path).name
+            if child.persistent
+            and child.name is None
+            and child.agent_path is not None
             else None
         )
-        if registered is not None and name is not None:
-            previous = conversation.agent_spec(name)
-            if (
-                child.agent_path is not None
-                and child.agent_path != previous.agent_path
-            ):
-                raise ValueError("Registered agent has a different agent_path")
-            if child.model is not None and child.model != previous.model:
-                raise ValueError("Registered agent has a different model")
-            if "deps" in child.model_fields_set and child.deps != previous.deps:
-                raise ValueError("Registered agent has different dependencies")
-            agent_path = previous.agent_path
-            model = previous.model
-            deps = previous.deps
-            conversation_id = registered
-        else:
-            if child.agent_path is None:
-                raise ValueError(f"No registered agent named {name!r}")
-            agent_path = child.agent_path
-            model = child.model or conversation.settings.model
-            deps = child.deps
-            conversation_id = str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"fallingwater:{conversation.conversation_id}:{action.turn_id}:{action.step_id}:{action.tool_call_id}",
-                )
-            )
-        turn_id = str(
-            uuid5(
-                NAMESPACE_URL,
-                f"fallingwater:{conversation_id}:turn:{conversation.conversation_id}:{action.turn_id}:{action.step_id}:{action.tool_call_id}",
-            )
-        )
-        return AgentRequestedPayload(
-            turn_id=action.turn_id,
-            step_id=action.step_id,
-            tool_call_id=action.tool_call_id,
-            child_conversation_id=conversation_id,
-            child_turn_id=turn_id,
-            agent_path=agent_path,
-            model=model,
-            deps=deps,
-            prompt=child.prompt,
-            name=name,
-            persistent=child.persistent,
+        return resolve_subagent(
+            conversation,
+            action,
+            child,
+            default_name=default_name,
         )
 
     def ensure_subagent(
@@ -224,7 +179,7 @@ class Worker:
                 Event.CONVERSATION_CREATED, settings, after_id="0-0"
             )
             events = list(child_stream.iter_events())
-        child_conversation = reconstruct_conversation(
+        child_conversation = Conversation(
             events, conversation_id=request.child_conversation_id
         )
         saved = child_conversation.settings
@@ -248,8 +203,7 @@ class Worker:
                 prepared.payload,
                 after_id=child_conversation.last_event_id,
             )
-            for event in tail:
-                child_conversation.apply(event)
+            child_conversation.apply(tail)
             if entry_id is not None:
                 self.publish(child_stream, prepared.dispatch(entry_id))
                 return
@@ -262,64 +216,22 @@ class Worker:
         cnv_stream: ConversationStream,
         prompt: str | None,
     ) -> None:
-        requests = turn.requests
-        agent = reify_agent(conversation.settings.agent)
-        deps = (
-            None
-            if not conversation.settings.deps and agent.deps_type is type(None)
-            else TypeAdapter(agent.deps_type).validate_python(
-                conversation.settings.deps
-            )
-        )
-
-        result = run(
+        settings = conversation.settings
+        agent = reify_agent(settings.agent)
+        outcome = run_agent_step(
             agent,
-            prompt,
-            message_history=[*turn.history, *turn.turn_messages],
-            deferred_tool_results=(
-                requests.build_results(
-                    calls=turn.tool_results, metadata=requests.metadata
-                )
-                if requests is not None
-                else None
-            ),
-            deps=deps,
-            model=conversation.settings.model or None,
-            usage=turn.usage,
-            conversation_id=cnv_stream.conversation_id,
+            turn,
+            prompt=prompt,
+            deps=validate_deps(agent, settings.deps),
+            model=settings.model or None,
         )
-        if isinstance(result.output, DeferredToolRequests):
-            payload = ToolRequestedPayload(
-                turn_id=turn.turn_id,
-                step_id=str(uuid4()),
-                requests=requests_adapter.dump_python(
-                    result.output, mode="json"
-                ),
-                step_messages=ModelMessagesTypeAdapter.dump_python(
-                    result.new_messages, mode="json"
-                ),
-                usage=result.usage,
+        self.checkpoint(cnv_stream, conversation, outcome.payload)
+        if isinstance(outcome.payload, TurnCompletedPayload):
+            logger.info(
+                "Sent response for turn %s in conversation %s",
+                turn.turn_id,
+                cnv_stream.conversation_id,
             )
-            self.checkpoint(cnv_stream, conversation, payload)
-            return
-
-        self.checkpoint(
-            cnv_stream,
-            conversation,
-            TurnCompletedPayload(
-                turn_id=turn.turn_id,
-                message=str(result.output),
-                turn_messages=ModelMessagesTypeAdapter.dump_python(
-                    [*turn.turn_messages, *result.new_messages], mode="json"
-                ),
-                usage=result.usage,
-            ),
-        )
-        logger.info(
-            "Sent response for turn %s in conversation %s",
-            turn.turn_id,
-            cnv_stream.conversation_id,
-        )
 
     def execute_tool_call(
         self,
@@ -329,12 +241,17 @@ class Worker:
         cnv_stream: ConversationStream,
         action: ToolCallPayload,
     ) -> None:
+        settings = conversation.settings
+        agent = reify_agent(settings.agent)
         value = execute_tool(
-            conversation,
+            agent,
             turn.calls[action.tool_call_id],
             prompt=turn.prompt,
             messages=[*turn.history, *turn.turn_messages],
             usage=turn.usage or RunUsage(),
+            deps=validate_deps(agent, settings.deps),
+            model=settings.model or None,
+            conversation_id=conversation.conversation_id,
         )
         if isinstance(value, AgentRequest):
             self.queue_subagent(
@@ -457,7 +374,7 @@ class Worker:
             )
             cnv_stream = self.dsp_stream.conversation_stream(conversation_id)
             try:
-                conversation = reconstruct_conversation(
+                conversation = Conversation(
                     cnv_stream.iter_events(), conversation_id=conversation_id
                 )
                 if turn_id not in conversation.turn_state:

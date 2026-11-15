@@ -125,6 +125,29 @@ class ConversationPayload(BaseModel):
         return self.model_dump(mode="json")
 
 
+class AgentRequest(BaseModel):
+    """Serializable request for a nonblocking agent turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_path: str | None = Field(default=None, min_length=1)
+    prompt: str = Field(min_length=1)
+    model: str | None = None
+    deps: dict[str, Any] = Field(default_factory=dict)
+    name: str | None = Field(default=None, min_length=1)
+    persistent: bool = False
+
+    @model_validator(mode="after")
+    def validate_session(self) -> Self:
+        if self.name is not None and not self.name.strip():
+            raise ValueError("Agent name must not be blank")
+        if self.agent_path is None and not (self.persistent and self.name):
+            raise ValueError(
+                "Provide agent_path or a name with persistent=True"
+            )
+        return self
+
+
 class ParentToolReference(ConversationPayload):
     conversation_id: str
     turn_id: str

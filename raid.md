@@ -360,11 +360,12 @@ revisited. Close or revise an item when the code resolves it.
 - **D41 — Conversation-scoped client identity (superseded).** The
   optional default conversation ID is replaced by a
   `ConversationStream` bound to exactly one ID; see D44.
-- **D42 — Pure turn reconstruction (amended by D83 and D87).** Keep Redis
+- **D42 — Pure turn reconstruction (amended by D83, D87, and D102).** Keep Redis
   pagination in `ConversationStream.iter_events` and fold ordered, decoded
   events in the pure `conversation.reconstruct_conversation`. This replaces
   the former single-turn reconstruction with all-turn replay, isolating
   workflow rules from Redis access; `Worker` supplies the stream iterator.
+  D102 moves that fold into the iterable `Conversation` constructor.
 - **D43 — Worker naming (decided).** Name the Pydantic AI adapter
   `agent_proxy.py`, the dispatch consumer `Worker` in `worker.py`, and
   the thread and signal supervisor `WorkerPool` in
@@ -760,7 +761,8 @@ revisited. Close or revise an item when the code resolves it.
   message prefixes, and per-turn machines in `turn_state.py`. Conversation
   depends on turn state, never the reverse; both remain I/O-free and streams
   depend on neither. Update callers and import-boundary checks without
-  compatibility re-exports or behavior changes.
+  compatibility re-exports or behavior changes. D102 later replaces
+  `reconstruct_conversation` with the iterable `Conversation` constructor.
 - **D88 — Cursor-checked tool-result append (implemented).**
   `ConversationStream.append_if_current` uses a single-key Lua script to check
   for events after the caller's replay cursor. If stale, return up to 100
@@ -941,3 +943,136 @@ revisited. Close or revise an item when the code resolves it.
   changing conversation data, other groups, or worker dispatch. The position
   is shared by all readers in the selected group; independent replays should
   use another group. This replays saved output, not agent or tool execution.
+- **D100 — Separate conversation client and terminal UI (implemented).**
+  Extract `ConversationClient` into `conversation_client.py` for opening and
+  validating settings, turn submission, blocking results, reader-group cursors,
+  acknowledgements, rewind, and retained-prompt lookup. `Chat(client)` owns
+  terminal input, rendering, formatted timestamp caches, and the managed reader
+  thread. The CLI constructs both explicitly; library callers use the client's
+  `send`, `receive`, and `ask` rather than Chat methods.
+  Keep `Conversation` pure: prepare each fresh turn from settings without
+  loading history or retaining a misleading unreplayed conversation snapshot.
+  Group reads yield typed events without automatic acknowledgement; Chat
+  acknowledges through the client after rendering succeeds. Cache raw queued
+  event IDs in the client and formatted labels in Chat. Preserve pending-first
+  reads, rewind ordering, overlapping input, and one-shot output. This updates
+  D86 and D98's client ownership without restoring the former combined
+  conversation/worker-dispatch client described in D24/D25. It adds no recovery,
+  atomicity, or shared mutable replay state between threads.
+- **D101 — Explicitly refreshed client conversation snapshot (implemented).**
+  Supersede D100's settings-only preparation object with a public
+  `client.conversation`, reconstructed from all retained events on opening.
+  Expose settings through that object and add `refresh()` to apply the unseen
+  stream tail after `conversation.last_event_id`. Keep replay independent of
+  reader-group delivery, pending entries, acknowledgements, and rewind.
+  Submission and result delivery do not implicitly refresh; rewind changes
+  delivery only. Replay emits no dispatch actions and acknowledges nothing.
+  Prepare submissions through the snapshot without applying proposed payloads.
+  Serialize explicit refreshes and submission preparation with one client lock,
+  without holding it during blocking delivery reads or submission writes.
+  Callers treat the exposed object as read-only and coordinate concurrent
+  inspection. No extra reader thread or continuous-freshness guarantee is added.
+  Opening now requires complete replayable retained history and incurs its
+  time/memory cost. Errors propagate; a partial failed refresh retains its
+  successfully applied prefix for retry from the replay cursor. This adds no
+  transactional snapshot, cross-stream repair, or automatic state refresh.
+- **D102 — Iterable conversation initialization and repeatable settings
+  (implemented).** Replace `reconstruct_conversation` with
+  `Conversation(events, conversation_id=...)`; its constructor simply applies
+  the iterable. Empty conversations have no settings and are valid. Nonempty
+  streams still require a settings event first; turn preparation and replay
+  fail explicitly until settings exist. `apply` accepts repeated
+  `ConversationCreatedPayload` events, replaces settings, and advances the
+  replay cursor without resetting turns, history, usage, or registrations.
+  Keep the payload, enum, and `conversation.created` wire names for this
+  refactor; B1 retains the rename work.
+  Clients construct the conversation before deciding whether creation is
+  needed, then validate the latest saved settings or persist and apply initial
+  settings. Workers and tool executors use the latest replayed agent, model,
+  and dependencies at each execution step, including already queued turns.
+  There is no per-turn configuration pinning or hot-swapping of an invocation
+  already running. Existing queue-time history/usage and parent routing remain
+  unchanged. Changing agents between steps can invalidate outstanding tools,
+  and those errors surface normally. Explicit refresh and delivery cursors
+  remain independent as in D101; the UI still cannot change settings on resume.
+  Settings are stored privately in `_settings`. The read-only `settings`
+  property raises if absent; `get_settings()` returns the settings or `None`.
+  Initialization uses optional access, while execution uses the strict property.
+- **D103 — Iterable event application with a singleton wrapper (implemented).**
+  `Conversation.apply(events)` owns ordered, lazy iteration for both initial
+  reconstruction and incremental replay. `apply_one(event)` wraps one event
+  and delegates to that same path. Constructors, refreshes, and cursor-checked
+  worker writes pass their iterables directly; initial client settings use
+  `apply_one`. Empty batches are no-ops, settings events do not end a batch,
+  and a failure preserves the successfully applied prefix and its replay
+  cursor. This removes caller-owned replay loops without introducing batch
+  atomicity, dispatch publication, or new concurrency guarantees.
+- **D104 — Non-destructive namespace stream sync (implemented).**
+  Add `fw sync <source-namespace> <destination-namespace>` using Redis `COPY`
+  within the selected database. Copy all streams, including dispatch, with their
+  original IDs, payload bytes, consumer groups, pending entries, and expiry.
+  Refuse identical or invalid namespaces and preflight destination conflicts
+  before copying; never replace existing keys. Ignore non-stream source keys.
+  This preserves operational state rather than replaying archive events with new
+  IDs. It requires Redis 6.2 or newer and offers no cross-stream atomic snapshot
+  or rollback: stop writers and workers for consistency, and report failures
+  explicitly if concurrent changes leave a partial copy.
+- **D105 — Namespace-wide conversation archive commands (implemented).**
+  Make archive and restore accept positional source and destination namespaces,
+  respectively, rather than a conversation ID. Retain per-conversation JSONL
+  Zstandard files and library helpers, excluding dispatch and operational stream
+  metadata. Discover conversations with typed SCAN batches of 1000 and restore
+  all matching store files after checking every destination key for conflicts.
+  Keep the existing flat store layout, requiring a separate directory for each
+  archive set; archive overwrites matching files and restore generates new IDs.
+  Validate conversation filenames before export. Neither operation is a
+  cross-conversation transaction, and failures can leave partial output.
+- **D106 — Colon-suffixed archive targets (implemented).**
+  Extend D105's namespace-wide commands with single-conversation mode.
+  A positional target ending in `:` selects an explicit namespace after stripping
+  exactly one trailing colon; other targets select one conversation in the global
+  namespace. Reuse existing archive helpers and formats without changing sync.
+  Empty or otherwise invalid namespace targets fail normal namespace validation.
+- **D107 — Separate in-memory FIFO prototype (implemented).**
+  Keep the toy executor in `contrib/fwlite.py`, reusing the agent-step runner
+  and captured tool contexts rather than the durable state machines.
+  Schedule agent, tool, and result jobs through `appendleft`/`pop` on one
+  deque without executor threads or Redis. UUIDs identify sessions, persistent
+  names are parent-scoped, and each child turn retains its own return address.
+  Serialize turns per session to make named follow-ups use completed history;
+  other sessions interleave at job boundaries, not during model/tool calls.
+  Reused sessions retain their original settings without conflict checking.
+  Print root output and propagate exceptions; persistence, recovery, cancellation,
+  limits, and production error handling remain deliberately out of scope.
+- **D108 — Conversation-backed single-deque experiment (implemented).**
+  Add `contrib/fwflash.py` alongside `fwlite`, with no production-library changes.
+  Validate new turn payloads through `Conversation.prepare` before recording
+  their events through `Conversation.apply`; replay alone intentionally tolerates
+  some duplicates and is not strict new-event validation. Let prepared emissions
+  drive the FIFO executor and keep generated event IDs plus journals in memory
+  for exact child-result correlation. Queue child starts from their queued events,
+  not twice from both delegation and queueing. Delay applying subsequent queued
+  prompts until their session is free so history remains serial. Reuse the
+  conversation's names, settings validation, fan-in, and child-outcome conversion
+  rather than maintaining a second turn machine. Redis, threads, crash recovery,
+  and production error handling remain outside this happy-path prototype.
+  Session creation takes an import-path string, including in tests; keep test
+  agents at module scope rather than accepting inline instances for testing.
+- **D109 — Three shared execution extension points (implemented).**
+  Keep shared agent-step outcome construction and subagent resolution in
+  `agent_proxy.py`, alongside public `agent_proxy.invoke_tool` for captured
+  contexts. Reconstructed tool execution takes explicit runtime inputs instead
+  of loading a Conversation; adapters resolve agents and validate dependencies.
+  Keep `AgentRequest` in the models layer with its existing import re-exported.
+  Shared resolution checks explicit settings, including an explicitly empty
+  dependency mapping, without registering names or importing agent definitions.
+  Share production's existing UUID5 child-session and child-turn recipes in
+  the resolver rather than accepting caller-owned ID factories; `fwflash`
+  uses the same identities without adding configuration. Root sessions and
+  user-submitted turns retain fresh IDs. Copy step usage before running a model so
+  proposed outcomes do not mutate canonical turn usage before application.
+  Both Worker and `fwflash` use these boundaries, but retain their own storage,
+  commit/retry ordering, scheduling, context lifetime, and error handling.
+  Delegation effects and stream/dispatch coupling are not refactored here.
+  Consolidate the helpers in the existing agent module rather than introducing
+  a separate execution module; state machines still do not execute agents.

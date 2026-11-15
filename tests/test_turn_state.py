@@ -20,7 +20,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.usage import RunUsage
 from redis import Redis
 
-from fallingwater.conversation import Conversation, reconstruct_conversation
+from fallingwater.conversation import Conversation
 from fallingwater.models import (
     AgentResumePayload,
     ConversationCreatedPayload,
@@ -585,7 +585,7 @@ def test_first_persisted_terminal_wins_replay_but_transition_stays_strict(
         machine.transition(later)
     assert vars(machine) == before
 
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", ConversationCreatedPayload(agent="example:agent")),
             _event("2-0", _queued()),
@@ -801,9 +801,7 @@ def test_conversation_reconstructs_all_turns_with_queue_boundary_snapshots():
         _event("11-0", TurnFailedPayload(turn_id="turn-3", error="failure")),
         _event("12-0", _queued("turn-4")),
     ]
-    conversation = reconstruct_conversation(
-        iter(events), conversation_id="conversation"
-    )
+    conversation = Conversation(iter(events), conversation_id="conversation")
     assert isinstance(conversation, Conversation)
     assert conversation.settings == settings
     assert conversation.conversation_id == "conversation"
@@ -910,16 +908,18 @@ def test_message_history_prefix_structure_is_immutable():
 
 
 def test_many_sequential_turns_share_linear_history_storage():
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [_event("1-0", ConversationCreatedPayload(agent="example:agent"))],
         conversation_id="conversation",
     )
     count = 128
     for index in range(count):
         turn_id = f"turn-{index}"
-        conversation.apply(_event(f"{2 * index + 2}-0", _queued(turn_id)))
-        conversation.apply(_event(f"{2 * index + 3}-0", _completed(turn_id)))
-    conversation.apply(_event("1000-0", _queued("next-turn")))
+        conversation.apply_one(_event(f"{2 * index + 2}-0", _queued(turn_id)))
+        conversation.apply_one(
+            _event(f"{2 * index + 3}-0", _completed(turn_id))
+        )
+    conversation.apply_one(_event("1000-0", _queued("next-turn")))
     machines = [
         conversation.turn_state[f"turn-{index}"] for index in range(count)
     ]
@@ -951,7 +951,7 @@ def test_many_sequential_turns_share_linear_history_storage():
 
 
 def test_overlapping_turns_share_prefixes_in_terminal_completion_order():
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", ConversationCreatedPayload(agent="example:agent")),
             _event("2-0", _queued("turn-1")),
@@ -979,7 +979,7 @@ def test_overlapping_turns_share_prefixes_in_terminal_completion_order():
 
 
 def test_apply_canonical_terminal_after_checkpoint_updates_history_prefix():
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", ConversationCreatedPayload(agent="example:agent")),
             _event("2-0", _queued()),
@@ -995,8 +995,8 @@ def test_apply_canonical_terminal_after_checkpoint_updates_history_prefix():
     assert vars(machine) == before
     assert machine.terminal_event_id is None
     assert conversation.last_event_id == "3-0"
-    conversation.apply(terminal)
-    conversation.apply(_event("5-0", _queued("next-turn")))
+    conversation.apply_one(terminal)
+    conversation.apply_one(_event("5-0", _queued("next-turn")))
     successor = conversation.turn_state["next-turn"]
     assert successor.history.previous is prefix
     assert successor.history == machine.turn_messages
@@ -1013,9 +1013,7 @@ def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
         _event("1-0", ConversationCreatedPayload(agent="example:agent")),
         _event("2-0", _queued()),
     ]
-    conversation = reconstruct_conversation(
-        base, conversation_id="conversation"
-    )
+    conversation = Conversation(base, conversation_id="conversation")
     machine = conversation.turn_state["turn-1"]
     success = _completed(requests=7)
     failure = TurnFailedPayload(turn_id="turn-1", error="concurrent failure")
@@ -1028,10 +1026,9 @@ def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
     assert machine.running
     assert machine.terminal_event_id is None
     persisted.append(_event("4-0", later))
-    for event in persisted:
-        conversation.apply(event)
+    conversation.apply(persisted)
     queued = _event("5-0", _queued("next-turn"))
-    conversation.apply(queued)
+    conversation.apply_one(queued)
 
     assert machine.state == first
     assert machine.terminal_event_id == "3-0"
@@ -1046,7 +1043,7 @@ def test_concurrent_first_terminal_wins_after_preview_and_incremental_refresh(
         assert successor.usage is None
         assert machine.turn_messages == []
         assert machine.usage is None
-    fresh = reconstruct_conversation(
+    fresh = Conversation(
         [*base, *persisted, queued], conversation_id="conversation"
     )
     assert conversation.last_event_id == fresh.last_event_id == "5-0"
@@ -1061,7 +1058,7 @@ def test_duplicate_canonical_terminal_does_not_append_history_twice(
     same_entry_id,
 ):
     terminal = _event("3-0", _completed())
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", ConversationCreatedPayload(agent="example:agent")),
             _event("2-0", _queued()),
@@ -1075,8 +1072,8 @@ def test_duplicate_canonical_terminal_does_not_append_history_twice(
         terminal.entry_id if same_entry_id else "5-0",
         terminal.payload.model_copy(deep=True),
     )
-    conversation.apply(duplicate)
-    conversation.apply(_event("6-0", _queued("after-duplicate")))
+    conversation.apply_one(duplicate)
+    conversation.apply_one(_event("6-0", _queued("after-duplicate")))
     assert conversation.turn_state["after-duplicate"].history is prefix
     assert prefix == conversation.turn_state["turn-1"].turn_messages
     assert conversation.turn_state["turn-1"].terminal_event_id == "3-0"
@@ -1084,7 +1081,7 @@ def test_duplicate_canonical_terminal_does_not_append_history_twice(
 
 def test_history_does_not_gain_completions_after_a_turn_is_queued():
     settings = ConversationCreatedPayload(agent="example:agent")
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", settings),
             _event("2-0", _queued()),
@@ -1121,21 +1118,148 @@ def test_usage_snapshots_are_not_shared_with_request_or_constructor():
 @pytest.mark.parametrize(
     "events",
     [
-        [],
         [_event("1-0", _queued())],
         [
             _event("1-0", ConversationCreatedPayload(agent="example:agent")),
             _event("2-0", _completed()),
         ],
-        [
-            _event("1-0", ConversationCreatedPayload(agent="example:agent")),
-            _event("2-0", ConversationCreatedPayload(agent="example:other")),
-        ],
     ],
 )
 def test_reconstruction_rejects_missing_settings_or_missing_prompt(events):
     with pytest.raises(ValueError):
-        reconstruct_conversation(events, conversation_id="conversation")
+        Conversation(events, conversation_id="conversation")
+
+
+@pytest.mark.parametrize("source_failure", [False, True])
+def test_apply_batch_retains_successful_prefix_when_iteration_or_replay_fails(
+    source_failure,
+):
+    conversation = Conversation(conversation_id="conversation")
+
+    def events():
+        yield _event("1-0", ConversationCreatedPayload(agent="example:agent"))
+        yield _event("2-0", _queued())
+        assert conversation.last_event_id == "2-0"
+        if source_failure:
+            raise RuntimeError("event source failed")
+        yield _event("3-0", _completed("missing"))
+        pytest.fail("Replay consumed events beyond the invalid event")
+
+    error = RuntimeError if source_failure else ValueError
+    message = (
+        "event source failed"
+        if source_failure
+        else "No prompt found for turn: missing"
+    )
+    with pytest.raises(error, match=message):
+        conversation.apply(events())
+
+    assert conversation.last_event_id == "2-0"
+    assert set(conversation.turn_state) == {"turn-1"}
+    assert conversation.turn_state["turn-1"].running
+    conversation.apply(iter(()))
+    assert conversation.last_event_id == "2-0"
+    conversation.apply(
+        [
+            _event("4-0", _completed()),
+            _event("5-0", _queued("next-turn")),
+        ]
+    )
+    assert conversation.last_event_id == "5-0"
+    assert conversation.turn_state["turn-1"].completed
+    assert conversation.turn_state["next-turn"].history == (
+        conversation.turn_state["turn-1"].turn_messages
+    )
+
+
+def test_empty_conversation_accepts_settings_before_any_turn():
+    conversation = Conversation(iter(()), conversation_id="conversation")
+
+    assert conversation.get_settings() is None
+    assert conversation.last_event_id == "0-0"
+    assert conversation.turn_state == {}
+    with pytest.raises(ValueError, match="Conversation settings not found"):
+        conversation.apply_one(_event("1-0", _queued()))
+    with pytest.raises(ValueError, match="Conversation settings not found"):
+        conversation.prepare(_queued())
+    assert conversation.last_event_id == "0-0"
+    assert conversation.turn_state == {}
+
+    settings = ConversationCreatedPayload(agent="unimportable:agent")
+    conversation.apply_one(_event("2-0", settings))
+    conversation.apply_one(_event("3-0", _queued()))
+
+    assert conversation.settings == settings
+    assert conversation.last_event_id == "3-0"
+    assert conversation.turn_state["turn-1"].running
+
+
+def test_settings_property_requires_settings_but_get_settings_is_optional():
+    conversation = Conversation(conversation_id="conversation")
+
+    with pytest.raises(ValueError, match="Conversation settings not found"):
+        _ = conversation.settings
+
+    assert conversation.get_settings() is None
+    assert conversation.last_event_id == "0-0"
+
+    settings = ConversationCreatedPayload(agent="example:configured")
+    conversation.apply_one(_event("1-0", settings))
+
+    assert conversation.settings is settings
+    assert conversation.get_settings() is settings
+
+    updated = ConversationCreatedPayload(agent="example:updated")
+    conversation.apply_one(_event("2-0", updated))
+
+    assert conversation.settings is updated
+    assert conversation.get_settings() is updated
+
+
+def test_repeatable_settings_preserve_turns_history_and_queued_parent_routing():
+    parent = ParentToolReference(
+        conversation_id="parent",
+        turn_id="parent-turn",
+        step_id="parent-step",
+        tool_call_id="parent-call",
+    )
+    initial = ConversationCreatedPayload(
+        agent="example:first", model="first-model", parent=parent
+    )
+    latest = ConversationCreatedPayload(
+        agent="example:second", model="second-model", deps={"value": 42}
+    )
+    completed = _completed()
+    conversation = Conversation(
+        iter(
+            [
+                _event("1-0", initial),
+                _event("2-0", _queued()),
+                _event("3-0", completed),
+                _event("4-0", latest),
+                _event("5-0", _queued("turn-2")),
+            ]
+        ),
+        conversation_id="conversation",
+    )
+
+    assert conversation.settings == latest
+    assert conversation.last_event_id == "5-0"
+    assert conversation.turn_state["turn-1"].state == completed
+    assert conversation.turn_state["turn-1"].parent == parent
+    second = conversation.turn_state["turn-2"]
+    assert second.parent is None
+    assert second.history == ModelMessagesTypeAdapter.validate_python(
+        completed.turn_messages
+    )
+    assert second.usage == completed.usage
+
+    conversation.apply_one(_event("6-0", initial))
+
+    assert conversation.settings == initial
+    assert conversation.last_event_id == "6-0"
+    assert second.parent is None
+    assert conversation.turn_state["turn-1"].state == completed
 
 
 def test_replay_does_not_execute_tools_agents_or_redis_io(monkeypatch):
@@ -1149,7 +1273,7 @@ def test_replay_does_not_execute_tools_agents_or_redis_io(monkeypatch):
         step_id="parent-step",
         tool_call_id="parent-call",
     )
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event(
                 "1-0",
@@ -1232,8 +1356,13 @@ def test_layer_import_boundaries(module, allowed_dependencies):
 
 def test_conversation_prepares_new_turns_without_registering_them():
     conversation = Conversation(
+        [
+            _event(
+                "1-0",
+                ConversationCreatedPayload(agent="unimportable:agent"),
+            )
+        ],
         conversation_id="conversation",
-        settings=ConversationCreatedPayload(agent="unimportable:agent"),
     )
     for turn_id in ("first", "second"):
         queued = _queued(turn_id)
@@ -1245,7 +1374,7 @@ def test_conversation_prepares_new_turns_without_registering_them():
             ),
         )
     assert conversation.turn_state == {}
-    assert conversation.last_event_id == "0-0"
+    assert conversation.last_event_id == "1-0"
     with pytest.raises(ValueError, match="No prompt found"):
         conversation.prepare(_completed())
 
@@ -1262,7 +1391,7 @@ def test_conversation_workflow_preparation_is_pure(monkeypatch):
         step_id="parent-step",
         tool_call_id="parent-call",
     )
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event(
                 "1-0",
@@ -1297,7 +1426,7 @@ def test_conversation_workflow_preparation_is_pure(monkeypatch):
     assert vars(machine) == before
     assert conversation.last_event_id == "3-0"
 
-    conversation.apply(_event("4-0", delegation))
+    conversation.apply_one(_event("4-0", delegation))
     action = _child_action()
     assert conversation.dispatch_status(action) == "ready"
     result = conversation.child_outcome(
@@ -1308,7 +1437,7 @@ def test_conversation_workflow_preparation_is_pure(monkeypatch):
     conversation.prepare(result)
     assert conversation.resume_actions(result) == ()
     assert machine.results == {}
-    conversation.apply(_event("5-0", result))
+    conversation.apply_one(_event("5-0", result))
     assert not conversation.accepts_result(result)
     assert conversation.resume_actions(result) == (
         AgentResumePayload(
@@ -1347,7 +1476,7 @@ def test_agent_turns_overlap_and_route_each_result_independently(
         )
         for index, call_id in enumerate(("first", "second"), 1)
     ]
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event(
                 "1-0",
@@ -1371,10 +1500,10 @@ def test_agent_turns_overlap_and_route_each_result_independently(
     )
     poke = ConversationPokePayload(conversation_id="writer", turn_id="turn-2")
     assert conversation.prepare(queued).emissions == (poke,)
-    conversation.apply(_event("4-0", queued))
+    conversation.apply_one(_event("4-0", queued))
     assert conversation.dispatch_status(poke) == "ready"
     if not fails:
-        conversation.apply(_event("5-0", _result()))
+        conversation.apply_one(_event("5-0", _result()))
         assert conversation.dispatch_status(poke) == "ready"
     terminal = (
         TurnFailedPayload(turn_id="turn-1", error="failed")
@@ -1384,7 +1513,7 @@ def test_agent_turns_overlap_and_route_each_result_independently(
     prepared = conversation.prepare(terminal)
     assert len(prepared.emissions) == 1
     assert prepared.dispatch("6-0")[0].tool_call_id == "first"
-    conversation.apply(_event("6-0", terminal))
+    conversation.apply_one(_event("6-0", terminal))
     second = conversation.turn_state["turn-2"]
     assert conversation.dispatch_status(poke) == "ready"
     assert second.history == []
@@ -1401,7 +1530,7 @@ def test_agent_registry_survives_later_steps_and_parent_turns() -> None:
     delegation = _delegation().model_copy(
         update={"name": "alice", "persistent": True}
     )
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", ConversationCreatedPayload(agent="example:editor")),
             _event("2-0", _queued()),
@@ -1451,7 +1580,7 @@ def test_registration_rejects_changed_agent_settings(changes) -> None:
     original = _delegation().model_copy(
         update={"name": "alice", "persistent": True}
     )
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         [
             _event("1-0", ConversationCreatedPayload(agent="example:editor")),
             _event("2-0", _queued()),

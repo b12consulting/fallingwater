@@ -12,6 +12,7 @@ from importlib.metadata import version
 from redis import Redis
 
 from .chat import Chat
+from .conversation_client import ConversationClient
 from .names import generate_name
 from .stream_utils import (
     decode_conversation_event,
@@ -73,25 +74,36 @@ def build_parser() -> argparse.ArgumentParser:
     ls_parser = subparsers.add_parser("ls", help="List conversations.")
     ls_parser.set_defaults(handler=run_ls)
 
-    archive_parser = subparsers.add_parser("archive", help="Archive conversation")
-    archive_parser.add_argument("conversation", help="Conversation ID.")
+    archive_parser = subparsers.add_parser(
+        "archive", help="Archive a conversation or a namespace ending in ':'."
+    )
     archive_parser.add_argument(
-        "-s",
-        "--store",
-        help="Store URI.",
-        default=".fw-store"
+        "target", help="Conversation ID or source namespace ending in ':'."
+    )
+    archive_parser.add_argument(
+        "-s", "--store", help="Store URI.", default=".fw-store"
     )
     archive_parser.set_defaults(handler=run_archive)
 
-    restore_parser = subparsers.add_parser("restore", help="Restore conversation")
-    restore_parser.add_argument("conversation", help="Conversation ID.")
+    restore_parser = subparsers.add_parser(
+        "restore", help="Restore a conversation or a namespace ending in ':'."
+    )
     restore_parser.add_argument(
-        "-s",
-        "--store",
-        help="Store URI.",
-        default=".fw-store"
+        "target", help="Conversation ID or destination namespace ending in ':'."
+    )
+    restore_parser.add_argument(
+        "-s", "--store", help="Store URI.", default=".fw-store"
     )
     restore_parser.set_defaults(handler=run_restore)
+
+    sync_parser = subparsers.add_parser(
+        "sync", help="Copy all streams between namespaces."
+    )
+    sync_parser.add_argument("source_namespace", help="Source namespace.")
+    sync_parser.add_argument(
+        "destination_namespace", help="Destination namespace."
+    )
+    sync_parser.set_defaults(handler=run_sync)
 
     tail_parser = subparsers.add_parser(
         "tail", help="Show the latest events for a conversation."
@@ -230,31 +242,43 @@ def run_ls(args: argparse.Namespace) -> None:
 
 
 def run_archive(args: argparse.Namespace) -> None:
-    """
-    List conversation IDs found in the selected Redis namespace.
-    """
+    """Archive a conversation or all conversations in an explicit namespace."""
     with Redis.from_url(args.redis_url) as redis:
-        file_len = archive.dump_conversation_stream(
-            redis,
-            args.namespace,
-            args.conversation,
-            store=args.store,
-        )
+        if args.target.endswith(":"):
+            file_len = archive.dump_namespace(
+                redis, args.target[:-1], store=args.store
+            )
+        else:
+            file_len = archive.dump_conversation_stream(
+                redis, args.namespace, args.target, store=args.store
+            )
     logger.info("%s bytes written to %s", file_len, args.store)
 
 
 def run_restore(args: argparse.Namespace) -> None:
-    """
-    Restore conversation ID
-    """
+    """Restore a conversation or all archives into an explicit namespace."""
     with Redis.from_url(args.redis_url) as redis:
-        nb_msg = archive.load_conversation_stream(
-            redis,
-            args.namespace,
-            args.conversation,
-            store=args.store,
-        )
+        if args.target.endswith(":"):
+            nb_msg = archive.load_namespace(
+                redis, args.target[:-1], store=args.store
+            )
+        else:
+            nb_msg = archive.load_conversation_stream(
+                redis, args.namespace, args.target, store=args.store
+            )
     logger.info("%s messages restored", nb_msg)
+
+
+def run_sync(args: argparse.Namespace) -> None:
+    """Copy all source namespace streams into the destination namespace."""
+    with Redis.from_url(args.redis_url) as redis:
+        count = archive.sync_streams(
+            redis, args.source_namespace, args.destination_namespace
+        )
+    print(
+        f"Copied {count} stream(s) from namespace "
+        f"{args.source_namespace!r} to {args.destination_namespace!r}."
+    )
 
 
 def _print_event(
@@ -326,7 +350,7 @@ def run_chat(args: argparse.Namespace) -> None:
                     "fw chat: could not find an unused conversation name"
                 )
         try:
-            chat = Chat(
+            client = ConversationClient(
                 redis,
                 namespace=args.namespace,
                 conversation_id=conversation_id,
@@ -341,12 +365,15 @@ def run_chat(args: argparse.Namespace) -> None:
             )
             raise SystemExit(f"fw chat: {error}") from None
         if args.rewind:
-            chat.rewind()
+            client.rewind()
+        chat = Chat(client)
         if args.msg is None:
             chat.run()
         else:
             if args.conversation is None:
-                print(f"Conversation: {chat.conversation_id}", file=sys.stderr)
+                print(
+                    f"Conversation: {client.conversation_id}", file=sys.stderr
+                )
             chat.run_once(args.msg)
 
 

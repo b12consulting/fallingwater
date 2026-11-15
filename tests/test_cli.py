@@ -11,6 +11,13 @@ from redis import Redis
 from fallingwater.cli import build_parser, main
 
 
+@pytest.fixture
+def client_class(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    client_class = MagicMock()
+    monkeypatch.setattr("fallingwater.cli.ConversationClient", client_class)
+    return client_class
+
+
 def test_cli_help_and_version(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as help_exit:
         main(["--help"])
@@ -45,6 +52,132 @@ def test_redis_options_are_global() -> None:
     assert args.command == "worker"
     assert args.workers == 2
     assert args.claim_idle_ms == 1500
+
+
+def test_sync_command_copies_positional_namespaces(
+    isolated_redis: Redis,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    redis = isolated_redis
+    redis.xadd("source:dispatch", {"type": "poke"}, id="1-0")
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    from_url = MagicMock(return_value=connection)
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", from_url)
+
+    assert (
+        main(
+            [
+                "-r",
+                "redis://example:6379/1",
+                "-n",
+                "ignored",
+                "sync",
+                "source",
+                "destination",
+            ]
+        )
+        == 0
+    )
+
+    from_url.assert_called_once_with("redis://example:6379/1")
+    assert redis.xrange("destination:dispatch") == redis.xrange(
+        "source:dispatch"
+    )
+    assert capsys.readouterr().out.strip() == (
+        "Copied 1 stream(s) from namespace 'source' to 'destination'."
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        main(["sync", "source", "destination"])
+
+
+@pytest.mark.parametrize(
+    ("command", "function"),
+    [("archive", "dump_namespace"), ("restore", "load_namespace")],
+)
+def test_archive_commands_use_positional_namespace(
+    monkeypatch: pytest.MonkeyPatch, command: str, function: str
+) -> None:
+    redis = MagicMock(spec=Redis)
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    from_url = MagicMock(return_value=connection)
+    operation = MagicMock(return_value=42)
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", from_url)
+    monkeypatch.setattr(f"fallingwater.cli.archive.{function}", operation)
+
+    assert (
+        main(
+            [
+                "-r",
+                "redis://example:6379/1",
+                "-n",
+                "ignored",
+                command,
+                "selected:",
+                "--store",
+                "archives",
+            ]
+        )
+        == 0
+    )
+    from_url.assert_called_once_with("redis://example:6379/1")
+    operation.assert_called_once_with(redis, "selected", store="archives")
+
+    operation.side_effect = ValueError("invalid archive")
+    with pytest.raises(ValueError, match="invalid archive"):
+        main([command, "selected:"])
+
+
+@pytest.mark.parametrize(
+    ("command", "function"),
+    [
+        ("archive", "dump_conversation_stream"),
+        ("restore", "load_conversation_stream"),
+    ],
+)
+def test_archive_commands_use_conversation_in_global_namespace(
+    monkeypatch: pytest.MonkeyPatch, command: str, function: str
+) -> None:
+    redis = MagicMock(spec=Redis)
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *_args: connection
+    )
+    operation = MagicMock(return_value=42)
+    monkeypatch.setattr(f"fallingwater.cli.archive.{function}", operation)
+    other_function = (
+        "dump_namespace" if command == "archive" else "load_namespace"
+    )
+    namespace_operation = MagicMock()
+    monkeypatch.setattr(
+        f"fallingwater.cli.archive.{other_function}", namespace_operation
+    )
+
+    assert main(["-n", "selected", command, "abc", "--store", "archives"]) == 0
+    operation.assert_called_once_with(
+        redis, "selected", "abc", store="archives"
+    )
+    namespace_operation.assert_not_called()
+    operation.side_effect = ValueError("invalid archive")
+    with pytest.raises(ValueError, match="invalid archive"):
+        main([command, "abc"])
+
+
+@pytest.mark.parametrize("command", ["archive", "restore"])
+@pytest.mark.parametrize("target", [":", "fw::"])
+def test_archive_commands_reject_invalid_namespace_targets(
+    monkeypatch: pytest.MonkeyPatch, command: str, target: str
+) -> None:
+    connection = MagicMock()
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *_args: connection
+    )
+    with pytest.raises(ValueError, match="namespace"):
+        main([command, target])
 
 
 def test_web_command_passes_config_to_app_and_uvicorn(
@@ -154,8 +287,8 @@ def test_chat_uses_plain_pydantic_agent_by_default(
     assert args.agent == "pydantic_ai:Agent"
 
 
-def test_named_chat_passes_agent_and_model_to_chat(
-    monkeypatch: pytest.MonkeyPatch,
+def test_named_chat_passes_agent_and_model_to_client(
+    monkeypatch: pytest.MonkeyPatch, client_class: MagicMock
 ) -> None:
     monkeypatch.setenv("FW_AGENT", "fallingwater.demo:missing_agent")
     monkeypatch.setenv("FW_MODEL", "openai:another-model")
@@ -188,8 +321,9 @@ def test_named_chat_passes_agent_and_model_to_chat(
     )
 
     chat.run.assert_called_once_with()
-    chat.rewind.assert_not_called()
-    assert chat_class.call_args.kwargs == {
+    client_class.return_value.rewind.assert_not_called()
+    chat_class.assert_called_once_with(client_class.return_value)
+    assert client_class.call_args.kwargs == {
         "namespace": "fw",
         "conversation_id": "test",
         "agent_path": "fallingwater.demo:haiku_master",
@@ -200,7 +334,7 @@ def test_named_chat_passes_agent_and_model_to_chat(
 
 
 def test_chat_uses_agent_and_model_environment_defaults(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, client_class: MagicMock
 ) -> None:
     monkeypatch.setenv("FW_AGENT", "fallingwater.demo:haiku_master")
     monkeypatch.setenv("FW_MODEL", "openai:gpt-4o-mini")
@@ -217,7 +351,8 @@ def test_chat_uses_agent_and_model_environment_defaults(
 
     assert main(["chat"]) == 0
 
-    assert chat_class.call_args.kwargs == {
+    chat_class.assert_called_once_with(client_class.return_value)
+    assert client_class.call_args.kwargs == {
         "namespace": "fw",
         "conversation_id": "bright_turing",
         "agent_path": "fallingwater.demo:haiku_master",
@@ -228,7 +363,7 @@ def test_chat_uses_agent_and_model_environment_defaults(
 
 
 def test_cli_chat_retries_existing_generated_name(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, client_class: MagicMock
 ) -> None:
     names = iter(["happy_turing", "hopeful_morse"])
     monkeypatch.setattr("fallingwater.cli.generate_name", lambda: next(names))
@@ -249,11 +384,11 @@ def test_cli_chat_retries_existing_generated_name(
         "fw-test:conversation:happy_turing:events",
         "fw-test:conversation:hopeful_morse:events",
     ]
-    assert chat_class.call_args.kwargs["conversation_id"] == "hopeful_morse"
+    assert client_class.call_args.kwargs["conversation_id"] == "hopeful_morse"
 
 
-def test_cli_passes_resume_options_to_chat(
-    monkeypatch: pytest.MonkeyPatch,
+def test_cli_passes_resume_options_to_client(
+    monkeypatch: pytest.MonkeyPatch, client_class: MagicMock
 ) -> None:
     monkeypatch.setenv("FW_AGENT", "fallingwater.demo:missing_agent")
     monkeypatch.setenv("FW_MODEL", "openai:another-model")
@@ -282,15 +417,17 @@ def test_cli_passes_resume_options_to_chat(
     )
 
     assert (
-        chat_class.call_args.kwargs["agent_path"]
+        client_class.call_args.kwargs["agent_path"]
         == "fallingwater.demo:missing_agent"
     )
-    assert chat_class.call_args.kwargs["model"] == "openai:another-model"
+    assert client_class.call_args.kwargs["model"] == "openai:another-model"
     chat.run.assert_called_once_with()
 
 
 def test_chat_msg_sends_one_prompt_without_starting_terminal(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    client_class: MagicMock,
 ) -> None:
     connection = MagicMock()
     connection.__enter__.return_value.exists.return_value = False
@@ -301,6 +438,7 @@ def test_chat_msg_sends_one_prompt_without_starting_terminal(
         "fallingwater.cli.generate_name", lambda: "bright_turing"
     )
     chat = MagicMock(conversation_id="bright_turing")
+    client_class.return_value.conversation_id = "bright_turing"
     monkeypatch.setattr("fallingwater.cli.Chat", MagicMock(return_value=chat))
 
     assert main(["chat", "--msg", "Hello"]) == 0
@@ -312,7 +450,9 @@ def test_chat_msg_sends_one_prompt_without_starting_terminal(
 
 @pytest.mark.parametrize("message", [None, "Hello"])
 def test_chat_rewinds_selected_group_before_reading(
-    monkeypatch: pytest.MonkeyPatch, message: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    message: str | None,
+    client_class: MagicMock,
 ) -> None:
     connection = MagicMock()
     monkeypatch.setattr(
@@ -321,14 +461,18 @@ def test_chat_rewinds_selected_group_before_reading(
     chat = MagicMock()
     chat_class = MagicMock(return_value=chat)
     monkeypatch.setattr("fallingwater.cli.Chat", chat_class)
+    operations = MagicMock()
+    operations.attach_mock(client_class.return_value.rewind, "rewind")
+    operations.attach_mock(chat.run, "run")
+    operations.attach_mock(chat.run_once, "run_once")
     args = ["chat", "abc", "--group", "reader-one", "--rewind"]
     if message is not None:
         args.extend(["--msg", message])
 
     assert main(args) == 0
 
-    assert chat_class.call_args.kwargs["group"] == "reader-one"
-    assert chat.method_calls == [
+    assert client_class.call_args.kwargs["group"] == "reader-one"
+    assert operations.method_calls == [
         call.rewind(),
         call.run() if message is None else call.run_once(message),
     ]

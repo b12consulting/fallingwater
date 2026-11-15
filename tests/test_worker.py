@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from typing import Any
 from unittest.mock import Mock
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 from pydantic import TypeAdapter
@@ -26,7 +27,7 @@ from redis.exceptions import (
 
 from fallingwater.worker import Worker
 from fallingwater.agent_proxy import AgentRunResult, AgentRequest
-from fallingwater.conversation import Conversation, reconstruct_conversation
+from fallingwater.conversation import Conversation
 from fallingwater.models import (
     ConversationCreatedPayload,
     ConversationPayload,
@@ -175,7 +176,7 @@ def _process(worker: Worker, fields: dict[str, str]) -> bool:
     cnv_stream = worker.dsp_stream.conversation_stream(
         action.payload.conversation_id
     )
-    conversation = reconstruct_conversation(
+    conversation = Conversation(
         cnv_stream.iter_events(),
         conversation_id=action.payload.conversation_id,
     )
@@ -221,9 +222,7 @@ def _queue_agent(
     turn_id: str = "turn-1",
 ) -> AgentRequestedPayload:
     stream = worker.dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     tool_request = conversation.turn_state[turn_id].request
     assert tool_request is not None
     worker.queue_subagent(
@@ -244,9 +243,7 @@ def test_checkpoint_rejects_empty_tool_request_set_without_writing() -> None:
     redis = MemoryRedis(_base_entries())
     worker = Worker(redis)
     stream = worker.dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     payload = ToolRequestedPayload(
         turn_id="turn-1",
         step_id="step-1",
@@ -262,7 +259,10 @@ def test_checkpoint_rejects_empty_tool_request_set_without_writing() -> None:
     assert _dispatch(redis) == []
 
 
-def test_agent_step_loads_conversation_dependencies(monkeypatch) -> None:
+@pytest.mark.parametrize("change_settings", [False, True])
+def test_agent_step_loads_latest_conversation_settings(
+    monkeypatch, change_settings
+) -> None:
     agent = Agent(TestModel(), deps_type=dict[str, int])
     run_agent = Mock(
         return_value=AgentRunResult(
@@ -272,9 +272,18 @@ def test_agent_step_loads_conversation_dependencies(monkeypatch) -> None:
             tool_contexts={},
         )
     )
-    monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    load_agent = Mock(return_value=agent)
+    monkeypatch.setattr("fallingwater.worker.reify_agent", load_agent)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", run_agent)
     redis = MemoryRedis(_base_entries(deps={"value": 42}))
+    if change_settings:
+        Worker(redis).dsp_stream.conversation_stream("abc").append_payload(
+            ConversationCreatedPayload(
+                agent="example:replacement",
+                model="replacement-model",
+                deps={"value": 84},
+            )
+        )
 
     assert _process(
         _worker(redis),
@@ -285,8 +294,88 @@ def test_agent_step_loads_conversation_dependencies(monkeypatch) -> None:
         },
     )
 
-    assert run_agent.call_args.kwargs["deps"] == {"value": 42}
+    load_agent.assert_called_once_with(
+        "example:replacement" if change_settings else "example:agent"
+    )
+    assert run_agent.call_args.kwargs["deps"] == {
+        "value": 84 if change_settings else 42
+    }
+    assert run_agent.call_args.kwargs["model"] == (
+        "replacement-model" if change_settings else "test"
+    )
     assert _events(redis)[-1].type == Event.TURN_COMPLETED
+
+
+@pytest.mark.parametrize("change_settings", [False, True])
+def test_tool_execution_loads_latest_conversation_settings(
+    monkeypatch, change_settings
+) -> None:
+    agent = Agent(TestModel(), deps_type=dict[str, int])
+
+    @agent.tool
+    def value(ctx: RunContext[dict[str, int]]) -> int:
+        return ctx.deps["value"]
+
+    load_agent = Mock(return_value=agent)
+    monkeypatch.setattr("fallingwater.worker.reify_agent", load_agent)
+    redis = MemoryRedis(
+        [
+            *_base_entries(deps={"value": 42}),
+            _entry(
+                "3-0",
+                Event.TURN_TOOL_REQUESTED,
+                _tool_request(
+                    [ToolCallPart("value", {}, tool_call_id="call-1")]
+                ),
+            ),
+        ]
+    )
+    if change_settings:
+        Worker(redis).dsp_stream.conversation_stream("abc").append_payload(
+            ConversationCreatedPayload(
+                agent="example:replacement",
+                model="test",
+                deps={"value": 84},
+            )
+        )
+
+    assert _process(
+        Worker(redis),
+        {
+            "type": Action.TOOL_CALL,
+            "conversation_id": "abc",
+            "turn_id": "turn-1",
+            "step_id": "step-1",
+            "tool_call_id": "call-1",
+        },
+    )
+    load_agent.assert_called_once_with(
+        "example:replacement" if change_settings else "example:agent"
+    )
+    assert _events(redis)[-1].payload.result == (84 if change_settings else 42)
+
+
+def test_subagent_resolution_keeps_deterministic_retry_ids() -> None:
+    worker, redis = _delegating_worker("first")
+    conversation = Conversation(_events(redis), conversation_id="abc")
+    action = ToolCallPayload(
+        conversation_id="abc",
+        turn_id="turn-1",
+        step_id="step-1",
+        tool_call_id="first",
+    )
+    child = AgentRequest(agent_path="example:writer", prompt="draft")
+    first = worker.resolve_subagent(conversation, action, child)
+    second = worker.resolve_subagent(conversation, action, child)
+    child_id = str(uuid5(NAMESPACE_URL, "fallingwater:abc:turn-1:step-1:first"))
+    assert first == second
+    assert first.child_conversation_id == child_id
+    assert first.child_turn_id == str(
+        uuid5(
+            NAMESPACE_URL,
+            f"fallingwater:{child_id}:turn:abc:turn-1:step-1:first",
+        )
+    )
 
 
 @pytest.mark.parametrize("child_model", [None, "child-model"])
@@ -298,6 +387,9 @@ def test_agent_request_persists_resolved_model(
     )
     monkeypatch.setattr(
         "fallingwater.worker.execute_tool", Mock(return_value=child)
+    )
+    monkeypatch.setattr(
+        "fallingwater.worker.reify_agent", lambda _path: Agent(TestModel())
     )
     redis = MemoryRedis(
         [
@@ -346,9 +438,7 @@ def test_queue_subagent_records_delegation_before_initialization() -> None:
     redis.xadd = Mock(wraps=redis.xadd)
     worker = Worker(redis)
     stream = worker.dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     action = ToolCallPayload(
         conversation_id="abc",
         turn_id="turn-1",
@@ -411,9 +501,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
         ]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     assert conversation.turn_state["turn-2"].history == history
     assert conversation.turn_state["turn-2"].usage == previous_usage
 
@@ -427,9 +515,7 @@ def test_turn_restores_prior_usage_and_latest_step_checkpoint() -> None:
     ).model_copy(update={"turn_id": "turn-2", "usage": current_usage})
     stream.append_event(Event.TURN_TOOL_REQUESTED, request)
 
-    resumed = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    resumed = Conversation(stream.iter_events(), conversation_id="abc")
     assert resumed.turn_state["turn-2"].history == history
     assert resumed.turn_state["turn-2"].usage == current_usage
 
@@ -471,10 +557,7 @@ def test_tool_calls_fan_out_and_resume_after_out_of_order_results(
     )
     run_agent = Mock(side_effect=[request_result, final_result])
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr(
-        "fallingwater.agent_proxy.reify_agent", lambda _path: agent
-    )
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", run_agent)
     redis = MemoryRedis(_base_entries())
     worker = _worker(redis)
 
@@ -559,9 +642,6 @@ def test_tool_action_recovery_skips_saved_result_and_runs_missing_call(
         ]
     )
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr(
-        "fallingwater.agent_proxy.reify_agent", lambda _path: agent
-    )
     worker = _worker(redis)
 
     assert _process(
@@ -591,11 +671,9 @@ def test_result_arriving_during_save_still_queues_resume(monkeypatch) -> None:
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     sibling_stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    sibling_conversation = reconstruct_conversation(
+    sibling_conversation = Conversation(
         sibling_stream.iter_events(), conversation_id="abc"
     )
     append_if_current = stream.append_if_current
@@ -712,7 +790,7 @@ def test_concurrent_result_saves_emit_one_resume(
         isolated_redis.xadd(stream.name, fields)
     streams = [worker.dsp_stream.conversation_stream("abc") for _ in range(2)]
     conversations = [
-        reconstruct_conversation(item.iter_events(), conversation_id="abc")
+        Conversation(item.iter_events(), conversation_id="abc")
         for item in streams
     ]
     first_attempt = Barrier(2)
@@ -822,11 +900,7 @@ def test_subagent_runs_in_its_own_conversation_and_notifies_parent(
         "fallingwater.worker.reify_agent",
         lambda path: parent if path == "example:agent" else child,
     )
-    monkeypatch.setattr(
-        "fallingwater.agent_proxy.reify_agent",
-        lambda path: parent if path == "example:agent" else child,
-    )
-    monkeypatch.setattr("fallingwater.worker.run", runs)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", runs)
     redis = MemoryRedis(_base_entries())
     worker = _worker(redis)
 
@@ -900,7 +974,7 @@ def test_duplicate_resume_after_completion_does_not_run_agent(
     monkeypatch.setattr(
         "fallingwater.worker.reify_agent", lambda _path: object()
     )
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", run_agent)
     worker = _worker(redis)
 
     assert _process(
@@ -923,7 +997,7 @@ def test_agent_failure_is_recorded_as_turn_failed(monkeypatch) -> None:
 
     agent = Agent(TestModel(), name="failing-agent")
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr("fallingwater.worker.run", fail)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", fail)
     redis = MemoryRedis(_base_entries())
     worker = _worker(redis)
     action = decode_dispatch_event(
@@ -984,9 +1058,7 @@ def test_failed_child_fails_parent_turn(monkeypatch, traceback) -> None:
     )
     worker.queue_subagent(
         parent_stream,
-        reconstruct_conversation(
-            parent_stream.iter_events(), conversation_id="abc"
-        ),
+        Conversation(parent_stream.iter_events(), conversation_id="abc"),
         action,
         AgentRequest(agent_path="example:child", model="test", prompt="child"),
     )
@@ -995,7 +1067,7 @@ def test_failed_child_fails_parent_turn(monkeypatch, traceback) -> None:
     child_stream = worker.dsp_stream.conversation_stream(
         parent_request.child_conversation_id
     )
-    child_conversation = reconstruct_conversation(
+    child_conversation = Conversation(
         child_stream.iter_events(),
         conversation_id=parent_request.child_conversation_id,
     )
@@ -1074,9 +1146,7 @@ def test_result_save_refreshes_before_writing(terminal) -> None:
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     result = ToolResultPayload(
         turn_id="turn-1",
         step_id="step-1",
@@ -1105,9 +1175,7 @@ def test_result_save_rejects_obsolete_result_before_append(
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     append_if_current = stream.append_if_current
 
     def append_with_new_state(event_type, payload, *, after_id):
@@ -1150,9 +1218,7 @@ def test_result_save_keeps_first_persisted_value_during_race(
         [*_base_entries(), _entry("3-0", Event.TURN_TOOL_REQUESTED, request)]
     )
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     append_if_current = stream.append_if_current
 
     def append_with_earlier_result(event_type, payload, *, after_id):
@@ -1173,9 +1239,7 @@ def test_result_save_keeps_first_persisted_value_during_race(
             result="later result",
         ),
     )
-    fresh = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    fresh = Conversation(stream.iter_events(), conversation_id="abc")
     assert conversation.turn_state["turn-1"].tool_results == {
         "call-1": "earlier result"
     }
@@ -1192,9 +1256,7 @@ def test_checkpoint_and_refresh_preserve_first_concurrent_terminal(
 ) -> None:
     redis = MemoryRedis(_base_entries())
     stream = Worker(redis).dsp_stream.conversation_stream("abc")
-    conversation = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    conversation = Conversation(stream.iter_events(), conversation_id="abc")
     completed = TurnCompletedPayload(
         turn_id="turn-1",
         message="answer",
@@ -1221,9 +1283,7 @@ def test_checkpoint_and_refresh_preserve_first_concurrent_terminal(
         TurnQueuedPayload(turn_id="turn-2", message="next prompt"),
     )
     worker.refresh(stream, conversation)
-    fresh = reconstruct_conversation(
-        stream.iter_events(), conversation_id="abc"
-    )
+    fresh = Conversation(stream.iter_events(), conversation_id="abc")
 
     assert conversation.turn_state["turn-1"].state == (
         completed if first_succeeds else failed
@@ -1268,7 +1328,7 @@ def test_redis_failure_leaves_dispatch_pending(monkeypatch) -> None:
         lambda _path: Agent(TestModel()),
     )
     monkeypatch.setattr(
-        "fallingwater.worker.run",
+        "fallingwater.agent_proxy.run",
         Mock(side_effect=RedisError("connection lost")),
     )
     acknowledge = Mock()
@@ -1318,10 +1378,7 @@ def test_agent_resume_preserves_history_messages_and_usage_across_steps(
     )
     run_agent = Mock(side_effect=[*steps, final])
     monkeypatch.setattr("fallingwater.worker.reify_agent", lambda _path: agent)
-    monkeypatch.setattr(
-        "fallingwater.agent_proxy.reify_agent", lambda _path: agent
-    )
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", run_agent)
     redis = MemoryRedis(
         [
             *_base_entries(turn_id="turn-0"),
@@ -1409,7 +1466,7 @@ def test_named_ephemeral_agents_do_not_use_the_registry() -> None:
         len({item.child_conversation_id for item in [registered, *ephemeral]})
         == 3
     )
-    parent = reconstruct_conversation(_events(redis), conversation_id="abc")
+    parent = Conversation(_events(redis), conversation_id="abc")
     assert parent.agent_by_name == {"alice": registered.child_conversation_id}
 
 
@@ -1426,7 +1483,7 @@ def test_persistent_agent_uses_its_definition_name(monkeypatch) -> None:
             agent_path="example:writer", prompt="draft", persistent=True
         ),
     )
-    parent = reconstruct_conversation(_events(redis), conversation_id="abc")
+    parent = Conversation(_events(redis), conversation_id="abc")
 
     assert parent.agent_by_name == {"writer": request.child_conversation_id}
 
@@ -1520,7 +1577,7 @@ def test_persistent_agent_reuses_queue_time_history_and_routes_answers(
     monkeypatch.setattr(
         "fallingwater.worker.reify_agent", lambda _path: Agent(TestModel())
     )
-    monkeypatch.setattr("fallingwater.worker.run", run_agent)
+    monkeypatch.setattr("fallingwater.agent_proxy.run", run_agent)
 
     def finish(poke):
         assert _process(worker, poke)
@@ -1584,7 +1641,7 @@ def test_saved_delegation_repairs_partial_agent_setup(
                 persistent=True,
             ),
         )
-    parent = reconstruct_conversation(_events(redis), conversation_id="abc")
+    parent = Conversation(_events(redis), conversation_id="abc")
     request = parent.turn_state["turn-1"].delegations["first"]
     stream = worker.dsp_stream.conversation_stream(
         request.child_conversation_id

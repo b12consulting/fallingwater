@@ -16,7 +16,8 @@ and its tests can share a Redis instance without mixing their data.
 ## AD2 — Library first
 
 Fallingwater's core is an importable Python library. Applications can create a
-`Chat` with a Redis client, submit turns, and run `WorkerPool` in their own process.
+`ConversationClient` with a Redis client, submit turns, and run `WorkerPool` in
+their own process. `Chat(client)` adds terminal interaction to that client.
 The bundled `fw` CLI calls these same library classes; its chat input and
 responses pass through Redis.
 
@@ -35,9 +36,11 @@ are written as separate stream commands; each result is saved by call ID, and
 the last unique result queues one agent resume. A restarted worker reconstructs
 the turn from the conversation stream and recovers pending actions through
 `XAUTOCLAIM`.
-`agent_proxy.execute_tool` resolves attached functions and reconstructs a
-basic `RunContext` for each deferred call. The next turn rebuilds its history
-from completed turns.
+`agent_proxy.invoke_tool` executes attached functions with validated arguments
+and an optional captured context. `agent_proxy.execute_tool` reconstructs a
+basic `RunContext` from explicit runtime inputs; the worker loads the latest
+agent and dependencies before calling it. Neither helper loads conversations.
+The next turn rebuilds its history from completed turns.
 Fallingwater coordinates the turns; the imported agent defines their behavior.
 Pydantic AI generates its own run ID for each invocation. Fallingwater uses the
 stream's `turn_id` for application-level correlation and does not reuse it as
@@ -48,25 +51,27 @@ Pydantic AI's run ID.
 Redis Streams connect message submitters, workers, and readers. The shared
 `fw:dispatch` stream distributes turns through the `workers` consumer group. A
 per-conversation stream records the creation event, queued prompts, outcomes,
-and history needed for the next turn. `Chat.receive` reads that stream through
-`ConversationStream` with `XREAD`; the CLI uses a separate consumer group on
-the same stream.
+and history needed for the next turn. `ConversationClient.receive` reads that
+stream through `ConversationStream` with `XREAD`; the CLI uses a separate
+consumer group on the same stream.
 
 `DispatchStream` owns the shared dispatch key, consumer-group reads, claims,
 and acknowledgements. It decodes each dispatch entry into a typed action or an
 invalid-entry value that the worker acknowledges. It creates a
 `ConversationStream` bound to an ID; that object owns typed event reads and
-writes and its reader groups. `Chat` keeps one bound
+writes and its reader groups. `ConversationClient` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
 `models.py` defines the event and action schemas; `stream_utils.py`
-handles naming validation and wire codecs. `Chat` and `Worker` decide when to
-acknowledge entries; `Conversation` and its turn machines decide which work
-is enabled.
+handles naming validation and wire codecs. `ConversationClient` owns client
+stream operations; `Chat` requests acknowledgement after rendering an event.
+`Worker` decides when to acknowledge dispatch entries; `Conversation` and its
+turn machines decide which work is enabled.
 
-`Chat.send` prepares a queued event through `Conversation`, then writes the
-event and dispatch poke through the two stream objects with successive `XADD`
-commands. Group and consumer names remain explicit on stream operations.
+`ConversationClient.send` prepares a queued event through `Conversation`, then
+writes the event and dispatch poke through the two stream objects with
+successive `XADD` commands. Group and consumer names remain explicit on stream
+operations.
 
 | Stream                                      | `type`              | Other fields                 |
 |---------------------------------------------|---------------------|------------------------------|
@@ -81,8 +86,8 @@ reads.
 The dispatch stream stays text based because its action entries only carry
 routing identifiers. Stream reads attach Redis entry IDs to decoded dispatch
 actions and conversation events as metadata; those IDs are excluded from the
-Pydantic payload serialization. `Chat` uses event IDs for cursors and
-acknowledgements, while `Worker` uses action IDs for acknowledgements.
+Pydantic payload serialization. `ConversationClient` uses event IDs for cursors
+and acknowledgements, while `Worker` uses action IDs for acknowledgements.
 All conversation reads, CLI inspection, web feeds, and archives use one
 `ConversationEvent` model with a required `entry_id`. The decoder attaches the
 Redis ID to that model, rather than returning a separate tuple. Event envelope
@@ -91,8 +96,8 @@ serialization includes the ID; Redis payload serialization does not.
 Submitting a prompt writes `turn.queued` to the conversation stream and a
 `conversation.poke` instruction to dispatch in a following write. The
 entries have different Redis stream IDs but share a turn ID. A worker uses the
-conversation ID and turn ID to load the queued prompt, fixed agent and model,
-and prior history from the conversation stream. It writes `turn.tool.requested`
+conversation ID and turn ID to load the queued prompt, latest saved agent and
+model, and prior history from the conversation stream. It writes `turn.tool.requested`
 after a run returns deferred calls and `turn.tool.result` after each tool call
 completes. It writes `turn.completed` or `turn.failed` when the turn ends. Each
 dispatch action is acknowledged after its own event checkpoint; a logical turn
@@ -111,9 +116,9 @@ the canonical delta for later turns. Deferred request payloads use
 the full conversation history.
 
 `ConversationStream.iter_events()` pages through the event stream and supplies
-decoded events to `conversation.reconstruct_conversation`. That pure function
-returns a `Conversation` containing the configuration, conversation ID, replay
-cursor, and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
+decoded events to `Conversation(events, conversation_id=...)`. Its constructor
+passes the iterable to `apply`, building the configuration, replay cursor,
+and `turn_state: dict[str, TurnStateMachine]`. Each machine owns its
 prompt, prior-history snapshot, accumulated turn messages, usage, active tool
 request, per-call results, and child delegations. All conversations capture
 history and usage when the queued event is replayed, including persistent
@@ -129,19 +134,44 @@ conversations follow the same policy.
 
 ## AD5 — Conversation identity and configuration
 
-`Chat` generates a UUID when called without a conversation ID. The CLI instead
-generates a readable `qualifier_scientist` ID for each new chat and accepts that
-ID as the positional argument to resume it. The first conversation event stores
-the agent import path and model. `Chat` validates the effective agent and model
-before creating a conversation or resuming one. On resume it uses the saved
-values, ignoring supplied agent and model options. The CLI passes its arguments
-to `Chat` in both cases and defaults to `pydantic_ai:Agent` when `FW_AGENT` is
-unset; a new chat needs a model on its agent, in `FW_MODEL`, or through `-m`.
+`ConversationClient` generates a UUID when called without a conversation ID.
+The CLI instead generates a readable `qualifier_scientist` ID for each new chat
+and accepts that ID as the positional argument to resume it. The first
+conversation event stores the agent import path and model.
+An empty `Conversation` is valid, with no settings and replay cursor `0-0`.
+The first event in a nonempty conversation must be a
+`ConversationCreatedPayload`. Later payloads of that same type replace
+`settings` and advance the replay cursor without resetting turns, accumulated
+history, usage, or named-agent registrations. The existing payload name and
+`conversation.created` wire type are retained; B1's rename remains deferred.
+Settings are stored privately in `_settings` and updated by `apply`.
+The read-only `settings` property returns the applied settings or raises
+`ValueError` if absent. `get_settings()` returns settings or `None` without
+raising; client initialization uses this optional lookup to detect emptiness.
 
-`Chat.send(prompt)` generates a fresh UUID turn ID on every call and returns
-that ID with the queued event cursor. `Chat.ask(prompt)` submits through `send`
-and waits for the result through `receive`. Repeated prompts create separate
-turns; client submission deduplication is deferred until its behavior is needed.
+Workers use the latest replayed agent, model, and dependencies for each
+execution step, including turns queued before the settings change. An
+already-running invocation is not modified, but a later tool call or agent
+resumption can use newer settings. History and usage remain queue-time
+snapshots; already queued parent-routing references are unchanged. Changing
+agent definitions between steps may make outstanding tool calls incompatible,
+which fails explicitly rather than falling back to an older definition.
+
+`ConversationClient` validates the effective agent and model before creating
+a conversation or resuming one. It constructs `Conversation` directly from the
+event iterator, then validates the latest settings. If the result is empty, it
+validates, persists, and applies the initial settings without a separate
+first-record query. On resume it uses the latest saved values, ignoring
+supplied agent and model options. The CLI passes its arguments to
+`ConversationClient` in both cases and defaults to `pydantic_ai:Agent` when
+`FW_AGENT` is unset; a new chat needs a model on its agent, in `FW_MODEL`, or
+through `-m`.
+
+`ConversationClient.send(prompt)` generates a fresh UUID turn ID on every call
+and returns that ID with the queued event cursor.
+`ConversationClient.ask(prompt)` submits through `send` and waits for the result
+through `receive`. Repeated prompts create separate turns; client submission
+deduplication is deferred until its behavior is needed.
 
 ## AD6 — Worker pool lifecycle
 
@@ -262,16 +292,16 @@ stream length, unlike the bounded overview. Fragment routes live outside
 
 ## AD8 — CLI reader groups
 
-`Chat` creates or reuses a consumer group on the conversation stream during
-initialization, starting at ID `0`. The default group is `user`;
+`ConversationClient` creates or reuses a consumer group on the conversation
+stream during initialization, starting at ID `0`. The default group is `user`;
 `fw chat --group` selects another. Terminal reads use the stable consumer name
 `terminal` so a later CLI process can read entries left pending by an
-interrupted session. Each `Chat` starts with a reader cursor at `0`, advances
+interrupted session. Each client starts with a reader cursor at `0`, advances
 through pending entries, and switches to `>` when the pending read is empty.
 Later reads on that instance stay on `>`.
 
-`fw chat --rewind` calls `Chat.rewind` before reading. It uses `XGROUP SETID`
-to reset only the selected conversation reader group to `0`, then starts the
+`fw chat --rewind` calls `ConversationClient.rewind` before reading. It uses
+`XGROUP SETID` to reset only the selected conversation reader group to `0`, then starts the
 local reader at `>`. Reading redelivered entries rather than draining pending
 entries first preserves stream order and avoids printing pending outcomes
 twice during replay. It keeps the group and its pending entries, which are
@@ -282,16 +312,49 @@ the reset position. Both interactive and one-shot startup use this replay.
 The CLI prints queued prompts, completed answers, and failures before
 acknowledging their events. It acknowledges `conversation.created` and other
 non-displayed events as read. A terminal exit between printing and acknowledgement
-can cause a message to be printed again. A single `Chat.read` method reads
-pending entries for the stable consumer, then new entries. With `ffwd=True`, it
-handles all available events without blocking; normal reads wait up to one
+can cause a message to be printed again. `ConversationClient.read` yields typed
+events without printing or automatically acknowledging them. `Chat.read`
+renders each event and calls the client's `acknowledge` only after successful
+handling, including non-displayed events. The client reads pending entries
+for the stable consumer, then new entries. With `ffwd=True`, it
+reads all available events without blocking; normal reads wait up to one
 second for new events and return after a batch. On startup it handles
 events that are available and returns without waiting for queued turns whose
 results have not arrived; a new prompt can therefore overlap such a turn. Each
 group represents one logical terminal reader. In one-shot mode, `--msg` prints
 earlier results read during startup catch-up and the new turn's result to stdout.
 Results that arrive after the new prompt is queued use the same output.
-The library's `Chat.receive` and the web feed still use independent `XREAD` calls.
+The library's `ConversationClient.receive` and the web feed still use independent
+`XREAD` calls.
+
+`Chat` accepts a `ConversationClient`, not Redis connection options. It owns
+terminal input, rendering, formatted timestamp labels, and the reader thread.
+The CLI opens the client, optionally rewinds it, then constructs `Chat(client)`.
+The client owns settings, submission, blocking result reads, reader-group
+cursors, acknowledgement, rewind, and retained-prompt lookup. It has no terminal
+I/O. On opening it reconstructs `client.conversation` from all retained events,
+independently of consumer-group delivery. `settings` exposes that conversation's
+settings rather than a separate copy. The initial replay costs time and memory
+proportional to retained history; malformed nonempty history raises an error.
+
+`client.refresh()` explicitly applies the unseen tail in stream order after
+`conversation.last_event_id`. That replay cursor is separate from the
+reader-group cursor: group delivery can omit acknowledged events, revisit older
+entries, or divide work among readers, so it never drives canonical replay.
+Submission, `read`, `receive`, and `ask` do not implicitly refresh the snapshot.
+Rewind resets delivery only; it neither resets nor replays the local state.
+The snapshot is accurate through its replay cursor, not guaranteed current
+against concurrent writers. Refresh does not publish dispatch actions or
+acknowledge events. If reading fails partway through, the error propagates and
+the next refresh starts after the last successfully applied event.
+
+A per-client lock serializes refreshes and submission preparation. Submission
+prepares through the exposed `Conversation` without optimistically applying the
+new payload; only persisted-event replay advances state. Stream writes and
+blocking delivery reads do not hold that lock. The exposed conversation is
+read-only by convention; callers inspecting it during a concurrent explicit
+refresh must coordinate access themselves. No additional synchronization thread
+is started, and Chat does not refresh state in its background delivery reader.
 
 Interactive `Chat.run` uses synchronous `prompt_toolkit` input in the main
 thread and one background Redis reader thread, without application-level
@@ -317,14 +380,14 @@ headers, replies, and failures retain the default style. There are no additional
 formatted output. Only timestamp alignment measures the terminal width;
 message bodies retain their original text and use natural terminal wrapping,
 without manual line breaks or full-width background padding.
-The reader records timestamps from queued events. If an outcome references an
-uncached prompt, it scans retained queued events to recover the timestamp,
-including prompts already acknowledged by this group. A history scan is only
-needed for such cache misses.
+Chat records formatted timestamps from queued events. If an outcome references
+an uncached prompt, it asks the client for the queued event ID. The client
+caches raw queued IDs while reading and scans retained events only on a cache
+miss, including prompts already acknowledged by this group.
 Timestamps are presentation labels, not unique identifiers; internal routing
 continues to use turn IDs. Interactive and one-shot readers use the same output
 format without a mode flag; `--msg` still waits for one result and exits.
-`Chat.ask` and `receive` continue to return answer strings without printing.
+`ConversationClient.ask` and `receive` return answer strings without printing.
 Overlapping submissions retain the queue-time history policy in AD4.
 
 ## AD9 — Compressed conversation payloads
@@ -494,17 +557,27 @@ workflow payload; `append_event` retains explicit type/payload writes.
 `stream.py` has no dependency on `Conversation`, turn machines, or notification
 intents.
 
-`conversation.py` defines `Conversation`, `PreparedEvent`, and
-`reconstruct_conversation`, depending only on payload models and the pure
-turn-state module. `Conversation` exposes pure preparation, dispatch eligibility, result
+`conversation.py` defines `Conversation` and `PreparedEvent`, depending only on
+payload models and the pure turn-state module. Its iterable constructor uses
+`apply` for both settings and turn events; the separate reconstruction function
+is removed. `apply(events)` consumes an iterable lazily and in order.
+`apply_one(event)` wraps a single event and delegates to `apply`. Client and
+worker refreshes pass stream iterators directly; cursor-checked writes pass
+their returned event lists. Empty batches do nothing. If iteration or replay
+fails, the error propagates and the successfully applied prefix remains;
+the batch is not atomic.
+`Conversation` exposes pure preparation, dispatch eligibility, result
 eligibility, child-outcome normalization, and post-replay resumption decisions.
 `prepare` returns a `PreparedEvent` containing the validated payload and
 emissions without advancing state. Its `dispatch(entry_id)` binds terminal
 notification intents to the actual persisted event ID. New-turn preparation
-uses an unregistered machine, allowing `Chat` to submit turns without replaying
-history or optimistically adding them to canonical state.
+uses an unregistered machine, so submission does not optimistically add the
+turn to canonical state. The client reconstructs history on opening and
+advances its snapshot only through explicit refresh; preparation itself
+requires no fresh replay.
 
-`Chat` and `Worker` coordinate reads, writes, and acknowledgement policy.
+`ConversationClient` and `Worker` coordinate reads and writes. Chat determines
+when a displayed event is safe to acknowledge through the client.
 Worker checkpointing prepares a fact, appends it, then publishes its actions.
 It does not refresh or advance the replayed state; only applying persisted
 events does that. General checkpoints have no cursor check, so concurrent
@@ -539,6 +612,27 @@ validates it but lets Redis generate new stream IDs when appending events.
 Archives without IDs are not supported. Archive files use only `.jsonl.zst`;
 Redis conversation event payloads
 also use Zstandard, with a separate frame for each event.
+
+The archive and restore CLI commands interpret a positional target ending in
+`:` as a namespace, stripping exactly that final colon and ignoring the global
+namespace option. Other targets are conversation IDs in the global namespace.
+Namespace archive exports only conversation
+histories, one `<conversation-id>.jsonl.zst` file per stream in an existing store
+directory. Namespace restore loads every matching file from that directory into
+the selected namespace and checks all destination conversation keys for conflicts
+before appending any events. The per-conversation library helpers remain available.
+Use separate directories for archive sets; files do not encode the namespace.
+Dispatch, consumer groups, and expiry are excluded. Operations are not atomic
+across conversations, and failed reads or writes can leave partial output.
+
+Namespace sync in `archive.py` uses Redis `COPY` for every stream under the
+source namespace prefix, including dispatch. Unlike archive restore, it preserves
+entry IDs, encoded payloads, consumer groups, pending entries, and expiry.
+It validates distinct namespaces and checks all destination keys for conflicts
+before copying without replacement. Non-stream source keys and unrelated
+destination keys are untouched. Copies are atomic per key, not across a namespace;
+stop writers and workers for consistency. Concurrent changes or Redis errors can
+leave a partial copy and are reported rather than silently skipped.
 
 ## AD16 — Payload transitions and per-turn machines
 
@@ -612,3 +706,71 @@ Each turn stores its own parent reference, preventing follow-up answers from
 resolving the original creation call. Registration and setup are cursor-checked
 and replayable, but dispatch publication remains separate and ownership renewal,
 exactly-once external effects, and full cross-stream recovery are not provided.
+
+## AD18 — In-memory FIFO prototype
+
+`contrib/fwlite.py` is a separate happy-path executor, not a Redis backend.
+UUIDs identify sessions holding agent instances and history; a parent-scoped
+name service resolves persistent `AgentRequest` sessions. One deque uses
+`appendleft` for all jobs and `pop` for execution. Agent steps defer tools,
+tool results fan in by call ID, and child answers route to the requesting turn
+and tool call. Root answers are printed. Turns within a session are serialized
+and start with its latest completed history, unlike the durable library's
+overlapping queue-time snapshots.
+
+The prototype reuses `agent_proxy.run` and its private attached-tool helpers
+with captured runtime contexts, avoiding replay and persistence models.
+Registered subagents reuse their original settings; subsequent requests do
+not reconfigure them. Exceptions propagate and stop processing, state remains
+in memory, and there is no recovery, cancellation, or execution limit.
+
+## AD19 — Conversation-backed FIFO prototype
+
+`contrib/fwflash.py` keeps one executor and one `appendleft`/`pop` work deque,
+but delegates turn validation, history, tool-result fan-in, parent routing,
+and persistent name registration to `Conversation`. A central `record` helper
+prepares each new turn payload, applies its event, and queues its emitted actions.
+Creation settings are applied directly. Events have counter-generated IDs and
+remain in each session's in-memory journal, including exact child terminal events
+used by `Conversation.child_outcome`. Runtime agent instances, dependencies, and
+captured tool contexts stay outside the pure conversation state.
+Public session creation accepts an agent import-path string. Tests expose
+module-level agents and exercise the same catalog loading path as the CLI.
+
+Pending prompts are applied only when their session's previous turn completes,
+preserving serial history snapshots. Delegation records the parent request,
+then submits the child's queued event; that event emits the child poke instead
+of also publishing the delegation's equivalent intent. Persistent settings
+conflicts are rejected during shared resolution and conversation preparation.
+The prototype shares `fwlite`'s trace renderer but does not replace it.
+Exceptions propagate without recovery or failed-event conversion.
+
+## AD20 — Shared execution helpers, adapter-owned policies
+
+`agent_proxy.run_agent_step` assembles a turn's model inputs and returns an
+`AgentStepOutcome`: a proposed tool-request or completion payload plus ephemeral
+captured tool contexts. It does not record events, apply transitions, or publish
+actions. Usage is copied before execution so the model call cannot advance the
+turn's canonical usage ahead of its event. Both the Redis worker and `fwflash`
+use this helper; each still owns its prepare/record/apply/publish lifecycle.
+
+`agent_proxy.resolve_subagent` resolves parent-scoped names, inherited settings,
+and explicit conflicts without loading agents or changing registrations.
+Callers supply the definition's default name. Both executors use the worker's
+original deterministic UUID5 child-session and child-turn identities, derived
+from the requesting conversation, turn, step, and tool call. Named reuse keeps
+the child session ID while deriving a turn ID for each requesting call. Root
+sessions and user-submitted turns retain fresh IDs. `AgentRequest` lives in
+`models.py`; its existing `agent_proxy`
+import remains available as a re-export.
+
+`agent_proxy.invoke_tool` is the public attached-tool invocation boundary for
+captured contexts. `execute_tool` now accepts an already resolved agent plus
+explicit dependencies, model, conversation ID, prompt, messages, and usage
+instead of a `Conversation`; it restores a basic context and uses the same
+invocation boundary. `validate_deps` shares dependency reconstruction. Catalog
+loading, agent lifetime, event storage, queueing, retries, error conversion, and
+scheduling remain adapter concerns. This does not change delegation effects,
+production queue-time snapshots, or the prototype's serial-session policy.
+Keep these functions in the existing `agent_proxy.py` module rather than adding
+a separate execution module; the shared APIs retain the same role boundaries.
