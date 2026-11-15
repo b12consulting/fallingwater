@@ -611,6 +611,27 @@ Archives without IDs are not supported. Archive files use only `.jsonl.zst`;
 Redis conversation event payloads
 also use Zstandard, with a separate frame for each event.
 
+The archive and restore CLI commands interpret a positional target ending in
+`:` as a namespace, stripping exactly that final colon and ignoring the global
+namespace option. Other targets are conversation IDs in the global namespace.
+Namespace archive exports only conversation
+histories, one `<conversation-id>.jsonl.zst` file per stream in an existing store
+directory. Namespace restore loads every matching file from that directory into
+the selected namespace and checks all destination conversation keys for conflicts
+before appending any events. The per-conversation library helpers remain available.
+Use separate directories for archive sets; files do not encode the namespace.
+Dispatch, consumer groups, and expiry are excluded. Operations are not atomic
+across conversations, and failed reads or writes can leave partial output.
+
+Namespace sync in `archive.py` uses Redis `COPY` for every stream under the
+source namespace prefix, including dispatch. Unlike archive restore, it preserves
+entry IDs, encoded payloads, consumer groups, pending entries, and expiry.
+It validates distinct namespaces and checks all destination keys for conflicts
+before copying without replacement. Non-stream source keys and unrelated
+destination keys are untouched. Copies are atomic per key, not across a namespace;
+stop writers and workers for consistency. Concurrent changes or Redis errors can
+leave a partial copy and are reported rather than silently skipped.
+
 ## AD16 — Payload transitions and per-turn machines
 
 `turn_state.py` defines Pydantic transition models with actual payloads as their

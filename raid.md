@@ -1007,3 +1007,29 @@ revisited. Close or revise an item when the code resolves it.
   and a failure preserves the successfully applied prefix and its replay
   cursor. This removes caller-owned replay loops without introducing batch
   atomicity, dispatch publication, or new concurrency guarantees.
+- **D104 — Non-destructive namespace stream sync (implemented).**
+  Add `fw sync <source-namespace> <destination-namespace>` using Redis `COPY`
+  within the selected database. Copy all streams, including dispatch, with their
+  original IDs, payload bytes, consumer groups, pending entries, and expiry.
+  Refuse identical or invalid namespaces and preflight destination conflicts
+  before copying; never replace existing keys. Ignore non-stream source keys.
+  This preserves operational state rather than replaying archive events with new
+  IDs. It requires Redis 6.2 or newer and offers no cross-stream atomic snapshot
+  or rollback: stop writers and workers for consistency, and report failures
+  explicitly if concurrent changes leave a partial copy.
+- **D105 — Namespace-wide conversation archive commands (implemented).**
+  Make archive and restore accept positional source and destination namespaces,
+  respectively, rather than a conversation ID. Retain per-conversation JSONL
+  Zstandard files and library helpers, excluding dispatch and operational stream
+  metadata. Discover conversations with typed SCAN batches of 1000 and restore
+  all matching store files after checking every destination key for conflicts.
+  Keep the existing flat store layout, requiring a separate directory for each
+  archive set; archive overwrites matching files and restore generates new IDs.
+  Validate conversation filenames before export. Neither operation is a
+  cross-conversation transaction, and failures can leave partial output.
+- **D106 — Colon-suffixed archive targets (implemented).**
+  Extend D105's namespace-wide commands with single-conversation mode.
+  A positional target ending in `:` selects an explicit namespace after stripping
+  exactly one trailing colon; other targets select one conversation in the global
+  namespace. Reuse existing archive helpers and formats without changing sync.
+  Empty or otherwise invalid namespace targets fail normal namespace validation.

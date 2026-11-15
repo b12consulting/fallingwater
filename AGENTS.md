@@ -31,6 +31,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- tool-call-flow.md     Tool call events, dispatch, and recovery flow
 |   `-- tool-call-flow.svg    Rendered tool call diagrams
 |-- contrib/                  Small component experiments
+|   |-- bench-sync.py         Copy fw to 100 namespaces and time each sync
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment
 |   |-- turn-state-machine.py Payload-instance transition model example
@@ -45,10 +46,10 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
 |   |-- agent_proxy.py        Single-call agent run and attached-tool helpers
-|   |-- archive.py            Conversation archive export and restore
+|   |-- archive.py            Namespace conversation archives, restore, and stream sync
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal input, event rendering, and reader thread
-|   |-- cli.py                argparse CLI for workers, chat, archive, web, and reset
+|   |-- cli.py                argparse CLI for workers, chat, archive, sync, web, and reset
 |   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
 |   |-- conversation_client.py Replay snapshots, submission, and reader groups
 |   |-- models.py             Conversation and dispatch event/payload schemas

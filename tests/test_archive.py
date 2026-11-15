@@ -13,6 +13,7 @@ from fallingwater.models import (
     Event,
     TurnQueuedPayload,
 )
+from fallingwater.stream_utils import encode_conversation_event
 
 
 def test_zstd_archive_round_trip(tmp_path, monkeypatch) -> None:
@@ -20,7 +21,9 @@ def test_zstd_archive_round_trip(tmp_path, monkeypatch) -> None:
         ConversationEvent(
             entry_id="1-0",
             type=Event.CONVERSATION_CREATED,
-            payload=ConversationCreatedPayload(agent="example:agent", model="test"),
+            payload=ConversationCreatedPayload(
+                agent="example:agent", model="test"
+            ),
         ),
         ConversationEvent(
             entry_id="2-0",
@@ -32,7 +35,9 @@ def test_zstd_archive_round_trip(tmp_path, monkeypatch) -> None:
     stream = dispatch.conversation_stream.return_value
     stream.iter_events.return_value = events
     stream.read_conversation_range.return_value = []
-    monkeypatch.setattr(archive, "DispatchStream", lambda *_args, **_kwargs: dispatch)
+    monkeypatch.setattr(
+        archive, "DispatchStream", lambda *_args, **_kwargs: dispatch
+    )
 
     length = archive.dump_conversation_stream(
         MagicMock(spec=Redis), "fw", "abc", str(tmp_path)
@@ -40,12 +45,19 @@ def test_zstd_archive_round_trip(tmp_path, monkeypatch) -> None:
     store_file = tmp_path / "abc.jsonl.zst"
 
     assert length == store_file.stat().st_size
-    assert zstd.ZstdDecompressor().decompress(
-        store_file.read_bytes(), max_output_size=1024
-    ) == b"\n".join(archive.adapter.dump_json(event) for event in events) + b"\n"
-    assert archive.adapter.validate_json(
-        archive.adapter.dump_json(events[0])
-    ).entry_id == "1-0"
+    assert (
+        zstd.ZstdDecompressor().decompress(
+            store_file.read_bytes(), max_output_size=1024
+        )
+        == b"\n".join(archive.adapter.dump_json(event) for event in events)
+        + b"\n"
+    )
+    assert (
+        archive.adapter.validate_json(
+            archive.adapter.dump_json(events[0])
+        ).entry_id
+        == "1-0"
+    )
     assert archive.load_conversation_stream(
         MagicMock(spec=Redis), "fw", "abc", str(tmp_path)
     ) == len(events)
@@ -54,7 +66,9 @@ def test_zstd_archive_round_trip(tmp_path, monkeypatch) -> None:
     ]
 
 
-def test_load_zstd_rejects_incomplete_jsonl_record(tmp_path, monkeypatch) -> None:
+def test_load_zstd_rejects_incomplete_jsonl_record(
+    tmp_path, monkeypatch
+) -> None:
     event = ConversationEvent(
         entry_id="1-0",
         type=Event.CONVERSATION_CREATED,
@@ -65,8 +79,12 @@ def test_load_zstd_rejects_incomplete_jsonl_record(tmp_path, monkeypatch) -> Non
     )
 
     dispatch = MagicMock()
-    dispatch.conversation_stream.return_value.read_conversation_range.return_value = []
-    monkeypatch.setattr(archive, "DispatchStream", lambda *_args, **_kwargs: dispatch)
+    dispatch.conversation_stream.return_value.read_conversation_range.return_value = (
+        []
+    )
+    monkeypatch.setattr(
+        archive, "DispatchStream", lambda *_args, **_kwargs: dispatch
+    )
 
     with pytest.raises(ValueError, match="truncated"):
         archive.load_conversation_stream(
@@ -81,13 +99,185 @@ def test_load_zstd_requires_entry_id(tmp_path, monkeypatch) -> None:
         payload=ConversationCreatedPayload(agent="example:agent", model="test"),
     )
     record = event.model_dump_json(exclude={"entry_id"}).encode() + b"\n"
-    (tmp_path / "abc.jsonl.zst").write_bytes(zstd.ZstdCompressor().compress(record))
+    (tmp_path / "abc.jsonl.zst").write_bytes(
+        zstd.ZstdCompressor().compress(record)
+    )
     dispatch = MagicMock()
-    dispatch.conversation_stream.return_value.read_conversation_range.return_value = []
-    monkeypatch.setattr(archive, "DispatchStream", lambda *_args, **_kwargs: dispatch)
+    dispatch.conversation_stream.return_value.read_conversation_range.return_value = (
+        []
+    )
+    monkeypatch.setattr(
+        archive, "DispatchStream", lambda *_args, **_kwargs: dispatch
+    )
 
     with pytest.raises(ValueError, match="entry_id"):
         archive.load_conversation_stream(
             MagicMock(spec=Redis), "fw", "abc", str(tmp_path)
         )
     dispatch.conversation_stream.return_value.append_event.assert_not_called()
+
+
+def test_sync_copies_all_streams_and_preserves_state(
+    isolated_redis: Redis,
+) -> None:
+    redis = isolated_redis
+    sources = {
+        "source:dispatch": {b"type": b"poke", b"conversation_id": b"abc"},
+        "source:conversation:abc:events": {
+            b"type": b"conversation.created",
+            b"payload": b"\x00\xff",
+        },
+        "source:custom": {b"field": b"value"},
+    }
+    for source, fields in sources.items():
+        redis.xadd(source, fields, id="1-0")
+    redis.xgroup_create("source:dispatch", "workers", id="0")
+    redis.xreadgroup("workers", "worker-1", {"source:dispatch": ">"})
+    redis.pexpire("source:custom", 60_000)
+    redis.set("source:settings", "not a stream")
+    redis.xadd("source-other:dispatch", {"field": "unrelated"})
+    redis.set("destination:unrelated", "keep")
+
+    assert archive.sync_streams(redis, "source", "destination") == 3
+
+    for source in sources:
+        destination = source.replace("source:", "destination:", 1)
+        assert redis.xrange(destination) == redis.xrange(source)
+    assert redis.xinfo_groups("destination:dispatch") == redis.xinfo_groups(
+        "source:dispatch"
+    )
+    assert (
+        redis.xpending_range("destination:dispatch", "workers", "-", "+", 10)[
+            0
+        ]["message_id"]
+        == b"1-0"
+    )
+    assert 0 < redis.pttl("destination:custom") <= 60_000
+    assert not redis.exists("destination:settings")
+    assert not redis.exists("destination-other:dispatch")
+    assert redis.get("destination:unrelated") == b"keep"
+
+
+@pytest.mark.parametrize("conflict_type", ["stream", "string"])
+def test_sync_refuses_conflicts_before_copying(
+    isolated_redis: Redis, conflict_type: str
+) -> None:
+    redis = isolated_redis
+    redis.xadd("source:a", {"field": "first"})
+    redis.xadd("source:z", {"field": "last"})
+    if conflict_type == "stream":
+        redis.xadd("destination:z", {"field": "existing"})
+    else:
+        redis.set("destination:z", "existing")
+    original = redis.dump("destination:z")
+
+    with pytest.raises(ValueError, match="destination:z already exists"):
+        archive.sync_streams(redis, "source", "destination")
+
+    assert not redis.exists("destination:a")
+    assert redis.dump("destination:z") == original
+
+
+@pytest.mark.parametrize(
+    ("source", "destination"),
+    [("fw", "fw"), ("bad:*", "fw"), ("fw", "BAD")],
+)
+def test_sync_rejects_invalid_namespaces(source: str, destination: str) -> None:
+    redis = MagicMock(spec=Redis)
+    with pytest.raises(ValueError):
+        archive.sync_streams(redis, source, destination)
+    redis.scan_iter.assert_not_called()
+
+
+def test_sync_empty_namespace(isolated_redis: Redis) -> None:
+    assert archive.sync_streams(isolated_redis, "source", "destination") == 0
+
+
+def test_sync_reports_failed_copy() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.scan_iter.return_value = [b"source:dispatch"]
+    redis.exists.return_value = False
+    redis.copy.return_value = False
+
+    with pytest.raises(ValueError, match="could not copy source:dispatch"):
+        archive.sync_streams(redis, "source", "destination")
+
+
+def test_namespace_archive_round_trip(tmp_path, isolated_redis: Redis) -> None:
+    redis = isolated_redis
+    payload = ConversationCreatedPayload(agent="example:agent", model="test")
+    fields = encode_conversation_event(Event.CONVERSATION_CREATED, payload)
+    for conversation_id in ("abc", "xyz"):
+        redis.xadd(f"source:conversation:{conversation_id}:events", fields)
+    redis.xadd("source-other:conversation:other:events", fields)
+    redis.xadd("source:dispatch", {"type": "poke"})
+    redis.set("source:conversation:not-a-stream:events", "ignore")
+    (tmp_path / "notes.txt").write_text("ignore")
+
+    length = archive.dump_namespace(redis, "source", str(tmp_path))
+
+    assert {path.name for path in tmp_path.glob("*.jsonl.zst")} == {
+        "abc.jsonl.zst",
+        "xyz.jsonl.zst",
+    }
+    assert length == sum(
+        path.stat().st_size for path in tmp_path.glob("*.jsonl.zst")
+    )
+    assert archive.load_namespace(redis, "destination", str(tmp_path)) == 2
+    for conversation_id in ("abc", "xyz"):
+        stream = archive.DispatchStream(
+            redis, namespace="destination"
+        ).conversation_stream(conversation_id)
+        assert [event.payload for event in stream.iter_events()] == [payload]
+    assert not redis.exists("destination:dispatch")
+    assert not redis.exists("destination:conversation:other:events")
+
+
+def test_namespace_restore_preflights_all_conflicts(
+    tmp_path, isolated_redis: Redis
+) -> None:
+    redis = isolated_redis
+    payload = ConversationCreatedPayload(agent="example:agent", model="test")
+    fields = encode_conversation_event(Event.CONVERSATION_CREATED, payload)
+    for conversation_id in ("abc", "xyz"):
+        redis.xadd(f"source:conversation:{conversation_id}:events", fields)
+    archive.dump_namespace(redis, "source", str(tmp_path))
+    redis.xgroup_create(
+        "destination:conversation:xyz:events", "reader", mkstream=True
+    )
+
+    with pytest.raises(ValueError, match="xyz:events already exists"):
+        archive.load_namespace(redis, "destination", str(tmp_path))
+    assert not redis.exists("destination:conversation:abc:events")
+    assert redis.xlen("destination:conversation:xyz:events") == 0
+
+
+@pytest.mark.parametrize(
+    "operation", [archive.dump_namespace, archive.load_namespace]
+)
+def test_namespace_archive_validation(tmp_path, operation) -> None:
+    redis = MagicMock(spec=Redis)
+    with pytest.raises(ValueError, match="namespace"):
+        operation(redis, "bad:*", str(tmp_path))
+    with pytest.raises(ValueError, match="not a directory"):
+        operation(redis, "fw", str(tmp_path / "missing"))
+    redis.scan_iter.assert_not_called()
+    redis.exists.assert_not_called()
+
+
+def test_empty_namespace_archive_and_store(
+    tmp_path, isolated_redis: Redis
+) -> None:
+    assert archive.dump_namespace(isolated_redis, "fw", str(tmp_path)) == 0
+    assert archive.load_namespace(isolated_redis, "fw", str(tmp_path)) == 0
+
+
+def test_namespace_archive_rejects_unsafe_conversation_filename(
+    tmp_path, isolated_redis: Redis
+) -> None:
+    isolated_redis.xadd(
+        "fw:conversation:../outside:events", {"type": "invalid"}
+    )
+    with pytest.raises(ValueError, match="not a file name"):
+        archive.dump_namespace(isolated_redis, "fw", str(tmp_path))
+    assert not list(tmp_path.glob("*.jsonl.zst"))

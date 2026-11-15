@@ -54,6 +54,132 @@ def test_redis_options_are_global() -> None:
     assert args.claim_idle_ms == 1500
 
 
+def test_sync_command_copies_positional_namespaces(
+    isolated_redis: Redis,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    redis = isolated_redis
+    redis.xadd("source:dispatch", {"type": "poke"}, id="1-0")
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    from_url = MagicMock(return_value=connection)
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", from_url)
+
+    assert (
+        main(
+            [
+                "-r",
+                "redis://example:6379/1",
+                "-n",
+                "ignored",
+                "sync",
+                "source",
+                "destination",
+            ]
+        )
+        == 0
+    )
+
+    from_url.assert_called_once_with("redis://example:6379/1")
+    assert redis.xrange("destination:dispatch") == redis.xrange(
+        "source:dispatch"
+    )
+    assert capsys.readouterr().out.strip() == (
+        "Copied 1 stream(s) from namespace 'source' to 'destination'."
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        main(["sync", "source", "destination"])
+
+
+@pytest.mark.parametrize(
+    ("command", "function"),
+    [("archive", "dump_namespace"), ("restore", "load_namespace")],
+)
+def test_archive_commands_use_positional_namespace(
+    monkeypatch: pytest.MonkeyPatch, command: str, function: str
+) -> None:
+    redis = MagicMock(spec=Redis)
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    from_url = MagicMock(return_value=connection)
+    operation = MagicMock(return_value=42)
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", from_url)
+    monkeypatch.setattr(f"fallingwater.cli.archive.{function}", operation)
+
+    assert (
+        main(
+            [
+                "-r",
+                "redis://example:6379/1",
+                "-n",
+                "ignored",
+                command,
+                "selected:",
+                "--store",
+                "archives",
+            ]
+        )
+        == 0
+    )
+    from_url.assert_called_once_with("redis://example:6379/1")
+    operation.assert_called_once_with(redis, "selected", store="archives")
+
+    operation.side_effect = ValueError("invalid archive")
+    with pytest.raises(ValueError, match="invalid archive"):
+        main([command, "selected:"])
+
+
+@pytest.mark.parametrize(
+    ("command", "function"),
+    [
+        ("archive", "dump_conversation_stream"),
+        ("restore", "load_conversation_stream"),
+    ],
+)
+def test_archive_commands_use_conversation_in_global_namespace(
+    monkeypatch: pytest.MonkeyPatch, command: str, function: str
+) -> None:
+    redis = MagicMock(spec=Redis)
+    connection = MagicMock()
+    connection.__enter__.return_value = redis
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *_args: connection
+    )
+    operation = MagicMock(return_value=42)
+    monkeypatch.setattr(f"fallingwater.cli.archive.{function}", operation)
+    other_function = (
+        "dump_namespace" if command == "archive" else "load_namespace"
+    )
+    namespace_operation = MagicMock()
+    monkeypatch.setattr(
+        f"fallingwater.cli.archive.{other_function}", namespace_operation
+    )
+
+    assert main(["-n", "selected", command, "abc", "--store", "archives"]) == 0
+    operation.assert_called_once_with(
+        redis, "selected", "abc", store="archives"
+    )
+    namespace_operation.assert_not_called()
+    operation.side_effect = ValueError("invalid archive")
+    with pytest.raises(ValueError, match="invalid archive"):
+        main([command, "abc"])
+
+
+@pytest.mark.parametrize("command", ["archive", "restore"])
+@pytest.mark.parametrize("target", [":", "fw::"])
+def test_archive_commands_reject_invalid_namespace_targets(
+    monkeypatch: pytest.MonkeyPatch, command: str, target: str
+) -> None:
+    connection = MagicMock()
+    monkeypatch.setattr(
+        "fallingwater.cli.Redis.from_url", lambda *_args: connection
+    )
+    with pytest.raises(ValueError, match="namespace"):
+        main([command, target])
+
+
 def test_web_command_passes_config_to_app_and_uvicorn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

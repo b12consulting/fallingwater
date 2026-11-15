@@ -98,6 +98,30 @@ fw tail relaxed_euler --full
 fw dispatch
 ```
 
+Use `fw archive <namespace>: --store <directory>` to archive every conversation
+history in a namespace, and `fw restore <namespace>: --store <directory>` to
+restore every `.jsonl.zst` file in that directory into the destination namespace.
+The trailing colon selects namespace mode, independently of global `--namespace`.
+Without it, the argument is a conversation ID: `fw archive <id>` and
+`fw restore <id>` operate on one conversation in the global namespace
+(`fw` by default, or `fw -n <namespace> archive <id>`).
+The directory must already exist; it defaults to `.fw-store`. Use a separate
+directory for each archive set, since files are named by conversation ID rather
+than namespace. Archive replaces files with the same conversation ID; restore
+refuses any existing destination conversation key before loading any files.
+Dispatch streams, consumer groups, and expiry are not archived, and restore
+generates new event IDs. Stop writers for consistency; a failed operation can
+leave partially written files or restored conversations.
+
+Use `fw sync <source-namespace> <destination-namespace>` to copy all Redis
+streams, including dispatch, within the Redis database selected by `--redis-url`.
+It preserves entry IDs, binary payloads, consumer groups, pending entries, and
+expiry. Non-stream source keys are ignored. The namespaces must differ; any
+existing destination key for a source stream causes refusal before copying.
+Unrelated destination keys are left unchanged. Stop writers and workers for a
+consistent copy: streams are copied individually, not as an atomic namespace
+snapshot, and a concurrent change or error can leave a partial copy.
+
 For a single non-interactive turn, run `fw chat <id> --msg "Hello"`. The
 command waits for that turn's result, prints it to stdout, and exits. If
 you omit the ID, it starts a conversation and prints its new ID to stderr.
