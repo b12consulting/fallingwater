@@ -721,3 +721,22 @@ with captured runtime contexts, avoiding replay and persistence models.
 Registered subagents reuse their original settings; subsequent requests do
 not reconfigure them. Exceptions propagate and stop processing, state remains
 in memory, and there is no recovery, cancellation, or execution limit.
+
+## AD19 — Conversation-backed FIFO prototype
+
+`contrib/fwflash.py` keeps one executor and one `appendleft`/`pop` work deque,
+but delegates turn validation, history, tool-result fan-in, parent routing,
+and persistent name registration to `Conversation`. A central `record` helper
+prepares each new turn payload, applies its event, and queues its emitted actions.
+Creation settings are applied directly. Events have counter-generated IDs and
+remain in each session's in-memory journal, including exact child terminal events
+used by `Conversation.child_outcome`. Runtime agent instances, dependencies, and
+captured tool contexts stay outside the pure conversation state.
+
+Pending prompts are applied only when their session's previous turn completes,
+preserving serial history snapshots. Delegation records the parent request,
+then submits the child's queued event; that event emits the child poke instead
+of also publishing the delegation's equivalent intent. Persistent settings
+conflicts are rejected by conversation preparation. The prototype shares
+`fwlite`'s trace renderer but does not replace it or modify the durable worker.
+Exceptions propagate without recovery or failed-event conversion.

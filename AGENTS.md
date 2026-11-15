@@ -35,6 +35,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- echo.py               Redis Streams echo worker, chat, and status CLI
 |   |-- countdown_stream.py   Redis Streams countdown worker experiment
 |   |-- fwlite.py             In-memory FIFO agent and subagent executor
+|   |-- fwflash.py            FIFO executor using Conversation event validation
 |   |-- turn-state-machine.py Payload-instance transition model example
 |   |-- turn-state-machine2.py Tool and child payload-transition model example
 |   |-- test-compression.py   Compression benchmark for a serialized conversation turn
@@ -89,6 +90,7 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_conversation_client.py Client snapshots, submission, and reader-group checks
     |-- test_demo.py          Jeopardy and editor/writer request checks
     |-- test_fwlite.py        In-memory FIFO executor and named-session checks
+    |-- test_fwflash.py       Conversation-backed FIFO executor checks
     |-- test_streams.py       Conversation event codec and naming checks
     |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks

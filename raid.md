@@ -1044,3 +1044,15 @@ revisited. Close or revise an item when the code resolves it.
   Reused sessions retain their original settings without conflict checking.
   Print root output and propagate exceptions; persistence, recovery, cancellation,
   limits, and production error handling remain deliberately out of scope.
+- **D108 — Conversation-backed single-deque experiment (implemented).**
+  Add `contrib/fwflash.py` alongside `fwlite`, with no production-library changes.
+  Validate new turn payloads through `Conversation.prepare` before recording
+  their events through `Conversation.apply`; replay alone intentionally tolerates
+  some duplicates and is not strict new-event validation. Let prepared emissions
+  drive the FIFO executor and keep generated event IDs plus journals in memory
+  for exact child-result correlation. Queue child starts from their queued events,
+  not twice from both delegation and queueing. Delay applying subsequent queued
+  prompts until their session is free so history remains serial. Reuse the
+  conversation's names, settings validation, fan-in, and child-outcome conversion
+  rather than maintaining a second turn machine. Redis, threads, crash recovery,
+  and production error handling remain outside this happy-path prototype.
