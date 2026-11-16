@@ -66,7 +66,7 @@ def _event(event_type: Event, **values):
         payload = ToolRequestedPayload(
             turn_id="turn-1",
             step_id="step-1",
-            requests={},
+            requests=values.get("requests", {}),
             step_messages=[],
             usage=RunUsage(),
         )
@@ -594,6 +594,74 @@ def test_dashboard_escapes_content_and_loads_exact_full_event() -> None:
         max=entry_id,
         count=1,
     )
+
+
+def test_dashboard_event_omits_step_and_tool_call_metadata() -> None:
+    redis = MagicMock(spec=Redis)
+    redis.exists.return_value = 1
+    redis.xrange.return_value = [("3-0", _event(Event.TURN_TOOL_RESULT))]
+    app = create_app(redis=redis)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/fw-api/dashboard-event",
+            params={"conversation_id": "abc", "entry_id": "3-0"},
+        )
+
+    assert response.status_code == 200
+    metadata = response.text.split("</dl>", 1)[0]
+    assert ">Turn</dt>" in metadata
+    assert "turn-1" in metadata
+    assert ">Step</dt>" not in metadata
+    assert ">Tool call</dt>" not in metadata
+    assert "step-1" not in metadata
+    assert "call-1" not in metadata
+    assert "tool result" in response.text
+    assert '"step_id": "step-1"' in response.text
+    assert '"tool_call_id": "call-1"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("requests", "expected"),
+    [
+        ({}, None),
+        ({"calls": [{"tool_name": "name_a"}]}, "name_a"),
+        (
+            {
+                "calls": [
+                    {"tool_name": "name_a"},
+                    {"tool_name": "name_b"},
+                    {"tool_name": "name_a"},
+                ],
+            },
+            "name_a / name_b / name_a",
+        ),
+        (
+            {"calls": [{"tool_name": "<script>"}]},
+            "&lt;script&gt;",
+        ),
+    ],
+)
+def test_dashboard_event_shows_available_tool_names(requests, expected) -> None:
+    redis = MagicMock(spec=Redis)
+    redis.exists.return_value = 1
+    redis.xrange.return_value = [
+        ("3-0", _event(Event.TURN_TOOL_REQUESTED, requests=requests))
+    ]
+
+    with TestClient(create_app(redis=redis)) as client:
+        response = client.get(
+            "/fw-api/dashboard-event",
+            params={"conversation_id": "abc", "entry_id": "3-0"},
+        )
+
+    assert response.status_code == 200
+    metadata = response.text.split("</dl>", 1)[0]
+    if expected is None:
+        assert "Tool names:" not in metadata
+    else:
+        assert ">Tool names:</dt>" in metadata
+        assert f">{expected}</dd>" in metadata
 
 
 @pytest.mark.parametrize(

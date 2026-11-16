@@ -9,12 +9,14 @@
   <dd class="sm:col-9 text-break"><time datetime="{{ time.isoformat() }}">{{ time.isoformat() }}</time></dd>
   <dt class="sm:col-3 fg-2">Event ID</dt>
   <dd class="sm:col-9">{{ event.entry_id }}</dd>
-  {% for key, label in [('turn_id', 'Turn'), ('step_id', 'Step'), ('tool_call_id', 'Tool call')] %}
-  {% if key in payload %}
-  <dt class="sm:col-3 fg-2">{{ label }}</dt>
-  <dd class="sm:col-9 text-break">{{ payload[key] }}</dd>
+  {% if 'turn_id' in payload %}
+  <dt class="sm:col-3 fg-2">Turn</dt>
+  <dd class="sm:col-9 text-break">{{ payload.turn_id }}</dd>
   {% endif %}
-  {% endfor %}
+  {% if tool_names %}
+  <dt class="sm:col-3 fg-2">Tool names:</dt>
+  <dd class="sm:col-9 text-break">{{ tool_names }}</dd>
+  {% endif %}
 </dl>
 {% if 'error' in payload %}
 <pre class="event-content alert theme-danger">{{ payload.error }}</pre>

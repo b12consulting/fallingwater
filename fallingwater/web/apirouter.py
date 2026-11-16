@@ -410,10 +410,16 @@ def dashboard_event(
     if not entries:
         raise HTTPException(status_code=404, detail="Event not found")
     event = entries[0]
+    details = event_details(conversation_id, event)
+    tool_requests = details["payload"].get("requests", {})
+    tool_names = " / ".join(
+        call["tool_name"]
+        for call in tool_requests.get("calls", [])
+    )
     return templates.TemplateResponse(
         request=request,
         name="dashboard_event.html",
-        context=event_details(conversation_id, event),
+        context={**details, "tool_names": tool_names},
     )
 
 
