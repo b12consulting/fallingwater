@@ -7,12 +7,14 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from importlib.metadata import version
 
 from redis import Redis
 
-from .chat import Chat
-from .conversation_client import ConversationClient
+from .chat import Chat, ChatClient
+from .local_client import LocalClient
+from .redis_client import RedisClient
 from .names import generate_name
 from .stream_utils import (
     decode_conversation_event,
@@ -140,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_parser.add_argument(
         "conversation", nargs="?", help="Conversation ID to start or resume."
+    )
+    chat_parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run locally without Redis or workers; sessions last only for this process.",
     )
     chat_parser.add_argument(
         "-p",
@@ -336,28 +343,43 @@ def run_chat(args: argparse.Namespace) -> None:
     except ValueError as error:
         raise SystemExit(f"fw chat: {error}") from None
 
-    with Redis.from_url(args.redis_url) as redis:
-        if conversation_id is None:
-            for _ in range(100):
-                candidate = generate_name()
-                stream = fmt_conversation_stream(args.namespace, candidate)
-                if not redis.exists(stream):
-                    conversation_id = candidate
-                    break
-            else:
-                raise SystemExit(
-                    "fw chat: could not find an unused conversation name"
-                )
+    with ExitStack() as resources:
         try:
-            client = ConversationClient(
-                redis,
-                namespace=args.namespace,
-                conversation_id=conversation_id,
-                agent_path=args.agent,
-                model=args.model,
-                group=args.group,
-                deps=deps,
-            )
+            client: ChatClient
+            if args.local:
+                client = resources.enter_context(
+                    LocalClient(
+                        conversation_id=conversation_id or generate_name(),
+                        agent_path=args.agent,
+                        model=args.model,
+                        group=args.group,
+                        deps=deps,
+                    )
+                )
+            else:
+                redis = resources.enter_context(Redis.from_url(args.redis_url))
+                if conversation_id is None:
+                    for _ in range(100):
+                        candidate = generate_name()
+                        stream = fmt_conversation_stream(
+                            args.namespace, candidate
+                        )
+                        if not redis.exists(stream):
+                            conversation_id = candidate
+                            break
+                    else:
+                        raise SystemExit(
+                            "fw chat: could not find an unused conversation name"
+                        )
+                client = RedisClient(
+                    redis,
+                    namespace=args.namespace,
+                    conversation_id=conversation_id,
+                    agent_path=args.agent,
+                    model=args.model,
+                    group=args.group,
+                    deps=deps,
+                )
         except ValueError as error:
             logger.debug(
                 "Could not open conversation %s", conversation_id, exc_info=True

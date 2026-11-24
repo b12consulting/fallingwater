@@ -78,19 +78,19 @@ def ask_contestant(ctx: RunContext[None], clue: str) -> AgentRequest:
 if __name__ == "__main__":
     from redis import Redis
 
-    from fallingwater.conversation_client import ConversationClient
+    from fallingwater.redis_client import RedisClient
     from fallingwater.models import Event
 
     with Redis.from_url(
         os.getenv("FW_REDIS_URL", "redis://localhost:6379/0")
     ) as redis:
-        client = ConversationClient(
+        client = RedisClient(
             redis,
             namespace=os.getenv("FW_NAMESPACE", "fw"),
             agent_path="fallingwater.demo:jeopardy_host",
             model=os.getenv("FW_MODEL"),
         )
-        turn_id, _ = client.send("Start a Jeopardy game about science.")
+        client.send("Start a Jeopardy game about science.")
         events = poll(client.read)
         for event in events:
             print(f"Event Type: {event.type}")

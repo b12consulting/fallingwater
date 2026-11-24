@@ -6,9 +6,23 @@ from typing import Any, TypedDict
 from urllib.parse import quote
 
 from fastapi import Request
+from markupsafe import Markup
+from pygments import highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import JsonLexer
 from starlette.datastructures import URL
 
 from ..models import ConversationCreatedPayload, ConversationEvent, Event
+
+
+JSON_FORMATTER = HtmlFormatter(nowrap=True)
+JSON_HIGHLIGHT_CSS = "\n".join(
+    JSON_FORMATTER.get_token_style_defs(".payload-json")
+)
+
+
+def highlight_json(value: str) -> Markup:
+    return Markup(highlight(value, JsonLexer(), JSON_FORMATTER))
 
 
 EVENT_LABELS = {

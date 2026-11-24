@@ -31,6 +31,7 @@
     .legend-dot { display: inline-block; width: .65rem; height: .65rem; border-radius: 50%; }
     .event-content { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
     .payload-json { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; }
+    {{ json_highlight_css | safe }}
     .htmx-request .refresh-icon { animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .event-slot { transition: none; } .refresh-icon { animation: none !important; } }

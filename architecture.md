@@ -16,10 +16,11 @@ and its tests can share a Redis instance without mixing their data.
 ## AD2 — Library first
 
 Fallingwater's core is an importable Python library. Applications can create a
-`ConversationClient` with a Redis client, submit turns, and run `WorkerPool` in
+`RedisClient` with a Redis client, submit turns, and run `WorkerPool` in
 their own process. `Chat(client)` adds terminal interaction to that client.
 The bundled `fw` CLI calls these same library classes; its chat input and
-responses pass through Redis.
+responses pass through Redis by default. `fw chat --local` instead opens a
+`LocalClient` with an embedded executor and no Redis connection.
 
 ## AD3 — Pydantic AI is the agent layer
 
@@ -51,7 +52,7 @@ Pydantic AI's run ID.
 Redis Streams connect message submitters, workers, and readers. The shared
 `fw:dispatch` stream distributes turns through the `workers` consumer group. A
 per-conversation stream records the creation event, queued prompts, outcomes,
-and history needed for the next turn. `ConversationClient.receive` reads that
+and history needed for the next turn. `RedisClient.receive` reads that
 stream through `ConversationStream` with `XREAD`; the CLI uses a separate
 consumer group on the same stream.
 
@@ -59,16 +60,16 @@ consumer group on the same stream.
 and acknowledgements. It decodes each dispatch entry into a typed action or an
 invalid-entry value that the worker acknowledges. It creates a
 `ConversationStream` bound to an ID; that object owns typed event reads and
-writes and its reader groups. `ConversationClient` keeps one bound
+writes and its reader groups. `RedisClient` keeps one bound
 conversation stream. `Worker` keeps one dispatch stream and creates a bound
 conversation stream for each action, including child conversations.
 `models.py` defines the event and action schemas; `stream_utils.py`
-handles naming validation and wire codecs. `ConversationClient` owns client
+handles naming validation and wire codecs. `RedisClient` owns client
 stream operations; `Chat` requests acknowledgement after rendering an event.
 `Worker` decides when to acknowledge dispatch entries; `Conversation` and its
 turn machines decide which work is enabled.
 
-`ConversationClient.send` prepares a queued event through `Conversation`, then
+`RedisClient.send` prepares a queued event through `Conversation`, then
 writes the event and dispatch poke through the two stream objects with
 successive `XADD` commands. Group and consumer names remain explicit on stream
 operations.
@@ -86,7 +87,7 @@ reads.
 The dispatch stream stays text based because its action entries only carry
 routing identifiers. Stream reads attach Redis entry IDs to decoded dispatch
 actions and conversation events as metadata; those IDs are excluded from the
-Pydantic payload serialization. `ConversationClient` uses event IDs for cursors
+Pydantic payload serialization. `RedisClient` uses event IDs for cursors
 and acknowledgements, while `Worker` uses action IDs for acknowledgements.
 All conversation reads, CLI inspection, web feeds, and archives use one
 `ConversationEvent` model with a required `entry_id`. The decoder attaches the
@@ -138,7 +139,7 @@ conversations follow the same policy.
 
 ## AD5 — Conversation identity and configuration
 
-`ConversationClient` generates a UUID when called without a conversation ID.
+`RedisClient` generates a UUID when called without a conversation ID.
 The CLI instead generates a readable `qualifier_scientist` ID for each new chat
 and accepts that ID as the positional argument to resume it. The first
 conversation event stores the agent import path and model.
@@ -161,20 +162,20 @@ snapshots; already queued parent-routing references are unchanged. Changing
 agent definitions between steps may make outstanding tool calls incompatible,
 which fails explicitly rather than falling back to an older definition.
 
-`ConversationClient` validates the effective agent and model before creating
+`RedisClient` validates the effective agent and model before creating
 a conversation or resuming one. It constructs `Conversation` directly from the
 event iterator, then validates the latest settings. If the result is empty, it
 validates, persists, and applies the initial settings without a separate
 first-record query. On resume it uses the latest saved values, ignoring
 supplied agent and model options. The CLI passes its arguments to
-`ConversationClient` in both cases and defaults to `pydantic_ai:Agent` when
+`RedisClient` in both cases and defaults to `pydantic_ai:Agent` when
 `FW_AGENT` is unset; a new chat needs a model on its agent, in `FW_MODEL`, or
 through `-m`.
 
-`ConversationClient.send(prompt)` generates a fresh UUID turn ID on every call
-and returns that ID with the queued event cursor.
-`ConversationClient.ask(prompt)` submits through `send` and waits for the result
-through `receive`. Repeated prompts create separate turns; client submission
+`RedisClient.send(prompt)` generates a fresh UUID turn ID on every call
+and returns only that ID. It retains the queued event cursor internally.
+`RedisClient.ask(prompt)` submits through `send` and waits for the result
+through `receive(turn_id)`. Repeated prompts create separate turns; client submission
 deduplication is deferred until its behavior is needed.
 
 ## AD6 — Worker pool lifecycle
@@ -261,6 +262,9 @@ respectively, without changing their accessible labels or event actions.
 Selecting a slot fetches `/fw-api/dashboard-event` by conversation and exact
 event ID into a Bootstrap 6 dialog outside the refreshed card region, preserving open
 details during updates. Detail payloads are complete; text and JSON are escaped.
+Pygments highlights JSON payloads and tool results on the server, with scoped
+styles and bold keys in the shared dashboard template. Only Pygments-generated,
+escaped HTML is marked safe; no browser-side highlighting or extra CDN is needed.
 ISO 8601 UTC datetimes come from Redis entry IDs. The page is server-rendered initially and
 reports refresh, detail, or asset-loading failures explicitly. Pinned,
 integrity-checked CDN assets avoid a frontend build; network access is required
@@ -309,7 +313,7 @@ stream length, unlike the bounded overview. Fragment routes live outside
 
 ## AD8 — CLI reader groups
 
-`ConversationClient` creates or reuses a consumer group on the conversation
+`RedisClient` creates or reuses a consumer group on the conversation
 stream during initialization, starting at ID `0`. The default group is `user`;
 `fw chat --group` selects another. Terminal reads use the stable consumer name
 `terminal` so a later CLI process can read entries left pending by an
@@ -317,7 +321,7 @@ interrupted session. Each client starts with a reader cursor at `0`, advances
 through pending entries, and switches to `>` when the pending read is empty.
 Later reads on that instance stay on `>`.
 
-`fw chat --rewind` calls `ConversationClient.rewind` before reading. It uses
+`fw chat --rewind` calls `RedisClient.rewind` before reading. It uses
 `XGROUP SETID` to reset only the selected conversation reader group to `0`, then starts the
 local reader at `>`. Reading redelivered entries rather than draining pending
 entries first preserves stream order and avoids printing pending outcomes
@@ -329,7 +333,7 @@ the reset position. Both interactive and one-shot startup use this replay.
 The CLI prints queued prompts, completed answers, and failures before
 acknowledging their events. It acknowledges `conversation.created` and other
 non-displayed events as read. A terminal exit between printing and acknowledgement
-can cause a message to be printed again. `ConversationClient.read` yields typed
+can cause a message to be printed again. `RedisClient.read` yields typed
 events without printing or automatically acknowledging them. `Chat.read`
 renders each event and calls the client's `acknowledge` only after successful
 handling, including non-displayed events. The client reads pending entries
@@ -341,10 +345,11 @@ results have not arrived; a new prompt can therefore overlap such a turn. Each
 group represents one logical terminal reader. In one-shot mode, `--msg` prints
 earlier results read during startup catch-up and the new turn's result to stdout.
 Results that arrive after the new prompt is queued use the same output.
-The library's `ConversationClient.receive` and the web feed still use independent
+The library's `RedisClient.receive` and the web feed still use independent
 `XREAD` calls.
 
-`Chat` accepts a `ConversationClient`, not Redis connection options. It owns
+`Chat` accepts the `ChatClient` protocol, implemented by `RedisClient` and
+`LocalClient`, not Redis connection options. It owns
 terminal input, rendering, formatted timestamp labels, and the reader thread.
 The CLI opens the client, optionally rewinds it, then constructs `Chat(client)`.
 The client owns settings, submission, blocking result reads, reader-group
@@ -385,6 +390,18 @@ its render hook to end input, then the main thread joins the reader and raises
 the saved error. The reader runs with a copy of the main thread's context so
 formatted output uses the same `prompt_toolkit` application session.
 
+Interactive event handling also updates a `PromptSession` bottom toolbar.
+The latest status expires after three seconds using a monotonic deadline;
+periodic prompt redraws clear it without timer threads or stale callbacks
+clearing newer messages. The reader invalidates the application on updates,
+preserving editable input. Status state belongs only to the active terminal
+session and is cleared on exit, including failures. A `◆`, `◇`, `◈` spinner uses the
+same periodic redraws while any observed turn is active. Queued, tool, and
+subagent events mark their turn active; completion or failure removes only that
+turn, preserving the indicator for overlapping work. After status expiry the
+spinner displays `Working...` until all observed turns reach a terminal event.
+One-shot output and event acknowledgement retain their existing behavior.
+
 `Chat.timestamp` derives local time from the `turn.queued` Redis ID. It returns
 `HH:MM:SS` when that date is today, otherwise `YYYY/MM/DD HH:MM:SS`, comparing
 local dates at formatting time. Answers and failures reuse the cached submission
@@ -404,7 +421,7 @@ miss, including prompts already acknowledged by this group.
 Timestamps are presentation labels, not unique identifiers; internal routing
 continues to use turn IDs. Interactive and one-shot readers use the same output
 format without a mode flag; `--msg` still waits for one result and exits.
-`ConversationClient.ask` and `receive` return answer strings without printing.
+`RedisClient.ask` and `receive` return answer strings without printing.
 Overlapping submissions retain the queue-time history policy in AD4.
 
 ## AD9 — Compressed conversation payloads
@@ -593,7 +610,7 @@ turn to canonical state. The client reconstructs history on opening and
 advances its snapshot only through explicit refresh; preparation itself
 requires no fresh replay.
 
-`ConversationClient` and `Worker` coordinate reads and writes. Chat determines
+`RedisClient` and `Worker` coordinate reads and writes. Chat determines
 when a displayed event is safe to acknowledge through the client.
 Worker checkpointing prepares a fact, appends it, then publishes its actions.
 It does not refresh or advance the replayed state; only applying persisted
@@ -795,3 +812,42 @@ scheduling remain adapter concerns. This does not change delegation effects,
 production queue-time snapshots, or the prototype's serial-session policy.
 Keep these functions in the existing `agent_proxy.py` module rather than adding
 a separate execution module; the shared APIs retain the same role boundaries.
+
+## AD21 — Embedded execution and local conversation clients
+
+`LocalExecutor` in `local_executor.py` promotes the conversation-backed FIFO
+prototype into a library component; `contrib/fwflash.py` remains unchanged as
+a reference. It retains per-session event logs, replay state, agents, deps,
+pending turns, and captured tool contexts, with a shared deque of dispatch
+payloads. One action executes at a time, synchronously through `drain()` or in
+a background thread started by `LocalClient.send()`. A condition protects
+event publication, submissions, and readers; model and tool calls run outside
+that condition so terminal input and event delivery remain responsive.
+Failures become terminal events, propagate to requesting parents, and allow
+later pending turns to proceed. Stale actions for failed turns are skipped.
+
+Turns within one local session remain sequential. A pending turn becomes an
+event only after the previous turn finishes, capturing its completed history.
+Its timestamp is activation time, not submission time. Event IDs use Unix
+milliseconds and a sequence so existing chat timestamps work. Local and Redis
+clients both return only a turn ID from `send`; callers no longer need to
+handle storage cursors. Redis `receive` retains an optional explicit cursor
+for callers that already have one.
+
+`LocalClient` binds an executor session to the `ChatClient` protocol without
+printing. Group acknowledgements are retained separately from event logs;
+reopening a group resumes unacknowledged events, and rewind affects delivery
+only. `receive` and `ask` observe terminal state without acknowledging events.
+The `conversation` property returns an isolated replay-state clone rather than
+exposing mutable executor state; `refresh()` checks availability but need not
+replay. A supplied executor can be shared and is closed by its owner. An
+implicitly created executor is owned by the client. Closing waits for the
+active action and leaves remaining work unexecuted; daemon execution does not
+survive process exit. This adds neither local archive persistence nor migration.
+
+`fw chat --local` selects a fresh local executor for either interactive chat
+or `--msg`. Redis remains the default. Both modes use the same presentation,
+agent/model defaults, dependency parameters, rewind, and reader-group options.
+Local names require no Redis collision checks and do not reopen earlier
+processes' conversations. The CLI closes its local client and executor even
+when chat raises, waiting for the active action but not draining pending work.

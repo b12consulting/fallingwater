@@ -1,12 +1,14 @@
 """Checks for the optional FastAPI conversation event feed."""
 
 from html.parser import HTMLParser
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("fastapi.sse")
 pytest.importorskip("jinja2")
+pytest.importorskip("pygments")
 
 from fastapi.testclient import TestClient
 from fastapi.sse import ServerSentEvent
@@ -75,7 +77,7 @@ def _event(event_type: Event, **values):
             turn_id="turn-1",
             step_id="step-1",
             tool_call_id="call-1",
-            result="tool result",
+            result=values.get("result", "tool result"),
         )
     elif event_type == Event.TURN_AGENT_REQUESTED:
         payload = AgentRequestedPayload(
@@ -170,6 +172,31 @@ def _timeline_row_sizes(html: str) -> list[int]:
     parser = Collector()
     parser.feed(html)
     return parser.sizes
+
+
+def _json_blocks(html: str) -> list:
+    class Collector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.blocks = []
+            self.in_json = False
+
+        def handle_starttag(self, name, attrs):
+            if name == "pre" and "payload-json" in dict(attrs).get("class", ""):
+                self.in_json = True
+                self.blocks.append("")
+
+        def handle_data(self, data):
+            if self.in_json:
+                self.blocks[-1] += data
+
+        def handle_endtag(self, name):
+            if name == "pre":
+                self.in_json = False
+
+    parser = Collector()
+    parser.feed(html)
+    return [json.loads(block) for block in parser.blocks]
 
 
 def _dashboard_redis(conversation_ids: list[str]) -> MagicMock:
@@ -585,8 +612,12 @@ def test_dashboard_escapes_content_and_loads_exact_full_event() -> None:
     } in _elements(details.text, "span")
     assert "<script>alert" not in details.text
     assert "&lt;script&gt;" in details.text
-    assert '"turn_messages"' in details.text
-    assert '"usage"' in details.text
+    payload = _json_blocks(details.text)[0]
+    assert payload["message"] == message
+    assert payload["turn_messages"] == []
+    assert "usage" in payload
+    assert {"class": "nt"} in _elements(details.text, "span")
+    assert ".payload-json .nt" in page.text
     assert ">2023-11-14T22:13:20.003000+00:00</time>" in details.text
     redis.xrange.assert_called_with(
         fmt_conversation_stream("fw-test", conversation_id),
@@ -617,8 +648,46 @@ def test_dashboard_event_omits_step_and_tool_call_metadata() -> None:
     assert "step-1" not in metadata
     assert "call-1" not in metadata
     assert "tool result" in response.text
-    assert '"step_id": "step-1"' in response.text
-    assert '"tool_call_id": "call-1"' in response.text
+    result, payload = _json_blocks(response.text)
+    assert result == "tool result"
+    assert payload["step_id"] == "step-1"
+    assert payload["tool_call_id"] == "call-1"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        '<script>alert("unsafe")</script> & \'\n',
+        {
+            "<img src=x onerror=alert(1)>": [
+                "</code></pre><script>alert(1)</script>",
+                42,
+                True,
+                None,
+            ]
+        },
+    ],
+)
+def test_dashboard_highlights_json_results_without_changing_content(result):
+    redis = MagicMock(spec=Redis)
+    redis.exists.return_value = 1
+    redis.xrange.return_value = [
+        ("3-0", _event(Event.TURN_TOOL_RESULT, result=result))
+    ]
+
+    with TestClient(create_app(redis=redis)) as client:
+        response = client.get(
+            "/fw-api/dashboard-event",
+            params={"conversation_id": "abc", "entry_id": "3-0"},
+        )
+
+    assert response.status_code == 200
+    rendered_result, payload = _json_blocks(response.text)
+    assert rendered_result == result
+    assert payload["result"] == result
+    assert {"class": "s2"} in _elements(response.text, "span")
+    assert not _elements(response.text, "script")
+    assert not _elements(response.text, "img")
 
 
 @pytest.mark.parametrize(

@@ -31,27 +31,27 @@ send(prompt)
   (two writes)
        +-------------------> turn.queued
        +---------------------------------------------> conversation.poke
-  return turn_id, cursor
+  return turn_id
 
                                                        conversation.poke ------> Claim action
                              Saved configuration,
                              prompt, earlier history --------------------------> Load turn
                                                                                  Run agent
 
-receive(turn_id, cursor) ---> XREAD after cursor
+receive(turn_id) -----------> XREAD after queued event
   wait for outcome                                                               Save answer,
                              turn.completed <----------------------------------- history, and usage
        <-------------------- Read matching outcome
   return answer                                        conversation.poke <------ Acknowledge action
 ```
 
-Creating a new `ConversationClient` validates the selected agent and available
+Creating a new `RedisClient` validates the selected agent and available
 model, then appends `conversation.created`. This event stores the agent import path, model,
 and initial dependencies. Creating the conversation does not dispatch an agent
 run. Library-created conversations use a UUID by default; the CLI generates a
 readable conversation ID.
 
-`ConversationClient.send(prompt)` generates a fresh UUID turn ID and writes two
+`RedisClient.send(prompt)` generates a fresh UUID turn ID and writes two
 entries in order:
 
 1. Conversation: `turn.queued`, containing the turn ID and prompt message.
@@ -60,7 +60,7 @@ entries in order:
 The entries have their own Redis stream entry IDs but share the same turn ID.
 They are separate writes, so a failure between them can leave a queued turn
 without a dispatch action.
-`send` returns the turn ID and the queued event's entry ID as a cursor. A
+`send` returns only the turn ID and retains the queued event cursor internally. A
 successful return confirms queuing; it does not mean the agent has completed.
 Every call submits a new turn, including repeated prompts.
 
@@ -77,14 +77,16 @@ the turn ID, display message, new structured message history, and usage. It
 then acknowledges the dispatch action. For a basic conversation, completion
 does not append a new dispatch action.
 
-`ConversationClient.receive(turn_id, cursor)` follows the conversation stream
-after the cursor using `XREAD`. It returns the matching completed message or
+`RedisClient.receive(turn_id)` follows the conversation stream
+after the queued event using `XREAD`. An optional explicit cursor is also
+accepted. It returns the matching completed message or
 raises `RuntimeError` for a matching failed turn.
-`ConversationClient.ask(prompt)` combines submission and result reading as
-`receive(*send(prompt))`. Reading the result does not consume work from the
+`RedisClient.ask(prompt)` combines submission and result reading as
+`receive(send(prompt))`. Reading the result does not consume work from the
 dispatch stream.
 
-`Chat(client)` adds terminal input and rendering around a `ConversationClient`.
+`Chat(client)` adds terminal input and rendering around a client implementing
+the `ChatClient` protocol, including `RedisClient` and `LocalClient`.
 The client owns Redis access and reader-group operations; neither its submission
 nor its result-reading methods print output. `Conversation` remains the pure
 workflow model used to prepare turns and reconstruct persisted state.
@@ -103,7 +105,7 @@ including events already acknowledged by its reader group. To update that
 snapshot later, explicitly call `refresh()`:
 
 ```python
-client = ConversationClient(redis, conversation_id="my-conversation")
+client = RedisClient(redis, conversation_id="my-conversation")
 answer = client.ask("Hello")
 client.refresh()
 turns = client.conversation.turn_state
@@ -151,7 +153,7 @@ earlier completed usage, so usage accumulates across sequential turns.
 Replay retains the first terminal outcome for each turn, so duplicate
 completions do not repeat its history.
 
-Opening `ConversationClient` with an existing conversation ID uses its saved
+Opening `RedisClient` with an existing conversation ID uses its saved
 latest agent and model, ignoring supplied replacements. Dependencies come from
 the latest saved settings; supplying new dependencies on resume is rejected.
 Resumption does not append another `conversation.created` event.
@@ -207,14 +209,14 @@ events, printing unread answers or failures before accepting another prompt.
 It prints results before acknowledging them, so an interrupted session can
 print a result again after restart. Startup catch-up does not wait for turns
 whose results have not yet arrived. The library's `receive` and the web event
-feeds use independent `XREAD` cursors instead. `ConversationClient.read` yields
+feeds use independent `XREAD` cursors instead. `RedisClient.read` yields
 typed events for Chat to render and explicitly acknowledge after successful
 handling. The client caches raw queued event IDs and scans saved events on a
 cache miss, including already acknowledged prompts; Chat owns formatted
-timestamp labels. `ConversationClient.ask`
+timestamp labels. `RedisClient.ask`
 and the CLI's `--msg` mode remain blocking. One-shot output uses the same
 timestamp headers, message labels, and queued-message styling as interactive
-chat, while `ConversationClient.ask` returns the answer without printing.
+chat, while `RedisClient.ask` returns the answer without printing.
 
 `fw chat <id> --rewind` resets the selected reader group's delivery position
 and replays retained events in stream order, including already acknowledged

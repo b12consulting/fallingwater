@@ -73,7 +73,7 @@ def test_jeopardy_main_prints_event_types_until_first_completed_turn(
     connection = MagicMock()
     from_url = MagicMock(return_value=connection)
     client = MagicMock()
-    client.send.return_value = ("host-turn", "4-0")
+    client.send.return_value = "host-turn"
     payloads = [
         ConversationCreatedPayload(
             agent="fallingwater.demo:jeopardy_host", model="test"
@@ -108,9 +108,7 @@ def test_jeopardy_main_prints_event_types_until_first_completed_turn(
     client.acknowledge.side_effect = acknowledge
     client_class = MagicMock(return_value=client)
     monkeypatch.setattr("redis.Redis.from_url", from_url)
-    monkeypatch.setattr(
-        "fallingwater.conversation_client.ConversationClient", client_class
-    )
+    monkeypatch.setattr("fallingwater.redis_client.RedisClient", client_class)
 
     run_path(jeopardy.__file__, run_name="__main__")
 

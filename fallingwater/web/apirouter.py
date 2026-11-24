@@ -31,15 +31,19 @@ from ..utils import logger
 from .dashboard import (
     DashboardContext,
     HistoryContext,
+    JSON_HIGHLIGHT_CSS,
     dashboard_card,
     event_details,
     event_time,
+    highlight_json,
     history_context,
 )
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+templates.env.filters["highlight_json"] = highlight_json
+templates.env.globals["json_highlight_css"] = JSON_HIGHLIGHT_CSS
 RECENT_CONVERSATION_LIMIT = 10
 RECENT_EVENT_LIMIT = 10
 
@@ -413,8 +417,7 @@ def dashboard_event(
     details = event_details(conversation_id, event)
     tool_requests = details["payload"].get("requests", {})
     tool_names = " / ".join(
-        call["tool_name"]
-        for call in tool_requests.get("calls", [])
+        call["tool_name"] for call in tool_requests.get("calls", [])
     )
     return templates.TemplateResponse(
         request=request,

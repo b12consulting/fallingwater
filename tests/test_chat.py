@@ -24,10 +24,13 @@ from redis import Redis
 from redis.exceptions import RedisError
 
 from fallingwater.chat import Chat
-from fallingwater.conversation_client import ConversationClient
+from fallingwater.redis_client import RedisClient
 from fallingwater.models import (
+    AgentRequestedPayload,
     ConversationCreatedPayload,
     Event,
+    ToolRequestedPayload,
+    ToolResultPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -73,11 +76,41 @@ def _failed(turn_id: str, error: str):
     )
 
 
+def _tools_requested():
+    return encode_conversation_event(
+        Event.TURN_TOOL_REQUESTED,
+        ToolRequestedPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            requests={
+                "calls": [
+                    {"tool_name": "search"},
+                    {"tool_name": "current_time"},
+                ]
+            },
+            step_messages=[],
+            usage=RunUsage(),
+        ),
+    )
+
+
+def _tool_result():
+    return encode_conversation_event(
+        Event.TURN_TOOL_RESULT,
+        ToolResultPayload(
+            turn_id="turn-1",
+            step_id="step-1",
+            tool_call_id="call-1",
+            result="result",
+        ),
+    )
+
+
 def _empty_chat(redis: Redis, **kwargs) -> Chat:
     redis.xrange.return_value = []
     redis.xadd.return_value = "1-0"
     return Chat(
-        ConversationClient(
+        RedisClient(
             redis,
             conversation_id="abc",
             agent_path="pydantic_ai:Agent",
@@ -217,12 +250,12 @@ def test_terminal_accepts_overlapping_prompts_and_labels_out_of_order_answers(
     second_sent = ThreadEvent()
     replies_sent = False
 
-    def send(prompt: str) -> tuple[str, str]:
+    def send(prompt: str) -> str:
         if prompt == "first request":
-            return "turn-1", first_id
+            return "turn-1"
         assert prompt == "second request"
         second_sent.set()
-        return "turn-2", second_id
+        return "turn-2"
 
     def read_group(*args, **kwargs):
         nonlocal replies_sent
@@ -407,6 +440,188 @@ def test_terminal_send_failure_stops_reader(monkeypatch) -> None:
         chat.run()
 
 
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        (_created(), "Agent settings: pydantic_ai:Agent"),
+        (_queued("turn-1"), "Turn queued"),
+        (_tools_requested(), "Tools requested: search / current_time"),
+        (_tool_result(), "Tool result received"),
+        (
+            encode_conversation_event(
+                Event.TURN_AGENT_REQUESTED,
+                AgentRequestedPayload(
+                    turn_id="turn-1",
+                    step_id="step-1",
+                    tool_call_id="call-1",
+                    child_conversation_id="child",
+                    child_turn_id="child-turn",
+                    agent_path="example:writer",
+                    model="test",
+                    prompt="write",
+                    name="writer\none",
+                ),
+            ),
+            "Subagent requested: writer one",
+        ),
+        (_completed("turn-1", "answer"), "Turn completed"),
+        (_failed("turn-1", "boom"), "Turn failed"),
+    ],
+)
+def test_interactive_event_statuses_do_not_print_extra_messages(
+    monkeypatch, fields, expected
+) -> None:
+    chat = _empty_chat(MagicMock(spec=Redis))
+    session = _terminal(monkeypatch)
+    chat._status_app = session.app
+    monkeypatch.setattr(chat.client, "queued_event_id", lambda turn_id: "1-0")
+    print_message = MagicMock()
+    monkeypatch.setattr(chat, "print_message", print_message)
+    monkeypatch.setattr("fallingwater.chat.monotonic", lambda: 0.0)
+    event = decode_conversation_event("3-0", fields)
+
+    chat.handle_group_event(event)
+
+    if event.type not in (
+        Event.CONVERSATION_CREATED,
+        Event.TURN_COMPLETED,
+        Event.TURN_FAILED,
+    ):
+        expected = f"  ◆ {expected}"
+    assert fragment_list_to_text(chat._status_toolbar()) == expected
+    session.app.invalidate.assert_called_once()
+    assert print_message.call_count == (
+        1
+        if event.type
+        in (Event.TURN_QUEUED, Event.TURN_COMPLETED, Event.TURN_FAILED)
+        else 0
+    )
+
+
+def test_status_expiration_does_not_clear_a_newer_event(monkeypatch) -> None:
+    chat = _empty_chat(MagicMock(spec=Redis))
+    session = _terminal(monkeypatch)
+    chat._status_app = session.app
+    now = 10.0
+    monkeypatch.setattr("fallingwater.chat.monotonic", lambda: now)
+    chat.handle_group_event(
+        decode_conversation_event("3-0", _tools_requested())
+    )
+    now = 12.0
+    chat.handle_group_event(decode_conversation_event("4-0", _tool_result()))
+
+    now = 13.0
+    assert fragment_list_to_text(chat._status_toolbar()).endswith(
+        "Tool result received"
+    )
+    now = 15.0
+    assert fragment_list_to_text(chat._status_toolbar()).endswith("Working...")
+
+
+@pytest.mark.parametrize(
+    ("terminal_fields", "expected"),
+    [
+        (_completed("turn-2", "answer"), "Turn completed"),
+        (_failed("turn-2", "boom"), "Turn failed"),
+    ],
+)
+def test_spinner_runs_until_all_active_turns_finish(
+    monkeypatch, terminal_fields, expected
+) -> None:
+    chat = _empty_chat(MagicMock(spec=Redis))
+    session = _terminal(monkeypatch)
+    chat._status_app = session.app
+    monkeypatch.setattr(chat, "print_message", MagicMock())
+    monkeypatch.setattr(chat.client, "queued_event_id", lambda turn_id: "1-0")
+    now = 0.0
+    monkeypatch.setattr("fallingwater.chat.monotonic", lambda: now)
+    for index, turn_id in enumerate(("turn-1", "turn-2"), start=1):
+        chat.handle_group_event(
+            decode_conversation_event(f"{index}-0", _queued(turn_id))
+        )
+
+    now = 4.0
+    first_frame = fragment_list_to_text(chat._status_toolbar())
+    now = 4.25
+    second_frame = fragment_list_to_text(chat._status_toolbar())
+    assert first_frame.endswith("Working...")
+    assert second_frame.endswith("Working...")
+    assert first_frame != second_frame
+
+    for index, turn_id in enumerate(("unrelated", "turn-1"), start=3):
+        chat.handle_group_event(
+            decode_conversation_event(
+                f"{index}-0", _completed(turn_id, "answer")
+            )
+        )
+        now += 4.0
+        assert fragment_list_to_text(chat._status_toolbar()).endswith(
+            "Working..."
+        )
+
+    chat.handle_group_event(decode_conversation_event("5-0", terminal_fields))
+    assert fragment_list_to_text(chat._status_toolbar()) == expected
+    now += 3.0
+    assert fragment_list_to_text(chat._status_toolbar()) == ""
+
+
+def test_terminal_event_status_preserves_typed_input_and_cleans_up(
+    monkeypatch,
+) -> None:
+    redis = MagicMock(spec=Redis)
+    chat = _empty_chat(redis)
+    input_rendered = ThreadEvent()
+    delivered = False
+    rendered = []
+    monkeypatch.setattr("fallingwater.chat.monotonic", lambda: 0.0)
+
+    def read_group(*args, **kwargs):
+        nonlocal delivered
+        if kwargs["block"] is None or delivered:
+            return []
+        assert input_rendered.wait(timeout=2)
+        delivered = True
+        return [
+            (
+                chat.client.stream.name,
+                [("3-0", _tools_requested())],
+            )
+        ]
+
+    redis.xreadgroup.side_effect = read_group
+    with create_pipe_input() as pipe, create_app_session(input=pipe):
+
+        def create_session(**kwargs):
+            session = PromptSession(input=pipe, output=DummyOutput(), **kwargs)
+
+            def after_render(app):
+                if session.default_buffer.text == "unfinished prompt":
+                    input_rendered.set()
+                status = fragment_list_to_text(
+                    to_formatted_text(session.bottom_toolbar)
+                )
+                if status:
+                    rendered.append((session.default_buffer.text, status))
+                    pipe.send_text("\x03")
+
+            session.app.after_render += after_render
+            return session
+
+        monkeypatch.setattr("fallingwater.chat.PromptSession", create_session)
+        pipe.send_text("unfinished prompt")
+
+        chat.run_terminal()
+
+    assert rendered
+    assert set(rendered) == {
+        ("unfinished prompt", "  ◆ Tools requested: search / current_time")
+    }
+    redis.xack.assert_called_once_with(chat.client.stream.name, "user", "3-0")
+    assert chat._status_app is None
+    assert not chat._active_turns
+    assert fragment_list_to_text(chat._status_toolbar()) == ""
+
+
 def test_terminal_does_not_wait_for_existing_or_submitted_turns(
     monkeypatch, capsys
 ) -> None:
@@ -418,7 +633,7 @@ def test_terminal_does_not_wait_for_existing_or_submitted_turns(
     chat = _empty_chat(redis)
     session = _terminal(monkeypatch)
     session.prompt.side_effect = ["hello", EOFError]
-    send = MagicMock(return_value=("turn-1", "2-0"))
+    send = MagicMock(return_value="turn-1")
     monkeypatch.setattr(chat.client, "send", send)
 
     chat.run()
@@ -474,7 +689,7 @@ def test_rewind_replays_once_in_order_without_changing_other_groups_or_work(
     isolated_redis, capsys, pending_consumer
 ) -> None:
     redis = isolated_redis
-    client = ConversationClient(
+    client = RedisClient(
         redis,
         namespace="fw-test",
         conversation_id="abc",
@@ -484,9 +699,9 @@ def test_rewind_replays_once_in_order_without_changing_other_groups_or_work(
     )
     chat = Chat(client)
     stream = client.stream
-    first_turn, _ = client.send("first prompt")
+    first_turn = client.send("first prompt")
     redis.xadd(stream.name, _completed(first_turn, "first answer"))
-    second_turn, _ = client.send("second prompt")
+    second_turn = client.send("second prompt")
     redis.xadd(stream.name, _completed(second_turn, "second answer"))
     acknowledged = stream.read_group(
         client.group, client.consumer, ">", count=3
@@ -556,13 +771,15 @@ def test_run_once_prints_its_response_and_acknowledges_it(
                 stream,
                 [
                     ("2-0", _queued("turn-1", "Hello")),
+                    ("2-1", _tools_requested()),
+                    ("2-2", _tool_result()),
                     ("3-0", _completed("turn-1", "answer")),
                 ],
             )
         ],
     ]
     chat = _empty_chat(redis)
-    send = MagicMock(return_value=("turn-1", "2-0"))
+    send = MagicMock(return_value="turn-1")
     monkeypatch.setattr(chat.client, "send", send)
 
     chat.run_once("Hello")
@@ -608,9 +825,7 @@ def test_run_once_prints_prior_answers_before_new_answer(
         ],
     ]
     chat = _empty_chat(redis)
-    monkeypatch.setattr(
-        chat.client, "send", MagicMock(return_value=("new", "4-0"))
-    )
+    monkeypatch.setattr(chat.client, "send", MagicMock(return_value="new"))
 
     chat.run_once("Hello again")
 

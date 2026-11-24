@@ -23,9 +23,9 @@
 {% elif 'message' in payload %}
 <pre class="event-content bg-1 rounded p-4">{{ payload.message }}</pre>
 {% elif 'result' in payload %}
-<pre class="event-content bg-1 rounded p-4">{{ payload.result | tojson(indent=2) }}</pre>
+<pre class="payload-json bg-1 rounded p-4"><code>{{ payload.result | tojson(indent=2) | highlight_json }}</code></pre>
 {% endif %}
 <details open>
   <summary class="fg-2 mb-2">Complete event payload</summary>
-  <pre class="payload-json bg-1 rounded p-4 mb-0">{{ payload | tojson(indent=2) }}</pre>
+  <pre class="payload-json bg-1 rounded p-4 mb-0"><code>{{ payload | tojson(indent=2) | highlight_json }}</code></pre>
 </details>

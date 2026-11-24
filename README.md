@@ -14,6 +14,51 @@ The default test suite covers `tests/` only. Run experimental executor tests
 separately with `pytest contrib/tests`; they are not part of the production
 suite.
 
+## Local client
+
+Run agents in the current process without a Redis server:
+
+```python
+from fallingwater.chat import Chat
+from fallingwater.local_client import LocalClient
+
+with LocalClient(agent_path="fallingwater.demo:editor", model="openai:gpt-6-luna") as client:
+    answer = client.ask("Draft a short invitation.")
+    Chat(client).run()
+```
+
+`LocalClient` runs a `LocalExecutor` in a background thread. Both local and
+Redis clients expose `send(prompt) -> turn_id`, `receive(turn_id)`, `ask`,
+`read`, `acknowledge`, `queued_event_id`, and `rewind`. Local turns execute
+sequentially within each conversation: a waiting prompt's event and timestamp
+are recorded when it becomes active, and it sees earlier completed answers.
+Redis turns retain their existing queue-time history semantics.
+
+To share conversations between clients, pass the same `LocalExecutor` to
+each `LocalClient`, reopening with `conversation_id=...`. Close the executor
+separately when supplied explicitly; otherwise the client owns it.
+Client and executor context managers handle cleanup. Closing an executor waits
+for its active model/tool action, then stops without draining pending actions.
+Leaving `Chat.run()` alone does not close its client or executor.
+All local state remains process-local; disk archives and backend migration are
+not implemented for the local backend yet.
+
+Use `fw chat --local` for the same embedded execution from the CLI, without
+starting Redis or a worker:
+
+```shell
+fw chat --local --agent fallingwater.demo:editor --model openai:gpt-6-luna
+fw chat --local --model openai:gpt-6-luna --msg "Hello"
+```
+
+Redis remains the default when `--local` is omitted. Agent/model environment
+defaults, dependency parameters, and `--msg` work in both modes. Each local CLI
+invocation creates a fresh executor: an explicit conversation ID is a name for
+a new session, not a way to resume a previous process's history. `--group` and
+`--rewind` apply only to that invocation's local events. On exit, the CLI closes
+the local client and executor, waiting for the active action but not draining
+pending work.
+
 
 ## CLI test drive
 
@@ -68,6 +113,11 @@ those options.
 
 Interactive chat accepts new prompts immediately, without waiting for earlier
 answers. `prompt_toolkit` keeps your current input intact while answers arrive.
+An interactive bottom toolbar shows the latest conversation event, including
+tool requests/results and subagent requests, for three seconds. These transient
+statuses do not enter the printed conversation or one-shot `--msg` output.
+An animated spinner remains visible while observed turns are active, even after
+the latest status expires, until all of them complete or fail.
 Prompts show their local submission time, and answers and failures reference
 that same timestamp, even when they arrive out of order. Timestamp headers sit
 on their own lines, right-aligned to the current terminal width. Times come

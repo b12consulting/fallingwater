@@ -1104,3 +1104,48 @@ revisited. Close or revise an item when the code resolves it.
   then exits without filtering by the submitted turn ID. Tests cover this
   deliberate simplification rather than requiring JSON output or correlated
   turn completion. This is demo behavior, not a production client guarantee.
+- **D114 — Backend-specific client names (accepted).** Name the Redis-backed
+  conversation client `RedisClient` in `redis_client.py`, replacing
+  `ConversationClient`. Reserve `LocalClient` for the future embedded
+  Executor-backed client. Keep `Conversation` for pure replay state and
+  `Executor` for action execution; the naming change does not implement a local
+  backend or change Redis client behavior.
+- **D115 — Embedded client and turn-ID-only submission (implemented).**
+  Introduce `LocalExecutor` as a library copy of the `fwflash` execution model,
+  leaving the prototype unchanged. Keep sequential session history and defer
+  queued events until activation. Return only `turn_id` from both clients'
+  `send` methods; Redis retains cursors internally for `receive` and `ask`.
+  Generalize chat to a structural client protocol. Local execution uses one
+  background thread, retains event logs and per-group acknowledgements, and
+  converts action failures to events. Explicit owners close shared executors;
+  otherwise clients own them. Close waits for the active action but does not
+  drain pending work. Local disk persistence, conversation-tree migration,
+  and CLI backend selection remain future work.
+- **D116 — Opt-in embedded CLI chat (implemented).** Add `fw chat --local`
+  to select `LocalClient` without opening Redis or requiring workers.
+  Keep Redis as the default. Reuse chat presentation, agent/model defaults,
+  dependency parameters, reader groups, rewind, and one-shot submission.
+  Each local invocation owns a fresh executor; an explicit conversation ID
+  names a new local session rather than resuming another process. Close the
+  local client and executor on normal and exceptional exit. Pending work does
+  not survive process termination; persistence and migration remain deferred.
+- **D117 — Server-side dashboard JSON highlighting (implemented).** Use
+  Pygments in the optional web dependencies to highlight complete event payloads
+  and JSON tool results. Keep Jinja's JSON serialization and mark only the
+  highlighter's escaped HTML safe. Scope generated styles to JSON blocks and
+  bold keys. Server-rendered fragments need no JavaScript highlighting hook
+  or additional CDN assets.
+- **D118 — Transient interactive chat statuses (implemented).** Display the
+  latest conversation event in a prompt_toolkit bottom toolbar, including tool
+  names and subagent names or paths where available. Expire statuses after three
+  seconds with monotonic deadlines and periodic redraws rather than timer
+  threads. Reader updates invalidate the prompt without changing typed input.
+  Clear terminal-only state on all exit paths; preserve printed conversation
+  messages, acknowledgements, and one-shot output.
+- **D119 — Persistent interactive work indicator (implemented).** Animate an
+  `◆`, `◇`, `◈` spinner using existing toolbar redraws while observed turns are active.
+  Track turn IDs from queued or progress events; remove only the corresponding
+  turn on completion or failure so overlapping work retains its indicator.
+  Status text still expires after three seconds, falling back to `Working...`
+  while busy. Clear active-turn state on terminal-session exit without adding
+  threads or changing event delivery.

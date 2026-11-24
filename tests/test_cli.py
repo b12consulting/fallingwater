@@ -6,15 +6,17 @@ from importlib.metadata import version
 from unittest.mock import MagicMock, call
 
 import pytest
+from prompt_toolkit.application import create_app_session
 from redis import Redis
 
 from fallingwater.cli import build_parser, main
+from fallingwater.local_client import LocalClient
 
 
 @pytest.fixture
 def client_class(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client_class = MagicMock()
-    monkeypatch.setattr("fallingwater.cli.ConversationClient", client_class)
+    monkeypatch.setattr("fallingwater.cli.RedisClient", client_class)
     return client_class
 
 
@@ -260,6 +262,7 @@ def test_chat_argument_defaults_come_from_environment(
     assert args.agent == "fallingwater.demo:haiku_master"
     assert args.model == "openai:gpt-4o-mini"
     assert args.group == "user"
+    assert not args.local
     assert not args.rewind
     assert args.msg is None
     assert args.params == []
@@ -476,6 +479,141 @@ def test_chat_rewinds_selected_group_before_reading(
         call.rewind(),
         call.run() if message is None else call.run_once(message),
     ]
+
+
+@pytest.mark.parametrize("message", [None, "Hello"])
+def test_local_chat_selects_client_and_cleans_up_without_redis(
+    monkeypatch, message, client_class
+) -> None:
+    client = MagicMock()
+    client.__enter__.return_value = client
+    local_class = MagicMock(return_value=client)
+    redis = MagicMock(side_effect=AssertionError("Local chat opened Redis"))
+    chat = MagicMock()
+    monkeypatch.setattr("fallingwater.cli.LocalClient", local_class)
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", redis)
+    monkeypatch.setattr("fallingwater.cli.Chat", MagicMock(return_value=chat))
+    args = [
+        "chat",
+        "local-session",
+        "--local",
+        "--agent",
+        "example:agent",
+        "--model",
+        "test",
+        "--group",
+        "reader-one",
+        "--rewind",
+        "-p",
+        "name=Alice",
+    ]
+    if message is not None:
+        args.extend(["--msg", message])
+
+    assert main(args) == 0
+
+    local_class.assert_called_once_with(
+        conversation_id="local-session",
+        agent_path="example:agent",
+        model="test",
+        group="reader-one",
+        deps={"name": "Alice"},
+    )
+    client.rewind.assert_called_once_with()
+    if message is None:
+        chat.run.assert_called_once_with()
+        chat.run_once.assert_not_called()
+    else:
+        chat.run_once.assert_called_once_with(message)
+        chat.run.assert_not_called()
+    client.__exit__.assert_called_once()
+    redis.assert_not_called()
+    client_class.assert_not_called()
+
+
+def test_local_chat_executes_message_and_closes_executor(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr("fallingwater.cli.generate_name", lambda: "local-test")
+    redis = MagicMock(side_effect=AssertionError("Local chat opened Redis"))
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", redis)
+    clients = []
+
+    def open_client(**kwargs):
+        client = LocalClient(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("fallingwater.cli.LocalClient", open_client)
+    with create_app_session():
+        assert (
+            main(
+                [
+                    "chat",
+                    "--local",
+                    "--agent",
+                    "pydantic_ai:Agent",
+                    "--model",
+                    "test",
+                    "--msg",
+                    "Hello",
+                ]
+            )
+            == 0
+        )
+
+    client = clients[0]
+    output = capsys.readouterr()
+    assert "› Hello" in output.out
+    assert "success (no tool calls)" in output.out
+    assert output.err.strip() == "Conversation: local-test"
+    assert client.executor._thread is not None
+    assert not client.executor._thread.is_alive()
+    assert all(
+        turn.completed for turn in client.conversation.turn_state.values()
+    )
+    redis.assert_not_called()
+
+
+def test_local_chat_closes_client_when_terminal_fails(monkeypatch) -> None:
+    clients = []
+
+    def open_client(**kwargs):
+        client = LocalClient(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("fallingwater.cli.LocalClient", open_client)
+    chat = MagicMock()
+    chat.run.side_effect = RuntimeError("terminal failed")
+    monkeypatch.setattr("fallingwater.cli.Chat", lambda _client: chat)
+    with pytest.raises(RuntimeError, match="terminal failed"):
+        main(
+            [
+                "chat",
+                "--local",
+                "--agent",
+                "pydantic_ai:Agent",
+                "--model",
+                "test",
+            ]
+        )
+
+    with pytest.raises(RuntimeError, match="Local client is closed"):
+        clients[0].send("after exit")
+    assert clients[0].executor._closed
+
+
+def test_local_chat_reports_invalid_configuration_without_redis(
+    monkeypatch,
+) -> None:
+    redis = MagicMock(side_effect=AssertionError("Local chat opened Redis"))
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", redis)
+
+    with pytest.raises(SystemExit, match="fw chat: conversation reader group"):
+        main(["chat", "--local", "--model", "test", "--group", ""])
+
+    redis.assert_not_called()
 
 
 def test_reset_deletes_only_selected_namespace(

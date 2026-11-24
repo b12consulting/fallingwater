@@ -1,4 +1,4 @@
-"""Checks for conversation access without terminal interaction."""
+"""Checks for Redis conversation access without terminal interaction."""
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent
@@ -14,7 +14,7 @@ from pydantic_ai.usage import RunUsage
 from redis import Redis
 from redis.exceptions import RedisError
 
-from fallingwater.conversation_client import ConversationClient
+from fallingwater.redis_client import RedisClient
 from fallingwater.models import (
     Action,
     ConversationCreatedPayload,
@@ -29,10 +29,10 @@ from fallingwater.stream_utils import (
 )
 
 
-def _client(redis: Redis, **kwargs) -> ConversationClient:
+def _client(redis: Redis, **kwargs) -> RedisClient:
     redis.xrange.return_value = []
     redis.xadd.return_value = "1-0"
-    return ConversationClient(
+    return RedisClient(
         redis,
         conversation_id="abc",
         agent_path="pydantic_ai:Agent",
@@ -53,11 +53,10 @@ def test_send_pokes_dispatch_only_after_persisting_the_prompt() -> None:
     client = _client(redis)
     redis.xadd.return_value = "2-0"
 
-    turn_id, cursor = client.send("hello")
+    turn_id = client.send("hello")
 
-    assert cursor == "2-0"
     queued_stream, queued_fields = redis.xadd.call_args_list[-2].args
-    queued = decode_conversation_event(cursor, queued_fields)
+    queued = decode_conversation_event("2-0", queued_fields)
     assert queued_stream == "fw:conversation:abc:events"
     assert queued.payload == TurnQueuedPayload(turn_id=turn_id, message="hello")
     dispatch_stream, dispatch_fields = redis.xadd.call_args_list[-1].args
@@ -75,15 +74,14 @@ def test_send_queues_repeated_prompts_as_distinct_turns() -> None:
     client = _client(redis)
     redis.xadd.side_effect = ["2-0", "1-0", "3-0", "2-0"]
 
-    first_turn, first_cursor = client.send("hello")
-    second_turn, second_cursor = client.send("hello")
+    first_turn = client.send("hello")
+    second_turn = client.send("hello")
 
     assert first_turn != second_turn
-    assert (first_cursor, second_cursor) == ("2-0", "3-0")
     queued = [
         decode_conversation_event(cursor, call.args[1]).payload
         for cursor, call in zip(
-            (first_cursor, second_cursor), redis.xadd.call_args_list[-4::2]
+            ("2-0", "3-0"), redis.xadd.call_args_list[-4::2]
         )
     ]
     assert queued == [
@@ -129,7 +127,7 @@ def test_invalid_agent_does_not_create_conversation() -> None:
     redis.xrange.return_value = []
 
     with pytest.raises(ValueError, match="cannot instantiate agent"):
-        ConversationClient(
+        RedisClient(
             redis,
             conversation_id="test",
             agent_path="fallingwater.demo:missing_agent",
@@ -144,7 +142,7 @@ def test_new_conversation_requires_model_when_agent_has_none() -> None:
     redis.xrange.return_value = []
 
     with pytest.raises(ValueError, match="no model"):
-        ConversationClient(
+        RedisClient(
             redis,
             conversation_id="test",
             agent_path="fallingwater.demo:haiku_master",
@@ -164,7 +162,7 @@ def test_resume_uses_saved_settings_and_validates_them() -> None:
     )
     redis.xrange.side_effect = [[created], []]
 
-    client = ConversationClient(
+    client = RedisClient(
         redis,
         conversation_id="abc",
         agent_path="fallingwater.demo:missing_agent",
@@ -175,7 +173,7 @@ def test_resume_uses_saved_settings_and_validates_them() -> None:
     redis.xadd.assert_not_called()
     redis.xrange.side_effect = [[created], []]
     with pytest.raises(ValueError, match="dependencies can only be set"):
-        ConversationClient(redis, conversation_id="abc", deps={"name": "Bob"})
+        RedisClient(redis, conversation_id="abc", deps={"name": "Bob"})
 
 
 def test_resume_rejects_unavailable_saved_agent() -> None:
@@ -196,7 +194,7 @@ def test_resume_rejects_unavailable_saved_agent() -> None:
     ]
 
     with pytest.raises(ValueError, match="cannot instantiate agent"):
-        ConversationClient(
+        RedisClient(
             redis,
             conversation_id="abc",
             agent_path="pydantic_ai:Agent",
@@ -229,7 +227,7 @@ def test_client_opens_with_latest_settings_and_refresh_updates_them() -> None:
         [],
     ]
 
-    client = ConversationClient(redis, conversation_id="abc")
+    client = RedisClient(redis, conversation_id="abc")
 
     assert client.settings == latest
     assert client.conversation.last_event_id == "3-0"
@@ -259,7 +257,8 @@ def test_ask_waits_for_matching_outcome_without_group_reads_or_output(
 ) -> None:
     redis = MagicMock(spec=Redis)
     client = _client(redis)
-    client.send = MagicMock(return_value=("turn-1", "2-0"))
+    client.send = MagicMock(return_value="turn-1")
+    client._queued_event_ids["turn-1"] = "2-0"
     outcome = (
         TurnFailedPayload(turn_id="turn-1", error="boom")
         if failed
@@ -389,7 +388,7 @@ def test_rewind_failure_does_not_change_local_reader_cursor() -> None:
 def test_open_reconstructs_all_pages_even_when_the_group_has_acknowledged_them(
     isolated_redis,
 ) -> None:
-    client = ConversationClient(
+    client = RedisClient(
         isolated_redis,
         namespace="fw-test",
         conversation_id="abc",
@@ -412,7 +411,7 @@ def test_open_reconstructs_all_pages_even_when_the_group_has_acknowledged_them(
     for event in client.read(ffwd=True):
         client.acknowledge(event)
 
-    resumed = ConversationClient(
+    resumed = RedisClient(
         isolated_redis, namespace="fw-test", conversation_id="abc"
     )
 
@@ -429,7 +428,7 @@ def test_open_reconstructs_all_pages_even_when_the_group_has_acknowledged_them(
 def test_explicit_refresh_is_independent_of_submission_delivery_and_rewind(
     isolated_redis, monkeypatch
 ) -> None:
-    client = ConversationClient(
+    client = RedisClient(
         isolated_redis,
         namespace="fw-test",
         conversation_id="abc",
@@ -438,8 +437,8 @@ def test_explicit_refresh_is_independent_of_submission_delivery_and_rewind(
     )
     conversation = client.conversation
     initial_id = conversation.last_event_id
-    turn_id, queued_id = client.send("hello")
-    overlapping_turn, _ = client.send("overlap")
+    turn_id = client.send("hello")
+    overlapping_turn = client.send("overlap")
     messages = [ModelResponse(parts=[TextPart("answer")])]
     outcome_id = client.stream.append_payload(
         TurnCompletedPayload(
@@ -454,10 +453,11 @@ def test_explicit_refresh_is_independent_of_submission_delivery_and_rewind(
     client.stream.append_payload(
         TurnFailedPayload(turn_id=turn_id, error="late failure")
     )
-    next_turn, last_id = client.send("next")
+    next_turn = client.send("next")
+    last_id = client.queued_event_id(next_turn)
 
     assert conversation.turn_state == {}
-    assert client.receive(turn_id, queued_id) == "answer"
+    assert client.receive(turn_id) == "answer"
     for event in client.read(ffwd=True):
         client.acknowledge(event)
     assert conversation.turn_state == {}
@@ -553,7 +553,7 @@ def test_open_reports_unreplayable_history_without_creating_a_reader_group():
     ]
 
     with pytest.raises(ValueError, match="No prompt found for turn: missing"):
-        ConversationClient(redis, conversation_id="abc")
+        RedisClient(redis, conversation_id="abc")
 
     redis.xgroup_create.assert_not_called()
     redis.xadd.assert_not_called()

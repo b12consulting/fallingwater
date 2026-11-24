@@ -56,10 +56,12 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- chat.py               Terminal input, event rendering, and reader thread
 |   |-- cli.py                argparse CLI for workers, chat, archive, sync, web, and reset
 |   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
-|   |-- conversation_client.py Replay snapshots, submission, and reader groups
+|   |-- local_client.py       Embedded conversation client and reader groups
+|   |-- local_executor.py     Local FIFO execution and conversation event logs
 |   |-- models.py             Agent requests, conversation events, and dispatch schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
+|   |-- redis_client.py       Replay snapshots, submission, and reader groups
 |   |-- stream.py             Low-level typed Redis stream access
 |   |-- stream_utils.py       Stream names, validation, and wire codecs
 |   |-- turn_state.py         Pure payload transitions and per-turn machines
@@ -90,8 +92,10 @@ This is the quick-start guide for agents working in this repository. See
     |-- test_chat.py          Terminal rendering, input, and reader lifecycle checks
     |-- test_cli.py           CLI smoke checks
     |-- test_conversation.py  Dispatch and conversation stream checks
-    |-- test_conversation_client.py Client snapshots, submission, and reader-group checks
     |-- test_demo.py          Jeopardy and editor/writer request checks
+    |-- test_local_client.py  Local client delivery, lifecycle, and chat checks
+    |-- test_local_executor.py Local FIFO, delegation, failure, and replay checks
+    |-- test_redis_client.py  Client snapshots, submission, and reader-group checks
     |-- test_streams.py       Conversation event codec and naming checks
     |-- test_turn_state.py    Transition validation and all-turn reconstruction checks
     |-- test_web.py           Web routes, page, and SSE feed checks

@@ -1,4 +1,4 @@
-"""Terminal interaction and display for Redis-backed conversations."""
+"""Terminal interaction and display for conversation clients."""
 
 from collections.abc import Callable, Iterator
 from contextvars import copy_context
@@ -7,15 +7,20 @@ from functools import partial
 from queue import Queue
 from shutil import get_terminal_size
 from threading import Event as ThreadEvent, Thread
+from time import monotonic
+from typing import Protocol
 
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.application import Application
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from .conversation_client import ConversationClient
 from .models import (
+    AgentRequestedPayload,
+    ConversationCreatedPayload,
     ConversationEvent,
+    ToolRequestedPayload,
+    ToolResultPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnQueuedPayload,
@@ -24,14 +29,95 @@ from .utils import logger
 
 
 SESSION_PROMPT = "› "  # "▸ "
+STATUS_DURATION = 3.0
+STATUS_REFRESH_INTERVAL = 0.25
+SPINNER_FRAMES = "◆◈◇⬩"
+LEFT_OFFSET = " "
+
+
+class ChatClient(Protocol):
+    """Conversation submission and delivery required by the terminal."""
+
+    conversation_id: str
+
+    @property
+    def settings(self) -> ConversationCreatedPayload:
+        ...
+
+    def send(self, prompt: str) -> str:
+        ...
+
+    def read(self, *, ffwd: bool = False) -> Iterator[ConversationEvent]:
+        ...
+
+    def acknowledge(self, event: ConversationEvent) -> None:
+        ...
+
+    def queued_event_id(self, turn_id: str) -> str:
+        ...
+
+    def rewind(self) -> None:
+        ...
 
 
 class Chat:
     """Render conversation events and accept terminal input."""
 
-    def __init__(self, client: ConversationClient) -> None:
+    def __init__(self, client: ChatClient) -> None:
         self.client = client
         self._turn_timestamps: dict[str, str] = {}
+        self._status: tuple[str, float] | None = None
+        self._status_app: Application[str] | None = None
+        self._active_turns: set[str] = set()
+
+    def _status_toolbar(self) -> FormattedText:
+        now = monotonic()
+        status = self._status
+        message = status[0] if status is not None and now < status[1] else ""
+        if self._active_turns:
+            frame = SPINNER_FRAMES[
+                int(now / STATUS_REFRESH_INTERVAL) % len(SPINNER_FRAMES)
+            ]
+            message = f"{LEFT_OFFSET}{frame} {message or 'Working...'}"
+        if not message:
+            return FormattedText([])
+        return FormattedText([("", message)])
+
+    def _show_event_status(self, event: ConversationEvent) -> None:
+        app = self._status_app
+        if app is None:
+            return
+        payload = event.payload
+        if isinstance(payload, (TurnCompletedPayload, TurnFailedPayload)):
+            self._active_turns.discard(payload.turn_id)
+        elif not isinstance(payload, ConversationCreatedPayload):
+            self._active_turns.add(payload.turn_id)
+        if isinstance(payload, ConversationCreatedPayload):
+            message = f"Agent settings: {payload.agent}"
+        elif isinstance(payload, TurnQueuedPayload):
+            message = "Turn queued"
+        elif isinstance(payload, ToolRequestedPayload):
+            names = " / ".join(
+                call["tool_name"] for call in payload.requests.get("calls", [])
+            )
+            message = (
+                f"Tools requested: {names}" if names else "Tools requested"
+            )
+        elif isinstance(payload, ToolResultPayload):
+            message = "Tool result received"
+        elif isinstance(payload, AgentRequestedPayload):
+            message = (
+                f"Subagent requested: {payload.name or payload.agent_path}"
+            )
+        elif isinstance(payload, TurnCompletedPayload):
+            message = f"{LEFT_OFFSET}Turn completed"
+        else:
+            message = f"{LEFT_OFFSET}Turn failed"
+        self._status = (
+            " ".join(message.split()),
+            monotonic() + STATUS_DURATION,
+        )
+        app.invalidate()
 
     @staticmethod
     def timestamp(entry_id: str) -> str:
@@ -59,6 +145,7 @@ class Chat:
 
     def handle_group_event(self, event: ConversationEvent) -> str | None:
         """Render a displayable event and return its completed turn ID."""
+        self._show_event_status(event)
         payload = event.payload
         if isinstance(payload, TurnQueuedPayload):
             timestamp = self.timestamp(event.entry_id)
@@ -95,7 +182,7 @@ class Chat:
             pass
 
     def send_and_wait(self, prompt: str) -> None:
-        turn_id, _ = self.client.send(prompt)
+        turn_id = self.client.send(prompt)
         while True:
             completed = False
             for completed_turn_id in self.read():
@@ -123,37 +210,47 @@ class Chat:
     def run_terminal(self) -> None:
         stop = ThreadEvent()
         failures: Queue[Exception] = Queue()
-        session = PromptSession(erase_when_done=True)
+        session = PromptSession(
+            erase_when_done=True,
+            bottom_toolbar=self._status_toolbar,
+            refresh_interval=STATUS_REFRESH_INTERVAL,
+        )
 
         session.app.before_render += partial(
             self._check_reader, failures=failures
         )
 
-        with patch_stdout():
-            self.resume_group()
-            # Keep prompt_toolkit's application session in the reader thread.
-            reader = Thread(
-                target=copy_context().run,
-                args=(
-                    self._read_replies,
-                    stop,
-                    failures,
-                    session.app.invalidate,
-                ),
-            )
-            reader.start()
-            try:
-                while not stop.is_set():
-                    prompt = session.prompt(SESSION_PROMPT)
-                    if not stop.is_set():
-                        self.client.send(prompt)
-            except (EOFError, KeyboardInterrupt):
-                pass
-            finally:
-                stop.set()
-                reader.join()
-            if not failures.empty():
-                raise failures.get()
+        self._status_app = session.app
+        try:
+            with patch_stdout():
+                self.resume_group()
+                # Keep prompt_toolkit's application session in the reader thread.
+                reader = Thread(
+                    target=copy_context().run,
+                    args=(
+                        self._read_replies,
+                        stop,
+                        failures,
+                        session.app.invalidate,
+                    ),
+                )
+                reader.start()
+                try:
+                    while not stop.is_set():
+                        prompt = session.prompt(SESSION_PROMPT)
+                        if not stop.is_set():
+                            self.client.send(prompt)
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                finally:
+                    stop.set()
+                    reader.join()
+                if not failures.empty():
+                    raise failures.get()
+        finally:
+            self._status_app = None
+            self._status = None
+            self._active_turns.clear()
 
     @staticmethod
     def _check_reader(

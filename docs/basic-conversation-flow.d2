@@ -9,7 +9,7 @@ creation: Creation and first turn {
   dispatch: Shared dispatch
   workers: Workers
 
-  client -> conversation: Create ConversationClient
+  client -> conversation: Create RedisClient
   conversation.created: "conversation.created\nagent, model, deps"
   submission: "send(prompt): successive writes" {
     client -> conversation: Queue prompt
@@ -17,11 +17,11 @@ creation: Creation and first turn {
     client -> dispatch: Queue action
     dispatch.poke: "conversation.poke\nconversation_id, turn_id"
   }
-  client -> client: Return turn_id and queued event cursor
+  client -> client: Return turn_id
   dispatch -> workers: "Claim conversation.poke"
   conversation -> workers: "Load configuration, prompt,\nand earlier history"
   workers -> workers: Run agent
-  client -> conversation: "receive(turn_id, cursor)\nXREAD after cursor; wait for outcome"
+  client -> conversation: "receive(turn_id)\nXREAD after queued event; wait for outcome"
   workers -> conversation: Save answer
   conversation.completed: "turn.completed\nanswer, history, usage"
   conversation -> client: Read matching outcome
