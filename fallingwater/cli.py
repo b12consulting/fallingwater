@@ -9,6 +9,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from importlib.metadata import version
+from pathlib import Path
 
 from redis import Redis
 
@@ -76,27 +77,27 @@ def build_parser() -> argparse.ArgumentParser:
     ls_parser = subparsers.add_parser("ls", help="List conversations.")
     ls_parser.set_defaults(handler=run_ls)
 
-    archive_parser = subparsers.add_parser(
-        "archive", help="Archive a conversation or a namespace ending in ':'."
+    save_parser = subparsers.add_parser(
+        "save", help="Save a conversation or a namespace ending in ':'."
     )
-    archive_parser.add_argument(
+    save_parser.add_argument(
         "target", help="Conversation ID or source namespace ending in ':'."
     )
-    archive_parser.add_argument(
+    save_parser.add_argument(
         "-s", "--store", help="Store URI.", default=".fw-store"
     )
-    archive_parser.set_defaults(handler=run_archive)
+    save_parser.set_defaults(handler=run_save)
 
-    restore_parser = subparsers.add_parser(
-        "restore", help="Restore a conversation or a namespace ending in ':'."
+    load_parser = subparsers.add_parser(
+        "load", help="Load a conversation or a namespace ending in ':'."
     )
-    restore_parser.add_argument(
+    load_parser.add_argument(
         "target", help="Conversation ID or destination namespace ending in ':'."
     )
-    restore_parser.add_argument(
+    load_parser.add_argument(
         "-s", "--store", help="Store URI.", default=".fw-store"
     )
-    restore_parser.set_defaults(handler=run_restore)
+    load_parser.set_defaults(handler=run_load)
 
     sync_parser = subparsers.add_parser(
         "sync", help="Copy all streams between namespaces."
@@ -146,7 +147,20 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument(
         "--local",
         action="store_true",
-        help="Run locally without Redis or workers; sessions last only for this process.",
+        help="Run locally without Redis or workers.",
+    )
+    chat_parser.add_argument(
+        "--load",
+        action="store_true",
+        help="Load local conversation history and descendants from --store.",
+    )
+    chat_parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save recorded local history and descendants on exit.",
+    )
+    chat_parser.add_argument(
+        "--store", default=".fw-store", help="Existing archive directory."
     )
     chat_parser.add_argument(
         "-p",
@@ -247,32 +261,32 @@ def run_ls(args: argparse.Namespace) -> None:
             print(conversation_id)
 
 
-def run_archive(args: argparse.Namespace) -> None:
-    """Archive a conversation or all conversations in an explicit namespace."""
+def run_save(args: argparse.Namespace) -> None:
+    """Save a conversation or all conversations in an explicit namespace."""
     with Redis.from_url(args.redis_url) as redis:
         if args.target.endswith(":"):
-            file_len = archive.dump_namespace(
+            file_len = archive.save_namespace(
                 redis, args.target[:-1], store=args.store
             )
         else:
-            file_len = archive.dump_conversation_stream(
+            file_len = archive.save_conversation(
                 redis, args.namespace, args.target, store=args.store
             )
     logger.info("%s bytes written to %s", file_len, args.store)
 
 
-def run_restore(args: argparse.Namespace) -> None:
-    """Restore a conversation or all archives into an explicit namespace."""
+def run_load(args: argparse.Namespace) -> None:
+    """Load a conversation or all archives into an explicit namespace."""
     with Redis.from_url(args.redis_url) as redis:
         if args.target.endswith(":"):
             nb_msg = archive.load_namespace(
                 redis, args.target[:-1], store=args.store
             )
         else:
-            nb_msg = archive.load_conversation_stream(
+            nb_msg = archive.load_conversation(
                 redis, args.namespace, args.target, store=args.store
             )
-    logger.info("%s messages restored", nb_msg)
+    logger.info("%s events loaded", nb_msg)
 
 
 def run_sync(args: argparse.Namespace) -> None:
@@ -338,6 +352,12 @@ def run_dispatch(args: argparse.Namespace) -> None:
 
 def run_chat(args: argparse.Namespace) -> None:
     conversation_id = args.conversation
+    if (args.load or args.save) and not args.local:
+        raise SystemExit("fw chat: --load and --save require --local")
+    if args.load and conversation_id is None:
+        raise SystemExit("fw chat: --load requires a conversation ID")
+    if (args.load or args.save) and not Path(args.store).is_dir():
+        raise SystemExit(f"fw chat: store path {args.store} is not a directory")
     try:
         deps = _parse_chat_params(args.params)
     except ValueError as error:
@@ -347,15 +367,18 @@ def run_chat(args: argparse.Namespace) -> None:
         try:
             client: ChatClient
             if args.local:
-                client = resources.enter_context(
-                    LocalClient(
-                        conversation_id=conversation_id or generate_name(),
-                        agent_path=args.agent,
-                        model=args.model,
-                        group=args.group,
-                        deps=deps,
-                    )
+                local_client = LocalClient(
+                    conversation_id=conversation_id or generate_name(),
+                    agent_path=args.agent,
+                    model=args.model,
+                    group=args.group,
+                    deps=deps,
+                    load=args.load,
+                    store=args.store,
                 )
+                if args.save:
+                    resources.callback(local_client.save, args.store)
+                client = resources.enter_context(local_client)
             else:
                 redis = resources.enter_context(Redis.from_url(args.redis_url))
                 if conversation_id is None:

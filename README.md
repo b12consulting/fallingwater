@@ -34,14 +34,19 @@ sequentially within each conversation: a waiting prompt's event and timestamp
 are recorded when it becomes active, and it sees earlier completed answers.
 Redis turns retain their existing queue-time history semantics.
 
-To share conversations between clients, pass the same `LocalExecutor` to
-each `LocalClient`, reopening with `conversation_id=...`. Close the executor
-separately when supplied explicitly; otherwise the client owns it.
+Each `LocalClient` creates and owns a separate `LocalExecutor`; clients cannot
+share in-memory sessions. Reopen saved history with `load=True`.
 Client and executor context managers handle cleanup. Closing an executor waits
 for its active model/tool action, then stops without draining pending actions.
 Leaving `Chat.run()` alone does not close its client or executor.
-All local state remains process-local; disk archives and backend migration are
-not implemented for the local backend yet.
+Local execution state remains process-local. Use `client.save(store)` to archive
+recorded events and all referenced subagent conversations to an existing
+directory, including after closing the client. Load them with
+`LocalClient(conversation_id=..., load=True, store=...)`. Loading uses saved
+agent, model, and dependencies and rejects unfinished turns or missing child
+archives. The archive format is shared with Redis, so a settled Redis archive
+can also be loaded locally. Redis and local save/load both automatically follow
+referenced subagent conversations, including reusable named sessions.
 
 Use `fw chat --local` for the same embedded execution from the CLI, without
 starting Redis or a worker:
@@ -53,11 +58,33 @@ fw chat --local --model openai:gpt-6-luna --msg "Hello"
 
 Redis remains the default when `--local` is omitted. Agent/model environment
 defaults, dependency parameters, and `--msg` work in both modes. Each local CLI
-invocation creates a fresh executor: an explicit conversation ID is a name for
-a new session, not a way to resume a previous process's history. `--group` and
-`--rewind` apply only to that invocation's local events. On exit, the CLI closes
+invocation creates a fresh executor: without `--load`, an explicit conversation
+ID names a new session. `--group` and `--rewind` apply only to that invocation's
+local events. On exit, the CLI closes
 the local client and executor, waiting for the active action but not draining
 pending work.
+
+Add `--save` to archive local recorded history on exit, including referenced
+subagent sessions. Use `--load` with an explicit conversation ID to resume an
+archive; combine it with `--save` to write updated history. `--store` defaults
+to `.fw-store`, which must already exist. These flags do not open Redis:
+
+```shell
+mkdir -p .fw-store
+fw chat local-example --local --save --agent fallingwater.demo:editor --model openai:gpt-6-luna
+fw chat local-example --local --load --save
+fw chat local-example --local --load --msg "Continue"
+```
+
+Loaded history is already acknowledged for the selected group; add `--rewind`
+to print it again. Loading alone leaves archive files unchanged. Saving replaces
+files with the same conversation IDs, so use a separate store to preserve an
+original archive. Save errors are reported. Saving captures recorded events
+after the normal close, even on exceptional exit; it does not drain pending
+turns. Unrecorded waiting prompts, dispatch queues, tool contexts, and reader
+acknowledgements are not archived. An archive saved with unfinished turns is
+valid history but cannot yet be resumed locally. Multi-file saves are not
+atomic, and forced process termination cannot guarantee a save.
 
 
 ## CLI test drive
@@ -152,20 +179,27 @@ fw tail relaxed_euler --full
 fw dispatch
 ```
 
-Use `fw archive <namespace>: --store <directory>` to archive every conversation
-history in a namespace, and `fw restore <namespace>: --store <directory>` to
-restore every `.jsonl.zst` file in that directory into the destination namespace.
+Use `fw save <namespace>: --store <directory>` to save every conversation
+history in a namespace, and `fw load <namespace>: --store <directory>` to
+load every `.jsonl.zst` file in that directory into the destination namespace.
 The trailing colon selects namespace mode, independently of global `--namespace`.
-Without it, the argument is a conversation ID: `fw archive <id>` and
-`fw restore <id>` operate on one conversation in the global namespace
-(`fw` by default, or `fw -n <namespace> archive <id>`).
+Without it, the argument is a conversation ID: `fw save <id>` and
+`fw load <id>` operate on one conversation in the global namespace
+(`fw` by default, or `fw -n <namespace> save <id>`).
+Single-conversation save/load also follows all referenced subagent conversations
+recursively, including nested and persistent sessions. Each conversation is
+processed once, even when several requests reuse it; unrelated conversations
+are excluded. Missing source conversations fail saving. Loading validates every
+referenced archive and checks all destination keys before writing any events,
+so missing or malformed child files and existing child keys fail the whole load
+without partially installing the tree.
 The directory must already exist; it defaults to `.fw-store`. Use a separate
 directory for each archive set, since files are named by conversation ID rather
-than namespace. Archive replaces files with the same conversation ID; restore
-refuses any existing destination conversation key before loading any files.
-Dispatch streams, consumer groups, and expiry are not archived, and restore
+than namespace. Save replaces files with the same conversation ID; load
+refuses any existing destination conversation key before writing any events.
+Dispatch streams, consumer groups, and expiry are not archived, and Redis load
 generates new event IDs. Stop writers for consistency; a failed operation can
-leave partially written files or restored conversations.
+leave partially written files or loaded conversations.
 
 Use `fw sync <source-namespace> <destination-namespace>` to copy all Redis
 streams, including dispatch, within the Redis database selected by `--redis-url`.

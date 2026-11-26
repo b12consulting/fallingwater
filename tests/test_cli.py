@@ -97,7 +97,7 @@ def test_sync_command_copies_positional_namespaces(
 
 @pytest.mark.parametrize(
     ("command", "function"),
-    [("archive", "dump_namespace"), ("restore", "load_namespace")],
+    [("save", "save_namespace"), ("load", "load_namespace")],
 )
 def test_archive_commands_use_positional_namespace(
     monkeypatch: pytest.MonkeyPatch, command: str, function: str
@@ -136,8 +136,8 @@ def test_archive_commands_use_positional_namespace(
 @pytest.mark.parametrize(
     ("command", "function"),
     [
-        ("archive", "dump_conversation_stream"),
-        ("restore", "load_conversation_stream"),
+        ("save", "save_conversation"),
+        ("load", "load_conversation"),
     ],
 )
 def test_archive_commands_use_conversation_in_global_namespace(
@@ -151,9 +151,7 @@ def test_archive_commands_use_conversation_in_global_namespace(
     )
     operation = MagicMock(return_value=42)
     monkeypatch.setattr(f"fallingwater.cli.archive.{function}", operation)
-    other_function = (
-        "dump_namespace" if command == "archive" else "load_namespace"
-    )
+    other_function = "save_namespace" if command == "save" else "load_namespace"
     namespace_operation = MagicMock()
     monkeypatch.setattr(
         f"fallingwater.cli.archive.{other_function}", namespace_operation
@@ -169,7 +167,7 @@ def test_archive_commands_use_conversation_in_global_namespace(
         main([command, "abc"])
 
 
-@pytest.mark.parametrize("command", ["archive", "restore"])
+@pytest.mark.parametrize("command", ["save", "load"])
 @pytest.mark.parametrize("target", [":", "fw::"])
 def test_archive_commands_reject_invalid_namespace_targets(
     monkeypatch: pytest.MonkeyPatch, command: str, target: str
@@ -518,6 +516,8 @@ def test_local_chat_selects_client_and_cleans_up_without_redis(
         model="test",
         group="reader-one",
         deps={"name": "Alice"},
+        load=False,
+        store=".fw-store",
     )
     client.rewind.assert_called_once_with()
     if message is None:
@@ -529,6 +529,108 @@ def test_local_chat_selects_client_and_cleans_up_without_redis(
     client.__exit__.assert_called_once()
     redis.assert_not_called()
     client_class.assert_not_called()
+
+
+def test_local_archive_cli_resumes_without_reprinting_history(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    redis = MagicMock(side_effect=AssertionError("Local chat opened Redis"))
+    monkeypatch.setattr("fallingwater.cli.Redis.from_url", redis)
+    args = [
+        "chat",
+        "saved",
+        "--local",
+        "--store",
+        str(tmp_path),
+        "--save",
+    ]
+    with create_app_session():
+        assert (
+            main(
+                args
+                + [
+                    "--agent",
+                    "tests.test_local_client:writer",
+                    "--msg",
+                    "first",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert main(args + ["--load", "--msg", "second"]) == 0
+        output = capsys.readouterr().out
+        assert "first/second" in output
+        assert "› first" not in output
+        assert main(args + ["--load", "--rewind", "--msg", "third"]) == 0
+        output = capsys.readouterr().out
+        assert "first/second/third" in output
+        assert "› first" in output
+    redis.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (["chat", "--load"], "require --local"),
+        (["chat", "--save"], "require --local"),
+        (["chat", "--local", "--load"], "requires a conversation ID"),
+    ],
+)
+def test_local_archive_cli_rejects_invalid_options(args, error) -> None:
+    with pytest.raises(SystemExit, match=error):
+        main(args)
+
+
+def test_local_archive_cli_saves_after_exception(tmp_path, monkeypatch) -> None:
+    def fail_chat(chat):
+        chat.client.ask("recorded")
+        raise RuntimeError("terminal failed")
+
+    monkeypatch.setattr("fallingwater.cli.Chat.run", fail_chat)
+    with pytest.raises(RuntimeError, match="terminal failed"):
+        main(
+            [
+                "chat",
+                "saved",
+                "--local",
+                "--save",
+                "--store",
+                str(tmp_path),
+                "--agent",
+                "tests.test_local_client:writer",
+            ]
+        )
+    with LocalClient(
+        conversation_id="saved", load=True, store=str(tmp_path)
+    ) as client:
+        assert client.ask("next") == "recorded/next"
+
+
+def test_local_archive_cli_saves_unfinished_turn_without_draining(
+    tmp_path, monkeypatch
+) -> None:
+    def stop_chat(chat):
+        chat.client.executor.send(chat.client.conversation_id, "unfinished")
+
+    monkeypatch.setattr("fallingwater.cli.Chat.run", stop_chat)
+    assert (
+        main(
+            [
+                "chat",
+                "partial",
+                "--local",
+                "--save",
+                "--store",
+                str(tmp_path),
+                "--agent",
+                "tests.test_local_client:writer",
+            ]
+        )
+        == 0
+    )
+    with pytest.raises(ValueError, match="unfinished turns"):
+        LocalClient(conversation_id="partial", load=True, store=str(tmp_path))
 
 
 def test_local_chat_executes_message_and_closes_executor(

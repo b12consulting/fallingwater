@@ -640,24 +640,35 @@ future reconciliation of partial writes. It does not repair streams yet.
 
 `archive.py` writes conversation events as newline-delimited Pydantic JSON in a
 Zstandard-compressed file. Zstandard's stream writer and reader keep file I/O
-incremental. Restore validates each event and appends it to an empty conversation
-stream. Each archive record includes the required source `entry_id`; restore
+incremental. Redis load buffers decoded events for the full selected graph,
+validates each event, and then appends it to an empty conversation
+stream. Each archive record includes the required source `entry_id`; Redis load
 validates it but lets Redis generate new stream IDs when appending events.
 Archives without IDs are not supported. Archive files use only `.jsonl.zst`;
 Redis conversation event payloads
 also use Zstandard, with a separate frame for each event.
 
-The archive and restore CLI commands interpret a positional target ending in
+The `save` and `load` CLI commands interpret a positional target ending in
 `:` as a namespace, stripping exactly that final colon and ignoring the global
 namespace option. Other targets are conversation IDs in the global namespace.
-Namespace archive exports only conversation
+Single-conversation save and load follow `AgentRequestedPayload` child
+references recursively within that namespace, retaining nested and persistent
+sessions while excluding unrelated conversations. An iterative traversal
+deduplicates IDs across reused children and namespace roots. Save checks source
+existence and discovers descendants while streaming events into files; a missing
+descendant fails explicitly but can leave earlier files written. Load first
+reads and validates all referenced files and checks all destination keys,
+including empty streams and non-stream keys, before appending any events.
+Namespace save exports only conversation
 histories, one `<conversation-id>.jsonl.zst` file per stream in an existing store
-directory. Namespace restore loads every matching file from that directory into
+directory. Namespace load reads every matching file from that directory into
 the selected namespace and checks all destination conversation keys for conflicts
-before appending any events. The per-conversation library helpers remain available.
+before appending any events. The library exposes `save_conversation`,
+`load_conversation`, `save_namespace`, and `load_namespace` in `archive.py`.
 Use separate directories for archive sets; files do not encode the namespace.
 Dispatch, consumer groups, and expiry are excluded. Operations are not atomic
-across conversations, and failed reads or writes can leave partial output.
+across conversations. Save errors, load write errors, or concurrent destination
+changes after preflight can leave partial output; stop writers for consistency.
 
 Namespace sync in `archive.py` uses Redis `COPY` for every stream under the
 source namespace prefix, including dispatch. Unlike archive restore, it preserves
@@ -836,18 +847,42 @@ for callers that already have one.
 
 `LocalClient` binds an executor session to the `ChatClient` protocol without
 printing. Group acknowledgements are retained separately from event logs;
-reopening a group resumes unacknowledged events, and rewind affects delivery
-only. `receive` and `ask` observe terminal state without acknowledging events.
+rewind affects delivery only. `receive` and `ask` observe terminal state without
+acknowledging events.
 The `conversation` property returns an isolated replay-state clone rather than
 exposing mutable executor state; `refresh()` checks availability but need not
-replay. A supplied executor can be shared and is closed by its owner. An
-implicitly created executor is owned by the client. Closing waits for the
+replay. Each client creates and owns a separate executor; the constructor does
+not accept an external executor. Reopening history requires archive loading.
+Closing waits for the
 active action and leaves remaining work unexecuted; daemon execution does not
-survive process exit. This adds neither local archive persistence nor migration.
+survive process exit. Archive loading restores settled history, not execution
+checkpoints.
 
 `fw chat --local` selects a fresh local executor for either interactive chat
 or `--msg`. Redis remains the default. Both modes use the same presentation,
 agent/model defaults, dependency parameters, rewind, and reader-group options.
-Local names require no Redis collision checks and do not reopen earlier
-processes' conversations. The CLI closes its local client and executor even
+Local names require no Redis collision checks; explicit `--load` reopens archived
+history. The CLI closes its local client and executor even
 when chat raises, waiting for the active action but not draining pending work.
+
+## AD22 — Backend-independent conversation archives
+
+`archive.save_events` and `load_events` share the existing `.jsonl.zst` event
+format between Redis and local sessions. Redis load continues generating
+new stream IDs. Local load preserves archived IDs and advances the executor's
+ID generator past them, replays each conversation, reconstructs agents and
+dependencies from saved settings, and follows all recorded child references.
+It rejects unfinished turns, missing settings or child files, invalid event
+ordering, and existing session IDs before installing any restored sessions.
+Loading does not schedule actions or restore reader acknowledgements.
+
+`LocalExecutor.save` snapshots a root session and its referenced descendants
+under the condition, then writes their archives outside that lock.
+`LocalClient.save` works before or after close; `load=True` at construction
+restores an archive and marks existing events acknowledged for that reader
+group. Rewind makes them readable again. `fw chat --local --load --save --store`
+exposes the same operations; load requires an explicit ID and save runs after
+normal executor shutdown, including exceptional chat exit. Save retains whatever
+events have been recorded without draining pending work or rejecting unfinished
+turns. Such partial histories cannot yet be loaded locally. Files overwrite by
+conversation ID as with Redis archives; multi-file saves are not atomic.

@@ -20,37 +20,39 @@ from .utils import check_agent
 class LocalClient:
     """Submit sequential turns and read retained local events without printing.
 
-    An omitted executor is owned by this client; use a context manager or
-    ``close()`` to stop it. A supplied executor can serve multiple clients and
-    must be closed by its owner. State survives reopening a client only while
-    that executor remains alive. Queued timestamps reflect turn activation.
+    Each client owns its executor; use a context manager or ``close()`` to
+    stop it. Use ``save()`` and ``load=True`` to retain
+    settled history across processes. Queued timestamps reflect activation.
     """
 
     def __init__(
         self,
-        executor: LocalExecutor | None = None,
         *,
         conversation_id: str | None = None,
         agent_path: str | None = None,
         model: str | None = None,
         group: str = "user",
         deps: Mapping[str, Any] | None = None,
+        load: bool = False,
+        store: str = ".fw-store",
     ) -> None:
         if not group:
             raise ValueError("conversation reader group must be nonempty")
-        self.executor = executor if executor is not None else LocalExecutor()
-        self._owns_executor = executor is None
+        self.executor = LocalExecutor()
         self._closed = False
         self.group = group
         with self.executor.condition:
             self.executor.check()
-            existing = self.executor.registry.get(conversation_id or "")
-            if existing is not None:
+            if load:
+                if conversation_id is None:
+                    raise ValueError("loading requires a conversation ID")
                 if deps:
                     raise ValueError(
                         "dependencies can only be set for a new conversation"
                     )
-                self.conversation_id = existing.conversation.conversation_id
+                self.conversation_id = self.executor.load(
+                    conversation_id, store
+                )
             else:
                 if agent_path is None:
                     raise ValueError("agent is required for a new conversation")
@@ -63,6 +65,12 @@ class LocalClient:
                 )
             self._session = self.executor.registry[self.conversation_id]
             self._session.acknowledged.setdefault(group, set())
+            if load:
+                self._session.acknowledged[group].update(self._session.events)
+
+    def save(self, store: str = ".fw-store") -> int:
+        """Save recorded history and descendants, including after closing."""
+        return self.executor.save(self.conversation_id, store)
 
     @property
     def settings(self) -> ConversationCreatedPayload:
@@ -184,12 +192,11 @@ class LocalClient:
             self.executor.condition.notify_all()
 
     def close(self) -> None:
-        """Close this client and stop its executor only when owned."""
+        """Close this client and stop its executor."""
         with self.executor.condition:
             self._closed = True
             self.executor.condition.notify_all()
-        if self._owns_executor:
-            self.executor.close()
+        self.executor.close()
 
     def __enter__(self) -> LocalClient:
         return self

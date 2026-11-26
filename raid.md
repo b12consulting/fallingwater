@@ -1117,18 +1117,18 @@ revisited. Close or revise an item when the code resolves it.
   `send` methods; Redis retains cursors internally for `receive` and `ask`.
   Generalize chat to a structural client protocol. Local execution uses one
   background thread, retains event logs and per-group acknowledgements, and
-  converts action failures to events. Explicit owners close shared executors;
-  otherwise clients own them. Close waits for the active action but does not
-  drain pending work. Local disk persistence, conversation-tree migration,
-  and CLI backend selection remain future work.
+  converts action failures to events. Clients always own their executors after
+  D123. Close waits for the active action but does not
+  drain pending work. Local archive persistence and settled-history migration
+  are implemented in D120; in-flight migration remains future work.
 - **D116 — Opt-in embedded CLI chat (implemented).** Add `fw chat --local`
   to select `LocalClient` without opening Redis or requiring workers.
   Keep Redis as the default. Reuse chat presentation, agent/model defaults,
   dependency parameters, reader groups, rewind, and one-shot submission.
   Each local invocation owns a fresh executor; an explicit conversation ID
-  names a new local session rather than resuming another process. Close the
+  names a new local session unless `--load` restores an archive (D120). Close the
   local client and executor on normal and exceptional exit. Pending work does
-  not survive process termination; persistence and migration remain deferred.
+  not survive process termination; D120 adds recorded-history persistence only.
 - **D117 — Server-side dashboard JSON highlighting (implemented).** Use
   Pygments in the optional web dependencies to highlight complete event payloads
   and JSON tool results. Keep Jinja's JSON serialization and mark only the
@@ -1149,3 +1149,38 @@ revisited. Close or revise an item when the code resolves it.
   Status text still expires after three seconds, falling back to `Working...`
   while busy. Clear active-turn state on terminal-session exit without adding
   threads or changing event delivery.
+- **D120 — Shared archives for local conversation trees (implemented).**
+  Reuse Redis's `.jsonl.zst` event format for local save and load. Follow recorded
+  child references recursively so persistent named-agent histories remain
+  available after restoring. Preserve local archived IDs and load saved settings,
+  without scheduling actions. Reject unfinished turns and validate the full tree
+  before installing it. Expose `--load`, `--save`, and `--store` on local chat;
+  load is explicit and loaded history prints only with rewind. Save after normal
+  close even when chat raises, keeping recorded partial history without draining
+  pending work. Such archives are not resumable until unfinished-turn recovery
+  is implemented. Retain archive overwrite semantics and non-atomic multi-file
+  writes; use separate stores to preserve originals.
+- **D121 — Consistent save/load naming (implemented).** Rename the Redis CLI
+  commands `archive` and `restore` to `save` and `load`, without legacy aliases.
+  Rename their handlers and archive helpers to `run_save`, `run_load`,
+  `save_conversation`, `load_conversation`, `save_namespace`, `load_namespace`,
+  `save_events`, and `load_events` for consistency with local client operations
+  and chat flags. Keep the `archive.py` module and `.jsonl.zst` format unchanged;
+  Redis load still generates new IDs and does not schedule execution.
+- **D122 — Recursive Redis conversation save/load (implemented).** Follow every
+  recorded child-conversation reference when saving or loading a Redis
+  conversation, matching local archive traversal. Deduplicate reused descendants
+  and namespace roots. Saving streams events to files and fails explicitly for
+  missing source conversations. Loading buffers and validates all referenced
+  archives and checks every destination key before writing, so missing or
+  malformed child files and existing child keys do not install a partial tree.
+  Preserve new Redis event IDs and exclude dispatch and consumer-group state.
+  Namespace operations use the same traversal without duplicate writes.
+  Operations remain non-atomic across files and streams; concurrent changes or
+  write failures can leave partial output after preflight.
+- **D123 — Local client owns its executor (implemented).** Remove the optional
+  executor argument from `LocalClient`. Each client creates a separate executor
+  and always closes it on client shutdown. Remove shared-session reopening and
+  conditional ownership bookkeeping; resume retained history through archive
+  loading instead. Keep standalone `LocalExecutor` usage and synchronization
+  unchanged.

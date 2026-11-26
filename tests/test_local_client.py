@@ -21,7 +21,6 @@ from pydantic_ai.models.test import TestModel
 
 from fallingwater.chat import Chat
 from fallingwater.local_client import LocalClient
-from fallingwater.local_executor import LocalExecutor
 from fallingwater.models import TurnCompletedPayload, TurnFailedPayload
 
 
@@ -76,32 +75,69 @@ def test_ask_is_silent_and_does_not_acknowledge_events(capsys) -> None:
         assert capsys.readouterr() == ("", "")
 
 
-def test_groups_reopen_and_rewind_without_rerunning_work() -> None:
-    with LocalExecutor() as executor:
+def test_rewind_without_rerunning_work() -> None:
+    with LocalClient(agent_path=f"{__name__}:writer", group="reader") as client:
+        assert client.ask("hello") == "hello"
+        original = list(client.read(ffwd=True))
+        for event in original:
+            client.acknowledge(event)
+        assert list(client.read(ffwd=True)) == []
+        client.rewind()
+        assert list(client.read(ffwd=True)) == original
+        assert len(client.conversation.turn_state) == 1
+        assert not client.executor.queue
+        assert client.ask("again") == "hello/again"
+
+
+def test_clients_with_same_id_have_independent_lifetimes_and_history() -> None:
+    first = LocalClient(agent_path=f"{__name__}:writer", conversation_id="same")
+    try:
         with LocalClient(
-            executor, agent_path=f"{__name__}:writer", group="one"
-        ) as first:
-            turn_id = first.send("hello")
-            assert first.receive(turn_id) == "hello"
-            original = list(first.read(ffwd=True))
-            for event in original:
-                first.acknowledge(event)
-            conversation_id = first.conversation_id
-        with LocalClient(
-            executor, conversation_id=conversation_id, group="one"
-        ) as reopened, LocalClient(
-            executor, conversation_id=conversation_id, group="two"
-        ) as independent:
-            assert list(reopened.read(ffwd=True)) == []
-            assert list(independent.read(ffwd=True)) == original
-            for event in independent.read(ffwd=True):
-                independent.acknowledge(event)
-            reopened.rewind()
-            assert list(reopened.read(ffwd=True)) == original
-            assert list(independent.read(ffwd=True)) == []
-            assert len(reopened.conversation.turn_state) == 1
-            assert not executor.queue
-            assert reopened.ask("again") == "hello/again"
+            agent_path=f"{__name__}:writer", conversation_id="same"
+        ) as second:
+            assert first.ask("first") == "first"
+            assert second.ask("second") == "second"
+            first.close()
+            assert second.ask("again") == "second/again"
+    finally:
+        first.close()
+
+
+def test_archive_load_preserves_history_settings_and_delivery(tmp_path) -> None:
+    with LocalClient(
+        agent_path=f"{__name__}:writer", conversation_id="saved"
+    ) as client:
+        client.ask("first")
+        original = list(client.read(ffwd=True))
+    client.save(str(tmp_path))
+    with LocalClient(
+        conversation_id="saved",
+        agent_path="unavailable:agent",
+        model="unavailable:model",
+        load=True,
+        store=str(tmp_path),
+    ) as restored:
+        assert restored.settings.agent == f"{__name__}:writer"
+        assert list(restored.read(ffwd=True)) == []
+        restored.rewind()
+        assert list(restored.read(ffwd=True)) == original
+        assert restored.ask("second") == "first/second"
+
+
+def test_archive_load_requires_existing_id_and_original_dependencies(
+    tmp_path,
+) -> None:
+    with pytest.raises(ValueError, match="requires a conversation ID"):
+        LocalClient(load=True, store=str(tmp_path))
+    with pytest.raises(ValueError, match="not found"):
+        LocalClient(conversation_id="missing", load=True, store=str(tmp_path))
+    with pytest.raises(ValueError, match="dependencies"):
+        LocalClient(
+            conversation_id="saved",
+            load=True,
+            store=str(tmp_path),
+            deps={"changed": "value"},
+        )
 
 
 def test_send_is_nonblocking_and_waiting_turn_captures_sequential_history(
@@ -275,14 +311,6 @@ def test_invalid_inputs_and_unknown_turns() -> None:
         LocalClient(agent_path=f"{__name__}:writer", group="")
     with pytest.raises(ValueError, match="agent is required"):
         LocalClient()
-    with LocalExecutor() as executor, LocalClient(
-        executor, agent_path=f"{__name__}:writer"
-    ) as client:
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
         with pytest.raises(ValueError, match="No prompt found"):
             client.receive("missing")
-        with pytest.raises(ValueError, match="dependencies can only"):
-            LocalClient(
-                executor,
-                conversation_id=client.conversation_id,
-                deps={"unexpected": "value"},
-            )

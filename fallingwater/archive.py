@@ -1,4 +1,5 @@
 import io
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import zstandard as zstd
@@ -6,7 +7,7 @@ from redis import Redis
 from pydantic import TypeAdapter
 
 from fallingwater.stream import DispatchStream
-from fallingwater.models import ConversationEvent
+from fallingwater.models import AgentRequestedPayload, ConversationEvent
 from fallingwater.stream_utils import (
     decode_text,
     fmt_conversation_stream,
@@ -50,8 +51,8 @@ def sync_streams(redis: Redis, source_ns: str, destination_ns: str) -> int:
     return len(streams)
 
 
-def dump_namespace(redis: Redis, namespace: str, store: str) -> int:
-    """Archive every conversation history in a namespace; return bytes written."""
+def save_namespace(redis: Redis, namespace: str, store: str) -> int:
+    """Save every conversation history in a namespace; return bytes written."""
     pattern = fmt_conversation_stream(namespace, "*")
     store_path = Path(store)
     if not store_path.is_dir():
@@ -72,14 +73,11 @@ def dump_namespace(redis: Redis, namespace: str, store: str) -> int:
             raise ValueError(
                 f"conversation ID {conversation_id!r} is not a file name"
             )
-    return sum(
-        dump_conversation_stream(redis, namespace, conversation_id, store)
-        for conversation_id in conversation_ids
-    )
+    return _save_conversations(redis, namespace, conversation_ids, store)
 
 
 def load_namespace(redis: Redis, namespace: str, store: str) -> int:
-    """Restore all conversation archives into a namespace; return event count."""
+    """Load all conversation archives into a namespace; return event count."""
     validate_namespace(namespace)
     store_path = Path(store)
     if not store_path.is_dir():
@@ -89,62 +87,79 @@ def load_namespace(redis: Redis, namespace: str, store: str) -> int:
         for path in sorted(store_path.glob("*.jsonl.zst"))
         if path.is_file()
     ]
-    for conversation_id in conversation_ids:
-        stream = fmt_conversation_stream(namespace, conversation_id)
-        if redis.exists(stream):
-            raise ValueError(f"{stream} already exists")
-    return sum(
-        load_conversation_stream(redis, namespace, conversation_id, store)
-        for conversation_id in conversation_ids
-    )
+    return _load_conversations(redis, namespace, conversation_ids, store)
 
 
-def dump_conversation_stream(
+def save_conversation(
     redis: Redis, namespace: str, conversation_id: str, store: str
 ) -> int:
-    """
-    Dump all events in a conversation stream to storage.
-    """
-    stream = DispatchStream(redis, namespace=namespace).conversation_stream(
-        conversation_id
-    )
+    """Save a conversation and referenced descendants; return bytes written."""
+    return _save_conversations(redis, namespace, [conversation_id], store)
 
-    # instantiate store
-    # TODO handle other backends (like S3)
+
+def _save_conversations(
+    redis: Redis, namespace: str, conversation_ids: list[str], store: str
+) -> int:
+    dispatch = DispatchStream(redis, namespace=namespace)
+    pending = list(reversed(conversation_ids))
+    seen: set[str] = set()
+    length = 0
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        _store_file(current, store)
+        stream = dispatch.conversation_stream(current)
+        if not redis.exists(stream.name):
+            raise ValueError(f"Conversation not found: {stream.name}")
+        seen.add(current)
+
+        def events() -> Iterator[ConversationEvent]:
+            for event in stream.iter_events():
+                if isinstance(event.payload, AgentRequestedPayload):
+                    pending.append(event.payload.child_conversation_id)
+                yield event
+
+        length += save_events(events(), current, store)
+    return length
+
+
+def _store_file(conversation_id: str, store: str) -> Path:
+    validate_conversation_id(conversation_id)
+    if Path(conversation_id).name != conversation_id or conversation_id in (
+        ".",
+        "..",
+    ):
+        raise ValueError(
+            f"conversation ID {conversation_id!r} is not a file name"
+        )
     store_path = Path(store)
     if not store_path.is_dir():
         raise ValueError(f"store path {store_path} is not a directory")
-    store_file = store_path / f"{conversation_id}.jsonl.zst"
+    return store_path / f"{conversation_id}.jsonl.zst"
 
+
+def save_events(
+    events: Iterable[ConversationEvent], conversation_id: str, store: str
+) -> int:
+    """Write backend-independent conversation events; return bytes written."""
+    store_file = _store_file(conversation_id, store)
     with store_file.open("wb") as f:
         with zstd.ZstdCompressor().stream_writer(f, closefd=False) as writer:
-            for event in stream.iter_events():
+            for event in events:
                 writer.write(adapter.dump_json(event) + b"\n")
         length = f.tell()
 
     return length
 
 
-def load_conversation_stream(
-    redis: Redis, namespace: str, conversation_id: str, store: str
-) -> int:
-    """
-    Load all events in a conversation stream from storage.
-    """
-    stream = DispatchStream(redis, namespace=namespace).conversation_stream(
-        conversation_id
-    )
-    records = stream.read_conversation_range(count=1)
-    if records:
-        raise ValueError(f"{stream.name} already exists")
-
-    # instantiate store
-    store_path = Path(store)
-    store_file = store_path / f"{conversation_id}.jsonl.zst"
+def load_events(
+    conversation_id: str, store: str
+) -> Iterator[ConversationEvent]:
+    """Read validated conversation events, preserving archived entry IDs."""
+    store_file = _store_file(conversation_id, store)
     if not store_file.is_file():
         raise ValueError(f"store file {store_file} not found")
-
-    count = 0
     with store_file.open("rb") as f:
         with io.BufferedReader(
             zstd.ZstdDecompressor().stream_reader(f, closefd=False)
@@ -152,8 +167,40 @@ def load_conversation_stream(
             for line in lines:
                 if not line.endswith(b"\n"):
                     raise ValueError(f"store file {store_file} is truncated")
-                event = adapter.validate_json(line)
-                stream.append_event(event.type, event.payload)
-                count += 1
+                yield adapter.validate_json(line)
 
+
+def load_conversation(
+    redis: Redis, namespace: str, conversation_id: str, store: str
+) -> int:
+    """Load a conversation and referenced descendants; return event count."""
+    return _load_conversations(redis, namespace, [conversation_id], store)
+
+
+def _load_conversations(
+    redis: Redis, namespace: str, conversation_ids: list[str], store: str
+) -> int:
+    dispatch = DispatchStream(redis, namespace=namespace)
+    pending = list(reversed(conversation_ids))
+    snapshots: dict[str, list[ConversationEvent]] = {}
+    while pending:
+        current = pending.pop()
+        if current in snapshots:
+            continue
+        stream = dispatch.conversation_stream(current)
+        if redis.exists(stream.name):
+            raise ValueError(f"{stream.name} already exists")
+        events = list(load_events(current, store))
+        snapshots[current] = events
+        pending.extend(
+            event.payload.child_conversation_id
+            for event in events
+            if isinstance(event.payload, AgentRequestedPayload)
+        )
+    count = 0
+    for current, events in snapshots.items():
+        stream = dispatch.conversation_stream(current)
+        for event in events:
+            stream.append_event(event.type, event.payload)
+            count += 1
     return count

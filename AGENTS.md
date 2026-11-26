@@ -51,13 +51,13 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
 |   |-- agent_proxy.py        Agent-step outcomes, tool invocation, and subagent resolution
-|   |-- archive.py            Namespace conversation archives, restore, and stream sync
+|   |-- archive.py            Shared archives, recursive Redis save/load, and stream sync
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal input, event rendering, and reader thread
-|   |-- cli.py                argparse CLI for workers, chat, archive, sync, web, and reset
+|   |-- cli.py                argparse CLI for workers, chat, save/load, sync, web, and reset
 |   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
-|   |-- local_client.py       Embedded conversation client and reader groups
-|   |-- local_executor.py     Local FIFO execution and conversation event logs
+|   |-- local_client.py       Embedded client, reader groups, and archive save/load
+|   |-- local_executor.py     Local FIFO execution, event logs, and tree archives
 |   |-- models.py             Agent requests, conversation events, and dispatch schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder
@@ -87,7 +87,7 @@ This is the quick-start guide for agents working in this repository. See
 `-- tests/                    Pytest tests; conftest provides shared fixtures
     |-- conftest.py           Typeguard import hook and isolated Redis fixture
     |-- test_agent_proxy.py   Agent-step, tool invocation, and subagent resolution checks
-    |-- test_archive.py       Zstandard archive export and restore checks
+    |-- test_archive.py       Zstandard archive save and load checks
     |-- test_catalog.py       Agent import-path checks
     |-- test_chat.py          Terminal rendering, input, and reader lifecycle checks
     |-- test_cli.py           CLI smoke checks

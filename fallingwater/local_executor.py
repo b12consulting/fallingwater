@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from pydantic_ai import Agent
 
+from .archive import load_events, save_events
 from .agent_proxy import (
     ToolContexts,
     invoke_tool,
@@ -59,7 +60,8 @@ class LocalExecutor:
     Use ``drain()`` synchronously or ``start()`` for background execution.
     ``close()`` finishes the active action, leaving remaining work in memory.
     Registry contents are read-only to callers; coordinate inspection with
-    ``condition`` while execution is active. Nothing is persisted to disk.
+    ``condition`` while execution is active. Archives persist recorded events,
+    not pending actions or captured tool contexts.
     """
 
     def __init__(self) -> None:
@@ -119,6 +121,79 @@ class LocalExecutor:
             queued = TurnQueuedPayload(turn_id=str(uuid4()), message=prompt)
             self.submit(session_id, queued)
             return queued.turn_id
+
+    def save(self, session_id: str, store: str = ".fw-store") -> int:
+        """Archive a snapshot of this session and all referenced descendants."""
+        with self.condition:
+            snapshots: dict[str, tuple[ConversationEvent, ...]] = {}
+            pending = [session_id]
+            while pending:
+                current = pending.pop()
+                if current in snapshots:
+                    continue
+                events = tuple(self.registry[current].events.values())
+                snapshots[current] = events
+                pending.extend(
+                    event.payload.child_conversation_id
+                    for event in events
+                    if isinstance(event.payload, AgentRequestedPayload)
+                )
+        return sum(
+            save_events(events, current, store)
+            for current, events in snapshots.items()
+        )
+
+    def load(self, session_id: str, store: str = ".fw-store") -> str:
+        """Restore settled sessions and their descendants without scheduling."""
+        with self.condition:
+            self.check()
+            sessions: dict[str, Session] = {}
+            pending = [session_id]
+            latest_id = (self._milliseconds, self._sequence)
+            while pending:
+                current = pending.pop()
+                if current in sessions:
+                    continue
+                if current in self.registry:
+                    raise ValueError(f"Conversation already exists: {current}")
+                events = list(load_events(current, store))
+                previous = (0, 0)
+                for event in events:
+                    parts = event.entry_id.split("-")
+                    if len(parts) != 2 or not all(
+                        part.isascii() and part.isdigit() for part in parts
+                    ):
+                        raise ValueError(f"Invalid event ID: {event.entry_id}")
+                    entry_id = (int(parts[0]), int(parts[1]))
+                    if entry_id <= previous:
+                        raise ValueError(
+                            f"Event IDs are not increasing in {current}"
+                        )
+                    previous = entry_id
+                latest_id = max(latest_id, previous)
+                conversation = Conversation(events, conversation_id=current)
+                if any(
+                    turn.running for turn in conversation.turn_state.values()
+                ):
+                    raise ValueError(
+                        f"Conversation {current} has unfinished turns"
+                    )
+                settings = conversation.settings
+                agent = reify_agent(settings.agent)
+                sessions[current] = Session(
+                    agent=agent,
+                    conversation=conversation,
+                    deps=validate_deps(agent, settings.deps),
+                    events={event.entry_id: event for event in events},
+                )
+                pending.extend(
+                    event.payload.child_conversation_id
+                    for event in events
+                    if isinstance(event.payload, AgentRequestedPayload)
+                )
+            self.registry.update(sessions)
+            self._milliseconds, self._sequence = latest_id
+            return session_id
 
     def submit(self, session_id: str, queued: TurnQueuedPayload) -> None:
         with self.condition:

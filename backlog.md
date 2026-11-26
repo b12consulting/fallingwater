@@ -84,6 +84,12 @@ long-running actions, stopped renewal, ownership loss, and active-action
 reclamation. Existing isolated tests cover result fan-in, concurrent persistent
 registration, and reader-group rewind, not these full recovery scenarios.
 
+## B16. Rename local client and executor
+
+Rename `LocalClient` to `MemClient` and `LocalExecutor` to `MemExecutor`,
+respectively. Update their module names, imports, tests, and documentation
+consistently.
+
 # Closed
 
 ## B2. Agent catalog, composition, and discovery
