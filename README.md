@@ -34,12 +34,35 @@ sequentially within each conversation: a waiting prompt's event and timestamp
 are recorded when it becomes active, and it sees earlier completed answers.
 Redis turns retain their existing queue-time history semantics.
 
-Each `LocalClient` creates and owns a separate `LocalExecutor`; clients cannot
+Each `LocalClient` creates and owns a separate `LocalExecutor` and execution
+thread; clients cannot
 share in-memory sessions. Reopen saved history with `load=True`.
-Client and executor context managers handle cleanup. Closing an executor waits
-for its active model/tool action, then stops without draining pending actions.
+Lifecycle and submission calls assume one owner; concurrent owners are
+unsupported, without runtime thread-identity checks.
+One reader may consume and acknowledge events on another thread, as Chat does.
+Prompts enter a thread-safe incoming queue; the execution thread drains internal
+actions before accepting the next prompt. Result futures and an outgoing event
+queue coordinate responses without an executor condition lock. Snapshot reads
+use published, read-only state rather than the live executor registry.
+The executor does not create threads: `run()` blocks for incoming work and
+`drain()` processes currently queued synchronous work. Standalone callers must
+not mutate the registry or call synchronous submission/drain during `run()`.
+
+The local execution thread does not copy the owner's context variables.
+Configure the model and dependencies explicitly rather than relying on
+context-local agent overrides or implicit tracing context. Chat's separate
+reader still copies its prompt_toolkit application context.
+
+Closing a client signals stop and joins its execution thread, waiting for the
+active model/tool action but not draining pending actions or incoming prompts.
+Standalone executor `close()` and context-manager exit only signal stop;
+the caller must join any execution thread it created.
 Leaving `Chat.run()` alone does not close its client or executor.
-Local execution state remains process-local. Use `client.save(store)` to archive
+Operations rejected after closing report `Local executor is closed`; snapshots,
+settings, and archive saving remain available.
+Incoming prompts not yet accepted have no recorded event and are omitted from
+saved history on shutdown. Local execution state remains process-local.
+Use `client.save(store)` to archive
 recorded events and all referenced subagent conversations to an existing
 directory, including after closing the client. Load them with
 `LocalClient(conversation_id=..., load=True, store=...)`. Loading uses saved
@@ -47,6 +70,13 @@ agent, model, and dependencies and rejects unfinished turns or missing child
 archives. The archive format is shared with Redis, so a settled Redis archive
 can also be loaded locally. Redis and local save/load both automatically follow
 referenced subagent conversations, including reusable named sessions.
+
+File persistence lives in `fallingwater.archive`: standalone executor users can
+call `save_local_conversation(executor, conversation_id, store)` and
+`load_local_conversation(executor, conversation_id, store)`. The executor itself
+only provides in-memory `export(conversation_id)` and `restore(snapshots)`;
+restoring validates all supplied sessions and child references before installing
+them. `LocalClient.save()` and `load=True` delegate to the archive helpers.
 
 Use `fw chat --local` for the same embedded execution from the CLI, without
 starting Redis or a worker:

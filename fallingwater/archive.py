@@ -6,6 +6,7 @@ import zstandard as zstd
 from redis import Redis
 from pydantic import TypeAdapter
 
+from fallingwater.local_executor import LocalExecutor
 from fallingwater.stream import DispatchStream
 from fallingwater.models import AgentRequestedPayload, ConversationEvent
 from fallingwater.stream_utils import (
@@ -177,19 +178,15 @@ def load_conversation(
     return _load_conversations(redis, namespace, [conversation_id], store)
 
 
-def _load_conversations(
-    redis: Redis, namespace: str, conversation_ids: list[str], store: str
-) -> int:
-    dispatch = DispatchStream(redis, namespace=namespace)
+def _load_event_tree(
+    conversation_ids: list[str], store: str
+) -> dict[str, list[ConversationEvent]]:
     pending = list(reversed(conversation_ids))
     snapshots: dict[str, list[ConversationEvent]] = {}
     while pending:
         current = pending.pop()
         if current in snapshots:
             continue
-        stream = dispatch.conversation_stream(current)
-        if redis.exists(stream.name):
-            raise ValueError(f"{stream.name} already exists")
         events = list(load_events(current, store))
         snapshots[current] = events
         pending.extend(
@@ -197,6 +194,18 @@ def _load_conversations(
             for event in events
             if isinstance(event.payload, AgentRequestedPayload)
         )
+    return snapshots
+
+
+def _load_conversations(
+    redis: Redis, namespace: str, conversation_ids: list[str], store: str
+) -> int:
+    dispatch = DispatchStream(redis, namespace=namespace)
+    snapshots = _load_event_tree(conversation_ids, store)
+    for current in snapshots:
+        stream = dispatch.conversation_stream(current)
+        if redis.exists(stream.name):
+            raise ValueError(f"{stream.name} already exists")
     count = 0
     for current, events in snapshots.items():
         stream = dispatch.conversation_stream(current)
@@ -204,3 +213,22 @@ def _load_conversations(
             stream.append_event(event.type, event.payload)
             count += 1
     return count
+
+
+def save_local_conversation(
+    executor: LocalExecutor, conversation_id: str, store: str
+) -> int:
+    """Save a local event-tree snapshot; return bytes written."""
+    return sum(
+        save_events(events, current, store)
+        for current, events in executor.export(conversation_id).items()
+    )
+
+
+def load_local_conversation(
+    executor: LocalExecutor, conversation_id: str, store: str
+) -> int:
+    """Load a settled local conversation tree; return event count."""
+    snapshots = _load_event_tree([conversation_id], store)
+    executor.restore(snapshots)
+    return sum(len(events) for events in snapshots.values())

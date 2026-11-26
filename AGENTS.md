@@ -51,13 +51,13 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- __init__.py           Package initialization
 |   |-- __main__.py           python -m fallingwater entry point
 |   |-- agent_proxy.py        Agent-step outcomes, tool invocation, and subagent resolution
-|   |-- archive.py            Shared archives, recursive Redis save/load, and stream sync
+|   |-- archive.py            Recursive Redis/local file save/load and stream sync
 |   |-- catalog.py            Agent import-path loading
 |   |-- chat.py               Terminal input, event rendering, and reader thread
 |   |-- cli.py                argparse CLI for workers, chat, save/load, sync, web, and reset
 |   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
-|   |-- local_client.py       Embedded client, reader groups, and archive save/load
-|   |-- local_executor.py     Local FIFO execution, event logs, and tree archives
+|   |-- local_client.py       Execution thread, reader delivery, and archive save/load
+|   |-- local_executor.py     Blocking FIFO, prompt inbox, published snapshots, and export/restore
 |   |-- models.py             Agent requests, conversation events, and dispatch schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder

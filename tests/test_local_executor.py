@@ -1,5 +1,6 @@
 """Embedded FIFO scheduling, delegation, failure, and replay checks."""
 
+from threading import Thread
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
@@ -25,6 +26,8 @@ from fallingwater.archive import (
     save_events,
     load_conversation,
     load_events,
+    load_local_conversation,
+    save_local_conversation,
 )
 
 
@@ -161,9 +164,7 @@ def test_nested_fan_in_and_named_child_reuse() -> None:
             assert not session.tool_contexts
 
 
-def test_archive_restores_nested_and_persistent_sessions(
-    tmp_path, monkeypatch
-) -> None:
+def test_export_restores_nested_and_persistent_sessions(monkeypatch) -> None:
     with LocalExecutor() as executor:
         root = executor.create(f"{__name__}:editor")
         executor.send(root, "edit")
@@ -175,10 +176,11 @@ def test_archive_restores_nested_and_persistent_sessions(
             for key, session in executor.registry.items()
             if key != unrelated
         }
-        assert executor.save(root, str(tmp_path)) > 0
-    assert not (tmp_path / f"{unrelated}.jsonl.zst").exists()
+        snapshots = executor.export(root)
+    assert unrelated not in snapshots
+    assert set(snapshots) == set(original)
     with LocalExecutor() as restored:
-        restored.load(root, str(tmp_path))
+        restored.restore(snapshots)
         assert set(restored.registry) == set(original)
         assert not restored.queue
         for key, events in original.items():
@@ -198,6 +200,38 @@ def test_archive_restores_nested_and_persistent_sessions(
             )
 
 
+def test_export_snapshot_is_independent_of_later_turns() -> None:
+    with LocalExecutor() as executor:
+        root = executor.create(f"{__name__}:writer")
+        executor.send(root, "first")
+        executor.drain()
+        snapshots = executor.export(root)
+        executor.send(root, "second")
+        executor.drain()
+    with LocalExecutor() as restored:
+        restored.restore(snapshots)
+        turn = restored.send(root, "next")
+        restored.drain()
+        assert (
+            restored.registry[root].conversation.turn_state[turn].state.message
+            == "first/next"
+        )
+
+
+def test_restore_requires_all_referenced_children_before_installing() -> None:
+    with LocalExecutor() as executor:
+        root = executor.create(f"{__name__}:editor")
+        executor.send(root, "edit")
+        executor.drain()
+        snapshots = executor.export(root)
+        child = executor.registry[root].conversation.agent_by_name["writer"]
+    del snapshots[child]
+    with LocalExecutor() as restored:
+        with pytest.raises(ValueError, match="Child conversation not supplied"):
+            restored.restore(snapshots)
+        assert not restored.registry
+
+
 def test_redis_archive_loads_and_continues_locally(
     tmp_path, isolated_redis
 ) -> None:
@@ -205,13 +239,13 @@ def test_redis_archive_loads_and_continues_locally(
         root = executor.create(f"{__name__}:writer")
         executor.send(root, "redis history")
         executor.drain()
-        executor.save(root, str(tmp_path))
+        save_local_conversation(executor, root, str(tmp_path))
     load_conversation(isolated_redis, "fw-test", root, str(tmp_path))
     redis_store = tmp_path / "redis"
     redis_store.mkdir()
     save_conversation(isolated_redis, "fw-test", root, str(redis_store))
     with LocalExecutor() as executor:
-        executor.load(root, str(redis_store))
+        load_local_conversation(executor, root, str(redis_store))
         turn = executor.send(root, "local continuation")
         executor.drain()
         assert (
@@ -226,11 +260,11 @@ def test_save_after_close_retains_unfinished_events(tmp_path) -> None:
     executor.send(root, "active")
     executor.send(root, "waiting")
     executor.close()
-    executor.save(root, str(tmp_path))
+    save_local_conversation(executor, root, str(tmp_path))
     assert len(list(load_events(root, str(tmp_path)))) == 2
     with LocalExecutor() as restored:
         with pytest.raises(ValueError, match="unfinished turns"):
-            restored.load(root, str(tmp_path))
+            load_local_conversation(restored, root, str(tmp_path))
         assert not restored.registry
 
 
@@ -239,12 +273,12 @@ def test_load_missing_child_does_not_install_partial_tree(tmp_path) -> None:
         root = executor.create(f"{__name__}:editor")
         executor.send(root, "edit")
         executor.drain()
-        executor.save(root, str(tmp_path))
+        save_local_conversation(executor, root, str(tmp_path))
         child = executor.registry[root].conversation.agent_by_name["writer"]
     (tmp_path / f"{child}.jsonl.zst").unlink()
     with LocalExecutor() as restored:
         with pytest.raises(ValueError, match="not found"):
-            restored.load(root, str(tmp_path))
+            load_local_conversation(restored, root, str(tmp_path))
         assert not restored.registry
 
 
@@ -253,15 +287,15 @@ def test_failed_conversation_can_be_saved_and_loaded(tmp_path) -> None:
         root = executor.create(f"{__name__}:failing")
         turn = executor.send(root, "fail")
         executor.drain()
-        executor.save(root, str(tmp_path))
+        save_local_conversation(executor, root, str(tmp_path))
     with LocalExecutor() as restored:
-        restored.load(root, str(tmp_path))
+        load_local_conversation(restored, root, str(tmp_path))
         assert restored.registry[root].conversation.turn_state[turn].failed
         assert not restored.queue
 
 
-@pytest.mark.parametrize("entry_id", ["bad", "0-0", "1-0"])
-def test_load_rejects_invalid_or_duplicate_ids(tmp_path, entry_id) -> None:
+@pytest.mark.parametrize("entry_id", ["0-0", "1-0"])
+def test_load_rejects_nonincreasing_ids(tmp_path, entry_id) -> None:
     with LocalExecutor() as executor:
         root = executor.create(f"{__name__}:writer")
         executor.send(root, "first")
@@ -271,8 +305,8 @@ def test_load_rejects_invalid_or_duplicate_ids(tmp_path, entry_id) -> None:
     events[1] = events[1].model_copy(update={"entry_id": entry_id})
     save_events(events, root, str(tmp_path))
     with LocalExecutor() as restored:
-        with pytest.raises(ValueError, match="event ID|Event IDs"):
-            restored.load(root, str(tmp_path))
+        with pytest.raises(ValueError, match="Event IDs"):
+            load_local_conversation(restored, root, str(tmp_path))
         assert not restored.registry
 
 
@@ -283,12 +317,12 @@ def test_load_refuses_existing_child_without_installing_parent(
         root = executor.create(f"{__name__}:editor")
         executor.send(root, "edit")
         executor.drain()
-        executor.save(root, str(tmp_path))
+        save_local_conversation(executor, root, str(tmp_path))
         child = executor.registry[root].conversation.agent_by_name["writer"]
     with LocalExecutor() as restored:
         restored.create(f"{__name__}:writer", conversation_id=child)
         with pytest.raises(ValueError, match="already exists"):
-            restored.load(root, str(tmp_path))
+            load_local_conversation(restored, root, str(tmp_path))
         assert set(restored.registry) == {child}
 
 
@@ -335,3 +369,22 @@ def test_invalid_record_does_not_change_event_log() -> None:
             )
         assert list(executor.registry[root].events) == before
         executor.drain()
+
+
+def test_incoming_prompts_are_applied_only_by_the_execution_loop() -> None:
+    with LocalExecutor() as executor:
+        root = executor.create(f"{__name__}:writer")
+        turn, result = executor.enqueue(root, "first")
+        assert turn not in executor.registry[root].conversation.turn_state
+        assert len(executor.events(root)) == 1
+        thread = Thread(target=executor.run)
+        thread.start()
+        try:
+            assert result.result(timeout=5) == "first"
+            following, answer = executor.enqueue(root, "second")
+            assert answer.result(timeout=5) == "first/second"
+            assert executor.snapshot(root).turn_state[following].completed
+        finally:
+            executor.close()
+            thread.join(timeout=5)
+        assert not thread.is_alive()

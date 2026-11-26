@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import deque
-from contextvars import copy_context
+from collections.abc import Iterable, Mapping
+from concurrent.futures import Future
 from dataclasses import dataclass, field
-from threading import Condition, Lock, Thread, current_thread
+from queue import Empty, Queue
+from threading import Event as ThreadEvent
 from time import time_ns
 from traceback import format_exc
 from typing import Any
@@ -13,7 +15,6 @@ from uuid import uuid4
 
 from pydantic_ai import Agent
 
-from .archive import load_events, save_events
 from .agent_proxy import (
     ToolContexts,
     invoke_tool,
@@ -51,26 +52,39 @@ class Session:
     pending: list[TurnQueuedPayload] = field(default_factory=list)
     events: dict[str, ConversationEvent] = field(default_factory=dict)
     tool_contexts: ToolContexts = field(default_factory=dict)
-    acknowledged: dict[str, set[str]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class IncomingTurn:
+    session_id: str
+    queued: TurnQueuedPayload
+    result: Future[str]
+
+
+@dataclass(frozen=True)
+class SessionSnapshot:
+    conversation: Conversation
+    events: tuple[ConversationEvent, ...]
 
 
 class LocalExecutor:
     """Run one action at a time, retaining sequential history per session.
 
-    Use ``drain()`` synchronously or ``start()`` for background execution.
-    ``close()`` finishes the active action, leaving remaining work in memory.
-    Registry contents are read-only to callers; coordinate inspection with
-    ``condition`` while execution is active. Archives persist recorded events,
-    not pending actions or captured tool contexts.
+    ``run()`` blocks on incoming prompts when internal actions are exhausted.
+    ``drain()`` runs only currently queued actions in the calling thread.
+    One execution thread owns mutable state; other threads enqueue prompts and
+    read published snapshots. Create/restore sessions before starting execution.
+    ``close()`` signals shutdown between actions; the caller joins its thread.
     """
 
     def __init__(self) -> None:
         self.registry: dict[str, Session] = {}
         self.queue: deque[DispatchPayloadType] = deque()
-        self.condition = Condition()
-        self._execution_lock = Lock()
-        self._thread: Thread | None = None
-        self._closed = False
+        self.incoming: Queue[IncomingTurn | None] = Queue()
+        self.outgoing: Queue[tuple[str, ConversationEvent] | None] = Queue()
+        self._stop = ThreadEvent()
+        self._published: dict[str, SessionSnapshot] = {}
+        self._results: dict[str, Future[str]] = {}
         self._failure: Exception | None = None
         self._milliseconds = 0
         self._sequence = 0
@@ -78,8 +92,39 @@ class LocalExecutor:
     def check(self) -> None:
         if self._failure is not None:
             raise RuntimeError("Local executor failed") from self._failure
-        if self._closed:
+        if self.closed:
             raise RuntimeError("Local executor is closed")
+
+    @property
+    def closed(self) -> bool:
+        return self._stop.is_set()
+
+    def settings(self, session_id: str) -> ConversationCreatedPayload:
+        return self._published[session_id].conversation.settings
+
+    def snapshot(self, session_id: str) -> Conversation:
+        """Return isolated replay state, including after closing."""
+        return self._published[session_id].conversation.clone()
+
+    def events(self, session_id: str) -> tuple[ConversationEvent, ...]:
+        return self._published[session_id].events
+
+    def _publish(self, session_id: str) -> None:
+        session = self.registry[session_id]
+        self._published = {
+            **self._published,
+            session_id: SessionSnapshot(
+                session.conversation.clone(), tuple(session.events.values())
+            ),
+        }
+
+    def enqueue(self, session_id: str, prompt: str) -> tuple[str, Future[str]]:
+        """Submit through the thread-safe inbox without touching session state."""
+        self.check()
+        queued = TurnQueuedPayload(turn_id=str(uuid4()), message=prompt)
+        result: Future[str] = Future()
+        self.incoming.put(IncomingTurn(session_id, queued, result))
+        return queued.turn_id, result
 
     def create(
         self,
@@ -89,15 +134,14 @@ class LocalExecutor:
         deps: dict[str, Any] | None = None,
         conversation_id: str | None = None,
     ) -> str:
-        with self.condition:
-            self.check()
-            return self._create_session(
-                reify_agent(agent),
-                ConversationCreatedPayload(
-                    agent=agent, model=model or "", deps=deps or {}
-                ),
-                conversation_id or str(uuid4()),
-            )
+        self.check()
+        return self._create_session(
+            reify_agent(agent),
+            ConversationCreatedPayload(
+                agent=agent, model=model or "", deps=deps or {}
+            ),
+            conversation_id or str(uuid4()),
+        )
 
     def _create_session(
         self,
@@ -116,150 +160,148 @@ class LocalExecutor:
         return session_id
 
     def send(self, session_id: str, prompt: str) -> str:
-        with self.condition:
-            self.check()
-            queued = TurnQueuedPayload(turn_id=str(uuid4()), message=prompt)
-            self.submit(session_id, queued)
-            return queued.turn_id
+        """Submit synchronously, on the execution thread or before draining."""
+        self.check()
+        queued = TurnQueuedPayload(turn_id=str(uuid4()), message=prompt)
+        self.submit(session_id, queued)
+        return queued.turn_id
 
-    def save(self, session_id: str, store: str = ".fw-store") -> int:
-        """Archive a snapshot of this session and all referenced descendants."""
-        with self.condition:
-            snapshots: dict[str, tuple[ConversationEvent, ...]] = {}
-            pending = [session_id]
-            while pending:
-                current = pending.pop()
-                if current in snapshots:
-                    continue
-                events = tuple(self.registry[current].events.values())
-                snapshots[current] = events
-                pending.extend(
-                    event.payload.child_conversation_id
-                    for event in events
-                    if isinstance(event.payload, AgentRequestedPayload)
-                )
-        return sum(
-            save_events(events, current, store)
-            for current, events in snapshots.items()
-        )
+    def export(
+        self, session_id: str
+    ) -> dict[str, tuple[ConversationEvent, ...]]:
+        """Snapshot recorded events for this session and all descendants."""
+        published = self._published
+        snapshots: dict[str, tuple[ConversationEvent, ...]] = {}
+        pending = [session_id]
+        while pending:
+            current = pending.pop()
+            if current in snapshots:
+                continue
+            events = published[current].events
+            snapshots[current] = events
+            pending.extend(
+                event.payload.child_conversation_id
+                for event in events
+                if isinstance(event.payload, AgentRequestedPayload)
+            )
+        return snapshots
 
-    def load(self, session_id: str, store: str = ".fw-store") -> str:
-        """Restore settled sessions and their descendants without scheduling."""
-        with self.condition:
-            self.check()
-            sessions: dict[str, Session] = {}
-            pending = [session_id]
-            latest_id = (self._milliseconds, self._sequence)
-            while pending:
-                current = pending.pop()
-                if current in sessions:
-                    continue
-                if current in self.registry:
-                    raise ValueError(f"Conversation already exists: {current}")
-                events = list(load_events(current, store))
-                previous = (0, 0)
-                for event in events:
-                    parts = event.entry_id.split("-")
-                    if len(parts) != 2 or not all(
-                        part.isascii() and part.isdigit() for part in parts
-                    ):
-                        raise ValueError(f"Invalid event ID: {event.entry_id}")
-                    entry_id = (int(parts[0]), int(parts[1]))
-                    if entry_id <= previous:
-                        raise ValueError(
-                            f"Event IDs are not increasing in {current}"
-                        )
-                    previous = entry_id
-                latest_id = max(latest_id, previous)
-                conversation = Conversation(events, conversation_id=current)
-                if any(
-                    turn.running for turn in conversation.turn_state.values()
-                ):
+    def restore(
+        self, snapshots: Mapping[str, Iterable[ConversationEvent]]
+    ) -> None:
+        """Validate and install supplied settled sessions without scheduling."""
+        self.check()
+        sessions: dict[str, Session] = {}
+        latest_id = (self._milliseconds, self._sequence)
+        for current, records in snapshots.items():
+            if current in self.registry:
+                raise ValueError(f"Conversation already exists: {current}")
+            events = list(records)
+            previous = (0, 0)
+            for event in events:
+                entry_id = event.entry_id_tuple()
+                if entry_id <= previous:
                     raise ValueError(
-                        f"Conversation {current} has unfinished turns"
+                        f"Event IDs are not increasing in {current}"
                     )
-                settings = conversation.settings
-                agent = reify_agent(settings.agent)
-                sessions[current] = Session(
-                    agent=agent,
-                    conversation=conversation,
-                    deps=validate_deps(agent, settings.deps),
-                    events={event.entry_id: event for event in events},
+                previous = entry_id
+            latest_id = max(latest_id, previous)
+            conversation = Conversation(events, conversation_id=current)
+            if any(turn.running for turn in conversation.turn_state.values()):
+                raise ValueError(f"Conversation {current} has unfinished turns")
+            settings = conversation.settings
+            agent = reify_agent(settings.agent)
+            sessions[current] = Session(
+                agent=agent,
+                conversation=conversation,
+                deps=validate_deps(agent, settings.deps),
+                events={event.entry_id: event for event in events},
+            )
+            for event in events:
+                if isinstance(event.payload, AgentRequestedPayload):
+                    child_id = event.payload.child_conversation_id
+                    if child_id not in snapshots:
+                        raise ValueError(
+                            f"Child conversation not supplied: {child_id}"
+                        )
+        self.registry.update(sessions)
+        self._milliseconds, self._sequence = latest_id
+        self._published = {
+            **self._published,
+            **{
+                key: SessionSnapshot(
+                    session.conversation.clone(), tuple(session.events.values())
                 )
-                pending.extend(
-                    event.payload.child_conversation_id
-                    for event in events
-                    if isinstance(event.payload, AgentRequestedPayload)
-                )
-            self.registry.update(sessions)
-            self._milliseconds, self._sequence = latest_id
-            return session_id
+                for key, session in sessions.items()
+            },
+        }
 
     def submit(self, session_id: str, queued: TurnQueuedPayload) -> None:
-        with self.condition:
-            session = self.registry[session_id]
-            session.pending.append(queued)
-            if len(session.pending) == 1:
-                self.record(session_id, queued)
+        session = self.registry[session_id]
+        session.pending.append(queued)
+        if len(session.pending) == 1:
+            self.record(session_id, queued)
 
     def record(
         self, session_id: str, payload: ConversationPayloadType
     ) -> ConversationEvent:
-        with self.condition:
-            session = self.registry[session_id]
-            prepared = (
-                None
-                if isinstance(payload, ConversationCreatedPayload)
-                else session.conversation.prepare(payload)
-            )
-            milliseconds = max(time_ns() // 1_000_000, self._milliseconds)
-            self._sequence = (
-                self._sequence + 1 if milliseconds == self._milliseconds else 0
-            )
-            self._milliseconds = milliseconds
-            event = ConversationEvent(
-                entry_id=f"{milliseconds}-{self._sequence}",
-                type=get_cnv_event(type(payload)),
-                payload=payload,
-            )
-            session.conversation.apply((event,))
-            session.events[event.entry_id] = event
-            # Child submission schedules its poke only once that turn is ready.
-            if prepared is not None and not isinstance(
-                payload, AgentRequestedPayload
-            ):
-                self.queue.extendleft(prepared.dispatch(event.entry_id))
-            if isinstance(payload, (TurnCompletedPayload, TurnFailedPayload)):
-                turn = session.conversation.turn_state[payload.turn_id]
-                for tool_call_id in turn.calls:
-                    session.tool_contexts.pop(tool_call_id, None)
-                session.pending.pop(0)
-                if session.pending:
-                    self.record(session_id, session.pending[0])
-            self.condition.notify_all()
-            return event
+        session = self.registry[session_id]
+        prepared = (
+            None
+            if isinstance(payload, ConversationCreatedPayload)
+            else session.conversation.prepare(payload)
+        )
+        milliseconds = max(time_ns() // 1_000_000, self._milliseconds)
+        self._sequence = (
+            self._sequence + 1 if milliseconds == self._milliseconds else 0
+        )
+        self._milliseconds = milliseconds
+        event = ConversationEvent(
+            entry_id=f"{milliseconds}-{self._sequence}",
+            type=get_cnv_event(type(payload)),
+            payload=payload,
+        )
+        session.conversation.apply((event,))
+        session.events[event.entry_id] = event
+        # Child submission schedules its poke only once that turn is ready.
+        if prepared is not None and not isinstance(
+            payload, AgentRequestedPayload
+        ):
+            self.queue.extendleft(prepared.dispatch(event.entry_id))
+        if isinstance(payload, (TurnCompletedPayload, TurnFailedPayload)):
+            turn = session.conversation.turn_state[payload.turn_id]
+            for tool_call_id in turn.calls:
+                session.tool_contexts.pop(tool_call_id, None)
+            session.pending.pop(0)
+        self._publish(session_id)
+        self.outgoing.put((session_id, event))
+        if isinstance(payload, (TurnCompletedPayload, TurnFailedPayload)):
+            result = self._results.pop(payload.turn_id, None)
+            if result is not None:
+                if isinstance(payload, TurnFailedPayload):
+                    result.set_exception(RuntimeError(payload.error))
+                else:
+                    result.set_result(payload.message)
+            if session.pending:
+                self.record(session_id, session.pending[0])
+        return event
 
     def drain(self) -> None:
-        """Execute all available actions without starting a background thread."""
-        with self._execution_lock:
-            with self.condition:
-                self.check()
-                if self._thread is not None:
-                    raise RuntimeError("Local executor is already running")
-            while self._step():
-                pass
+        """Execute currently queued actions synchronously, without an inbox wait."""
+        self.check()
+        while self._step():
+            pass
 
     def _step(self) -> bool:
-        with self.condition:
-            if self._closed or not self.queue:
-                return False
-            action = self.queue.pop()
-            session = self.registry[action.conversation_id]
-            status = session.conversation.dispatch_status(action)
-            if status == "stale":
-                return True
-            if status == "wait":
-                raise RuntimeError("Local action is not ready")
+        if self.closed or not self.queue:
+            return False
+        action = self.queue.pop()
+        session = self.registry[action.conversation_id]
+        status = session.conversation.dispatch_status(action)
+        if status == "stale":
+            return True
+        if status == "wait":
+            raise RuntimeError("Local action is not ready")
         try:
             if isinstance(action, ToolCallPayload):
                 self.call_tool(session, action)
@@ -314,17 +356,14 @@ class LocalExecutor:
         value = invoke_tool(session.agent, call.tool_name, args, context)
         if isinstance(value, AgentRequest):
             request = self.resolve_subagent(session.conversation, action, value)
-            with self.condition:
-                settings, queued = session.conversation.subagent_payloads(
-                    request
+            settings, queued = session.conversation.subagent_payloads(request)
+            child_id = request.child_conversation_id
+            if child_id not in self.registry:
+                self._create_session(
+                    reify_agent(settings.agent), settings, child_id
                 )
-                child_id = request.child_conversation_id
-                if child_id not in self.registry:
-                    self._create_session(
-                        reify_agent(settings.agent), settings, child_id
-                    )
-                self.record(action.conversation_id, request)
-                self.submit(child_id, queued)
+            self.record(action.conversation_id, request)
+            self.submit(child_id, queued)
         else:
             self.record(
                 action.conversation_id,
@@ -353,46 +392,55 @@ class LocalExecutor:
             conversation, action, request, default_name=default_name
         )
 
-    def start(self) -> None:
-        """Start the single execution thread, if it is not already running."""
-        with self._execution_lock:
-            with self.condition:
-                self.check()
-                if self._thread is None:
-                    self._thread = Thread(
-                        target=copy_context().run,
-                        args=(self._run,),
-                        name="fw-local",
-                        daemon=True,
-                    )
-                    self._thread.start()
-
-    def _run(self) -> None:
+    def run(self) -> None:
+        """Drain actions, then block for the next incoming prompt until closed."""
         try:
-            while True:
-                with self.condition:
-                    self.condition.wait_for(
-                        lambda: self._closed or bool(self.queue)
-                    )
-                    if self._closed:
-                        return
+            while not self.closed:
+                if not self.queue:
+                    request = self.incoming.get()
+                    if request is None or self.closed:
+                        if request is not None:
+                            self.incoming.put(request)
+                        break
+                    if not request.result.set_running_or_notify_cancel():
+                        continue
+                    self._results[request.queued.turn_id] = request.result
+                    self.submit(request.session_id, request.queued)
                 self._step()
         except Exception as error:
             logger.exception("Local executor failed")
-            with self.condition:
-                self._failure = error
-                self.condition.notify_all()
+            self._failure = error
+        finally:
+            self._stop.set()
+            for result in self._results.values():
+                result.set_exception(self._shutdown_error())
+            self._results.clear()
+            while True:
+                try:
+                    request = self.incoming.get_nowait()
+                except Empty:
+                    break
+                if (
+                    request is not None
+                    and request.result.set_running_or_notify_cancel()
+                ):
+                    request.result.set_exception(self._shutdown_error())
+            self.outgoing.put(None)
+
+    def _shutdown_error(self) -> RuntimeError:
+        error = RuntimeError(
+            "Local executor failed"
+            if self._failure is not None
+            else "Local executor is closed"
+        )
+        error.__cause__ = self._failure
+        return error
 
     def close(self) -> None:
-        """Stop after the active action; this can wait for a model or tool."""
-        with self.condition:
-            self._closed = True
-            self.condition.notify_all()
-            thread = self._thread
-        if thread is not None and thread is not current_thread():
-            thread.join()
-        with self._execution_lock:
-            pass
+        """Signal shutdown without waiting for the caller's execution thread."""
+        self._stop.set()
+        self.incoming.put(None)
+        self.outgoing.put(None)
 
     def __enter__(self) -> LocalExecutor:
         return self

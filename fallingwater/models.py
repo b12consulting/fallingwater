@@ -278,9 +278,13 @@ def get_cnv_event(cnv_payload: type[ConversationPayloadType]) -> Event:
 class ConversationEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    entry_id: str = Field(min_length=1)
+    entry_id: str = Field(min_length=1, pattern=r"^[0-9]+-[0-9]+$")
     type: Event
     payload: ConversationPayloadType
+
+    def entry_id_tuple(self) -> tuple[int, int]:
+        milliseconds, sequence = self.entry_id.split("-")
+        return int(milliseconds), int(sequence)
 
     @model_validator(mode="after")
     def validate_payload_type(self) -> Self:

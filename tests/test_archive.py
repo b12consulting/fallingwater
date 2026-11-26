@@ -1,5 +1,6 @@
 """Checks Zstandard archive export and restoration."""
 
+import json
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -117,6 +118,30 @@ def test_load_zstd_requires_entry_id(tmp_path, monkeypatch) -> None:
         redis.exists.return_value = False
         archive.load_conversation(redis, "fw", "abc", str(tmp_path))
     dispatch.conversation_stream.return_value.append_event.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "entry_id", ["bad", "1-2-3", "-1-0", "1--1", "\uff11-0", "1-0\n"]
+)
+def test_event_and_archive_reject_malformed_entry_ids(
+    tmp_path, entry_id
+) -> None:
+    payload = ConversationCreatedPayload(agent="example:agent", model="test")
+    with pytest.raises(ValueError, match="entry_id"):
+        ConversationEvent(
+            entry_id=entry_id,
+            type=Event.CONVERSATION_CREATED,
+            payload=payload,
+        )
+    record = ConversationEvent(
+        entry_id="1-0", type=Event.CONVERSATION_CREATED, payload=payload
+    ).model_dump(mode="json")
+    record["entry_id"] = entry_id
+    (tmp_path / "abc.jsonl.zst").write_bytes(
+        zstd.ZstdCompressor().compress(json.dumps(record).encode() + b"\n")
+    )
+    with pytest.raises(ValueError, match="entry_id"):
+        list(archive.load_events("abc", str(tmp_path)))
 
 
 def test_sync_copies_all_streams_and_preserves_state(
@@ -297,7 +322,7 @@ def conversation_tree(tmp_path, isolated_redis):
             key: list(session.events.values())
             for key, session in executor.registry.items()
         }
-        executor.save(root, str(tmp_path))
+        archive.save_local_conversation(executor, root, str(tmp_path))
     assert archive.load_namespace(
         isolated_redis, "source", str(tmp_path)
     ) == sum(len(events) for events in snapshots.values())
@@ -343,7 +368,9 @@ def test_redis_tree_save_load_deduplicates_and_preserves_history(
             event.payload for event in events
         ]
     with LocalExecutor() as executor:
-        executor.load(root, str(store))
+        assert archive.load_local_conversation(
+            executor, root, str(store)
+        ) == sum(len(events) for events in snapshots.values())
         child = executor.registry[root].conversation.agent_by_name["writer"]
         turn = executor.send(root, "continue")
         executor.drain()

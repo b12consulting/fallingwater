@@ -1182,5 +1182,50 @@ revisited. Close or revise an item when the code resolves it.
   executor argument from `LocalClient`. Each client creates a separate executor
   and always closes it on client shutdown. Remove shared-session reopening and
   conditional ownership bookkeeping; resume retained history through archive
-  loading instead. Keep standalone `LocalExecutor` usage and synchronization
-  unchanged.
+  loading instead. D124 further simplifies synchronization and ownership.
+- **D124 — Single-owner local execution and encapsulated synchronization
+  (extended by D128, ownership guard removed by D125).** Allow reader/result operations
+  and acknowledgements on other threads. Move synchronized session operations
+  into `LocalExecutor`, leaving the client as a conversation-bound wrapper.
+  Remove the execution lock and implicit `copy_context()` from local startup.
+  Keep a draining flag to reject reentrant drain/start and retain the condition
+  for event publication and reader coordination. Standalone executor lifecycle
+  calls require a single owner by contract. Explicit model/dependency settings
+  replace assumptions about context-local overrides and tracing inheritance.
+  Executor lifecycle state is authoritative; closed-client operations report
+  `Local executor is closed`. Chat's prompt_toolkit reader context propagation
+  remains unchanged.
+- **D125 — No runtime client ownership guard (implemented).** Remove
+  `LocalClient._check_owner`, the creating-thread reference, and their call-site
+  checks. Single-owner lifecycle/submission remains an assumed usage contract;
+  concurrent owners are unsupported rather than detected. Keep executor-contained
+  condition handling, reader access, and drain/start safeguards until D128's
+  queue-based execution replaces them.
+- **D126 — Archive I/O outside the local executor (implemented).** Move local
+  file saving and loading to `archive.save_local_conversation` and
+  `load_local_conversation`. Keep `LocalClient.save()` and `load=True` as
+  convenience wrappers. Replace executor save/load with in-memory export/restore:
+  export snapshots the referenced conversation tree (using published state after
+  D128), while
+  restore validates complete settled event logs and constructs sessions before
+  atomic in-memory installation. Reuse one recursive file loader for Redis and
+  local archives. The executor no longer depends on archive I/O or store paths.
+- **D127 — Event-ID syntax belongs to the event schema (implemented).**
+  Validate `ConversationEvent.entry_id` as ASCII digits, a hyphen, and ASCII
+  digits at model construction and deserialization. Remove duplicate format
+  validation from local restore and expose numeric parsing through
+  `ConversationEvent.entry_id_tuple()`. Retain strictly increasing
+  per-conversation IDs and advancement of the executor's ID generator.
+- **D128 — Single-writer local executor with client-owned thread (implemented).**
+  Move thread creation and joining to `LocalClient`. Make `LocalExecutor.run()`
+  a blocking loop that drains internal actions before waiting on an incoming
+  prompt queue. Inbox submission does not touch session state. Publish read-only
+  replay snapshots and event tuples through a copy-on-write mapping, notify
+  readers through an outgoing queue, and deliver turn results through futures.
+  Reader acknowledgements belong to the client. Remove the executor condition,
+  thread handle, and draining flag; synchronous send/drain remains available
+  only without a concurrent runner. Stop is checked between actions, not only
+  when the inbox is read. Client close signals stop and joins; executor close
+  only signals. Reject pending futures on shutdown or executor failure.
+  Unaccepted incoming prompts are not recorded or archived. Publication copies
+  retained bookkeeping but keeps messages and payloads shared read-only.

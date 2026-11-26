@@ -669,8 +669,8 @@ def test_local_chat_executes_message_and_closes_executor(
     assert "› Hello" in output.out
     assert "success (no tool calls)" in output.out
     assert output.err.strip() == "Conversation: local-test"
-    assert client.executor._thread is not None
-    assert not client.executor._thread.is_alive()
+    assert client._thread is not None
+    assert not client._thread.is_alive()
     assert all(
         turn.completed for turn in client.conversation.turn_state.values()
     )
@@ -701,9 +701,9 @@ def test_local_chat_closes_client_when_terminal_fails(monkeypatch) -> None:
             ]
         )
 
-    with pytest.raises(RuntimeError, match="Local client is closed"):
+    with pytest.raises(RuntimeError, match="Local executor is closed"):
         clients[0].send("after exit")
-    assert clients[0].executor._closed
+    assert clients[0].executor.closed
 
 
 def test_local_chat_reports_invalid_configuration_without_redis(

@@ -1,6 +1,7 @@
 """Local client delivery, background execution, and terminal integration."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from datetime import datetime
 from threading import Event as ThreadEvent
 
@@ -14,12 +15,14 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
     UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from fallingwater.chat import Chat
+from fallingwater.archive import load_events
 from fallingwater.local_client import LocalClient
 from fallingwater.models import TurnCompletedPayload, TurnFailedPayload
 
@@ -255,10 +258,12 @@ def test_close_waits_for_active_action_without_draining_pending_turns(
 ) -> None:
     started = ThreadEvent()
     release = ThreadEvent()
+    finished = ThreadEvent()
 
     def blocking_response(messages, info):
         started.set()
         assert release.wait(5)
+        finished.set()
         return respond(messages, info)
 
     agent = Agent(FunctionModel(blocking_response))
@@ -270,21 +275,23 @@ def test_close_waits_for_active_action_without_draining_pending_turns(
         first = client.send("first")
         assert started.wait(5)
         second = client.send("second")
-        with ThreadPoolExecutor() as threads:
-            closing = threads.submit(client.close)
+
+        def release_after_close_starts():
             try:
-                with client.executor.condition:
-                    assert client.executor.condition.wait_for(
-                        lambda: client.executor._closed, timeout=5
-                    )
-                assert not closing.done()
+                assert client.executor._stop.wait(5)
+                assert not finished.is_set()
             finally:
                 release.set()
-            closing.result(timeout=5)
+
+        with ThreadPoolExecutor() as threads:
+            releasing = threads.submit(release_after_close_starts)
+            client.close()
+            releasing.result(timeout=5)
+        assert finished.is_set()
         turns = client.conversation.turn_state
         assert turns[first].completed
-        assert turns[second].running
-        assert client.executor.queue
+        assert second not in turns
+        assert client._results[second].done()
     finally:
         release.set()
         client.close()
@@ -298,12 +305,170 @@ def test_close_wakes_readers_and_stops_owned_executor() -> None:
     with ThreadPoolExecutor() as readers:
         waiting = readers.submit(lambda: list(client.read()))
         client.close()
-        with pytest.raises(RuntimeError, match="Local client is closed"):
+        with pytest.raises(RuntimeError, match="Local executor is closed"):
             waiting.result(timeout=5)
-    assert client.executor._thread is not None
-    assert not client.executor._thread.is_alive()
-    with pytest.raises(RuntimeError, match="Local client is closed"):
+    assert client._thread is not None
+    assert not client._thread.is_alive()
+    with pytest.raises(RuntimeError, match="Local executor is closed"):
         client.send("too late")
+
+
+def test_reader_operations_remain_available_on_another_thread() -> None:
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
+        turn = client.send("hello")
+        assert client.receive(turn) == "hello"
+
+        def read_and_acknowledge():
+            client.refresh()
+            assert client.settings.agent == f"{__name__}:writer"
+            assert client.conversation.turn_state[turn].completed
+            assert client.receive(turn) == "hello"
+            queued_id = client.queued_event_id(turn)
+            events = list(client.read(ffwd=True))
+            assert queued_id in {event.entry_id for event in events}
+            for event in events:
+                client.acknowledge(event)
+            return events
+
+        with ThreadPoolExecutor() as threads:
+            assert threads.submit(read_and_acknowledge).result(timeout=5)
+        assert list(client.read(ffwd=True)) == []
+
+
+def test_client_reuses_its_execution_thread_across_turns() -> None:
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
+        assert client.ask("first") == "first"
+        thread = client._thread
+        assert thread is not None and thread.is_alive()
+        assert client.ask("second") == "first/second"
+        assert client._thread is thread
+    assert not thread.is_alive()
+
+
+def test_executor_failure_completes_active_and_incoming_results(
+    monkeypatch,
+) -> None:
+    started = ThreadEvent()
+    release = ThreadEvent()
+
+    def broken_step():
+        started.set()
+        assert release.wait(5)
+        raise ValueError("dispatcher broke")
+
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
+        monkeypatch.setattr(client.executor, "_step", broken_step)
+        try:
+            first = client.send("first")
+            assert started.wait(5)
+            second = client.send("second")
+            release.set()
+            for turn in (first, second):
+                with pytest.raises(
+                    RuntimeError, match="Local executor failed"
+                ) as error:
+                    client._results[turn].result(timeout=5)
+                assert str(error.value.__cause__) == "dispatcher broke"
+            with pytest.raises(RuntimeError, match="Local executor failed"):
+                list(client.read(ffwd=True))
+        finally:
+            release.set()
+
+
+def test_close_stops_between_actions_not_after_the_whole_turn(
+    monkeypatch,
+) -> None:
+    started = ThreadEvent()
+    release = ThreadEvent()
+
+    def request_tool(_messages, _info):
+        started.set()
+        assert release.wait(5)
+        return ModelResponse(
+            parts=[ToolCallPart("unfinished_tool", {}, tool_call_id="tool-1")]
+        )
+
+    agent = Agent(FunctionModel(request_tool))
+
+    @agent.tool_plain
+    def unfinished_tool() -> str:
+        pytest.fail("Closing must not drain deferred tool actions")
+
+    monkeypatch.setattr(
+        "fallingwater.local_executor.reify_agent", lambda _path: agent
+    )
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
+        try:
+            turn = client.send("first")
+            assert started.wait(5)
+
+            def release_after_stop():
+                assert client.executor._stop.wait(5)
+                release.set()
+
+            with ThreadPoolExecutor() as threads:
+                releasing = threads.submit(release_after_stop)
+                client.close()
+                releasing.result(timeout=5)
+            assert client.conversation.turn_state[turn].running
+            assert client.executor.queue
+            with pytest.raises(RuntimeError, match="Local executor is closed"):
+                client._results[turn].result(timeout=5)
+        finally:
+            release.set()
+
+
+def test_published_snapshot_can_be_saved_while_model_is_running(
+    tmp_path, monkeypatch
+) -> None:
+    started = ThreadEvent()
+    release = ThreadEvent()
+
+    def blocking_response(messages, info):
+        started.set()
+        assert release.wait(5)
+        return respond(messages, info)
+
+    agent = Agent(FunctionModel(blocking_response))
+    monkeypatch.setattr(
+        "fallingwater.local_executor.reify_agent", lambda _path: agent
+    )
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
+        try:
+            turn = client.send("first")
+            assert started.wait(5)
+            snapshot = client.conversation
+            assert snapshot.turn_state[turn].running
+            with ThreadPoolExecutor() as threads:
+                saving = threads.submit(client.save, str(tmp_path))
+                assert saving.result(timeout=2) > 0
+            assert (
+                len(list(load_events(client.conversation_id, str(tmp_path))))
+                == 2
+            )
+            release.set()
+            assert client.receive(turn) == "first"
+            assert snapshot.turn_state[turn].running
+        finally:
+            release.set()
+
+
+def test_background_execution_does_not_copy_owner_context(monkeypatch) -> None:
+    setting = ContextVar("local_test_setting", default="default")
+
+    def context_response(_messages, _info):
+        return ModelResponse(parts=[TextPart(setting.get())])
+
+    agent = Agent(FunctionModel(context_response))
+    monkeypatch.setattr(
+        "fallingwater.local_executor.reify_agent", lambda _path: agent
+    )
+    token = setting.set("owner")
+    try:
+        with LocalClient(agent_path=f"{__name__}:writer") as client:
+            assert client.ask("hello") == "default"
+    finally:
+        setting.reset(token)
 
 
 def test_invalid_inputs_and_unknown_turns() -> None:

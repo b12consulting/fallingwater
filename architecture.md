@@ -830,10 +830,22 @@ a separate execution module; the shared APIs retain the same role boundaries.
 prototype into a library component; `contrib/fwflash.py` remains unchanged as
 a reference. It retains per-session event logs, replay state, agents, deps,
 pending turns, and captured tool contexts, with a shared deque of dispatch
-payloads. One action executes at a time, synchronously through `drain()` or in
-a background thread started by `LocalClient.send()`. A condition protects
-event publication, submissions, and readers; model and tool calls run outside
-that condition so terminal input and event delivery remain responsive.
+payloads. One execution thread owns all mutable session state. Its blocking
+`run()` drains internal actions, then waits on a thread-safe incoming prompt
+queue. `enqueue()` creates a turn ID and result future without modifying a
+session. Incoming prompts are accepted only when the action queue is empty.
+Synchronous callers can instead use `send()` and `drain()` before starting a
+runner. The executor creates no threads and has no condition or execution lock.
+
+After recording each event, the executor publishes a copy-on-write mapping of
+read-only session snapshots and sends an outgoing event notification. Snapshots
+contain cloned replay bookkeeping and immutable event tuples; previously
+published values are never mutated. Settings, history, and tree export read
+published state rather than the live registry, remaining responsive during model
+and tool calls. Snapshot publication copies bookkeeping proportional to retained
+state; model messages and payloads remain shared read-only by contract.
+The executor owns stop/failure state; closed-operation errors refer to the
+executor rather than duplicating a client closed flag.
 Failures become terminal events, propagate to requesting parents, and allow
 later pending turns to proceed. Stale actions for failed turns are skipped.
 
@@ -846,15 +858,28 @@ handle storage cursors. Redis `receive` retains an optional explicit cursor
 for callers that already have one.
 
 `LocalClient` binds an executor session to the `ChatClient` protocol without
-printing. Group acknowledgements are retained separately from event logs;
+printing. The client owns reader acknowledgements separately from event logs;
 rewind affects delivery only. `receive` and `ask` observe terminal state without
 acknowledging events.
 The `conversation` property returns an isolated replay-state clone rather than
 exposing mutable executor state; `refresh()` checks availability but need not
 replay. Each client creates and owns a separate executor; the constructor does
 not accept an external executor. Reopening history requires archive loading.
-Closing waits for the
-active action and leaves remaining work unexecuted; daemon execution does not
+Client lifecycle and submission calls assume one owner without checking thread
+identity; one reader may consume and acknowledge events on another thread.
+The client waits for result futures without consuming reader events, and
+uses the outgoing queue to wait for new unread events. Rewind resets only its
+acknowledgement set. `send()` creates a single background thread targeting the
+executor's blocking `run()` and reuses it across turns. Caller context variables
+are not copied; model and dependencies must be configured explicitly.
+Chat retains its independent context propagation for the prompt_toolkit reader.
+Client close sets a stop event, wakes the inbox and readers, then joins its
+thread. The executor checks stop between actions, finishes an active call without
+draining the remaining chain, and rejects unresolved result futures. Unaccepted
+incoming prompts have no event and are not archived. Standalone executor close
+only signals stop; its caller owns any execution thread and must join it.
+Standalone mutation and synchronous draining must not overlap a runner.
+Daemon execution does not
 survive process exit. Archive loading restores settled history, not execution
 checkpoints.
 
@@ -869,17 +894,30 @@ when chat raises, waiting for the active action but not draining pending work.
 
 `archive.save_events` and `load_events` share the existing `.jsonl.zst` event
 format between Redis and local sessions. Redis load continues generating
-new stream IDs. Local load preserves archived IDs and advances the executor's
+new stream IDs. `ConversationEvent` validates entry-ID syntax as two
+nonnegative ASCII integers separated by a hyphen, including archive decoding.
+`entry_id_tuple()` exposes the numeric milliseconds/sequence pair; local restore
+uses it to check ordering, rather than duplicating parsing or format validation.
+Local load preserves archived IDs and advances the executor's
 ID generator past them, replays each conversation, reconstructs agents and
 dependencies from saved settings, and follows all recorded child references.
 It rejects unfinished turns, missing settings or child files, invalid event
 ordering, and existing session IDs before installing any restored sessions.
 Loading does not schedule actions or restore reader acknowledgements.
 
-`LocalExecutor.save` snapshots a root session and its referenced descendants
-under the condition, then writes their archives outside that lock.
+File persistence belongs to `archive.py`, not the executor.
+`save_local_conversation` obtains an in-memory event-tree snapshot through
+`LocalExecutor.export`, reading one published snapshot mapping before writing
+files. It does not block execution or read mutable live sessions.
+`load_local_conversation` reads all referenced files using the same event-tree
+loader as Redis, then passes the decoded mapping to `LocalExecutor.restore`.
+Restore validates event ordering, settled turns, saved settings, dependencies,
+all child references, and session conflicts before installing any sessions.
+It advances event-ID generation without scheduling work. The executor imports
+no archive helpers and takes neither paths nor compression options.
+
 `LocalClient.save` works before or after close; `load=True` at construction
-restores an archive and marks existing events acknowledged for that reader
+delegates to the archive helper and marks existing events acknowledged for that reader
 group. Rewind makes them readable again. `fw chat --local --load --save --store`
 exposes the same operations; load requires an explicit ID and save runs after
 normal executor shutdown, including exceptional chat exit. Save retains whatever
