@@ -278,7 +278,7 @@ def test_close_waits_for_active_action_without_draining_pending_turns(
 
         def release_after_close_starts():
             try:
-                assert client.executor._stop.wait(5)
+                assert client._stop.wait(5)
                 assert not finished.is_set()
             finally:
                 release.set()
@@ -357,7 +357,7 @@ def test_executor_failure_completes_active_and_incoming_results(
         raise ValueError("dispatcher broke")
 
     with LocalClient(agent_path=f"{__name__}:writer") as client:
-        monkeypatch.setattr(client.executor, "_step", broken_step)
+        monkeypatch.setattr(client.executor, "step", broken_step)
         try:
             first = client.send("first")
             assert started.wait(5)
@@ -403,7 +403,7 @@ def test_close_stops_between_actions_not_after_the_whole_turn(
             assert started.wait(5)
 
             def release_after_stop():
-                assert client.executor._stop.wait(5)
+                assert client._stop.wait(5)
                 release.set()
 
             with ThreadPoolExecutor() as threads:
@@ -416,6 +416,24 @@ def test_close_stops_between_actions_not_after_the_whole_turn(
                 client._results[turn].result(timeout=5)
         finally:
             release.set()
+
+
+def test_close_after_submission_before_first_action(monkeypatch) -> None:
+    with LocalClient(agent_path=f"{__name__}:writer") as client:
+        submit = client.executor.submit
+
+        def submit_then_close(session_id, queued):
+            submit(session_id, queued)
+            client.close()
+
+        monkeypatch.setattr(client.executor, "submit", submit_then_close)
+        turn = client.send("first")
+        with pytest.raises(
+            RuntimeError, match="Local executor is closed"
+        ) as error:
+            client._results[turn].result(timeout=5)
+        assert error.value.__cause__ is None
+        assert client.conversation.turn_state[turn].running
 
 
 def test_published_snapshot_can_be_saved_while_model_is_running(

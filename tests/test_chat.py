@@ -487,7 +487,7 @@ def test_interactive_event_statuses_do_not_print_extra_messages(
         Event.TURN_COMPLETED,
         Event.TURN_FAILED,
     ):
-        expected = f"  ◆ {expected}"
+        expected = f" ◆ {expected}"
     assert fragment_list_to_text(chat._status_toolbar()) == expected
     session.app.invalidate.assert_called_once()
     assert print_message.call_count == (
@@ -614,7 +614,7 @@ def test_terminal_event_status_preserves_typed_input_and_cleans_up(
 
     assert rendered
     assert set(rendered) == {
-        ("unfinished prompt", "  ◆ Tools requested: search / current_time")
+        ("unfinished prompt", " ◆ Tools requested: search / current_time")
     }
     redis.xack.assert_called_once_with(chat.client.stream.name, "user", "3-0")
     assert chat._status_app is None

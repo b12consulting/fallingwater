@@ -1229,3 +1229,17 @@ revisited. Close or revise an item when the code resolves it.
   only signals. Reject pending futures on shutdown or executor failure.
   Unaccepted incoming prompts are not recorded or archived. Publication copies
   retained bookkeeping but keeps messages and payloads shared read-only.
+- **D129 — Shared local action-draining loop (implemented).** Have `run()` and
+  synchronous `drain()` use one private drain loop rather than maintaining
+  separate action iteration. Keep public `drain()` availability checks outside
+  the shared loop so closing after inbox acceptance does not falsely report an
+  executor failure. Retain inbox/outgoing queues, result futures, published
+  snapshots, and stop-between-actions behavior.
+- **D130 — Synchronous FIFO core with a client-owned runner (implemented).**
+  Move the inbox, result futures, and shutdown from `LocalExecutor` to
+  `LocalClient` so the executor follows `fwflash`'s synchronous scheduling
+  model. Share `step()` between standalone draining and the client runner.
+  Keep the outgoing event queue rather than adding an event callback:
+  published logs are the source for replay and outcomes; the queue wakes the
+  reader without competing with `receive()`. Retain timestamped event IDs,
+  failure events, and archive interfaces so chat behavior stays unchanged.

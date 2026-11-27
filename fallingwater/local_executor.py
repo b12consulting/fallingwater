@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterable, Mapping
-from concurrent.futures import Future
 from dataclasses import dataclass, field
-from queue import Empty, Queue
-from threading import Event as ThreadEvent
+from queue import Queue
 from time import time_ns
 from traceback import format_exc
 from typing import Any
@@ -55,13 +53,6 @@ class Session:
 
 
 @dataclass(frozen=True)
-class IncomingTurn:
-    session_id: str
-    queued: TurnQueuedPayload
-    result: Future[str]
-
-
-@dataclass(frozen=True)
 class SessionSnapshot:
     conversation: Conversation
     events: tuple[ConversationEvent, ...]
@@ -70,34 +61,17 @@ class SessionSnapshot:
 class LocalExecutor:
     """Run one action at a time, retaining sequential history per session.
 
-    ``run()`` blocks on incoming prompts when internal actions are exhausted.
-    ``drain()`` runs only currently queued actions in the calling thread.
-    One execution thread owns mutable state; other threads enqueue prompts and
-    read published snapshots. Create/restore sessions before starting execution.
-    ``close()`` signals shutdown between actions; the caller joins its thread.
+    The caller owns scheduling and runs all mutations on one thread at a time.
+    Other threads may read published snapshots or wait for outgoing events.
     """
 
     def __init__(self) -> None:
         self.registry: dict[str, Session] = {}
         self.queue: deque[DispatchPayloadType] = deque()
-        self.incoming: Queue[IncomingTurn | None] = Queue()
         self.outgoing: Queue[tuple[str, ConversationEvent] | None] = Queue()
-        self._stop = ThreadEvent()
         self._published: dict[str, SessionSnapshot] = {}
-        self._results: dict[str, Future[str]] = {}
-        self._failure: Exception | None = None
         self._milliseconds = 0
         self._sequence = 0
-
-    def check(self) -> None:
-        if self._failure is not None:
-            raise RuntimeError("Local executor failed") from self._failure
-        if self.closed:
-            raise RuntimeError("Local executor is closed")
-
-    @property
-    def closed(self) -> bool:
-        return self._stop.is_set()
 
     def settings(self, session_id: str) -> ConversationCreatedPayload:
         return self._published[session_id].conversation.settings
@@ -118,14 +92,6 @@ class LocalExecutor:
             ),
         }
 
-    def enqueue(self, session_id: str, prompt: str) -> tuple[str, Future[str]]:
-        """Submit through the thread-safe inbox without touching session state."""
-        self.check()
-        queued = TurnQueuedPayload(turn_id=str(uuid4()), message=prompt)
-        result: Future[str] = Future()
-        self.incoming.put(IncomingTurn(session_id, queued, result))
-        return queued.turn_id, result
-
     def create(
         self,
         agent: str,
@@ -134,7 +100,6 @@ class LocalExecutor:
         deps: dict[str, Any] | None = None,
         conversation_id: str | None = None,
     ) -> str:
-        self.check()
         return self._create_session(
             reify_agent(agent),
             ConversationCreatedPayload(
@@ -160,8 +125,7 @@ class LocalExecutor:
         return session_id
 
     def send(self, session_id: str, prompt: str) -> str:
-        """Submit synchronously, on the execution thread or before draining."""
-        self.check()
+        """Queue a prompt on the calling thread and return its turn ID."""
         queued = TurnQueuedPayload(turn_id=str(uuid4()), message=prompt)
         self.submit(session_id, queued)
         return queued.turn_id
@@ -190,7 +154,6 @@ class LocalExecutor:
         self, snapshots: Mapping[str, Iterable[ConversationEvent]]
     ) -> None:
         """Validate and install supplied settled sessions without scheduling."""
-        self.check()
         sessions: dict[str, Session] = {}
         latest_id = (self._milliseconds, self._sequence)
         for current, records in snapshots.items():
@@ -275,25 +238,20 @@ class LocalExecutor:
             session.pending.pop(0)
         self._publish(session_id)
         self.outgoing.put((session_id, event))
-        if isinstance(payload, (TurnCompletedPayload, TurnFailedPayload)):
-            result = self._results.pop(payload.turn_id, None)
-            if result is not None:
-                if isinstance(payload, TurnFailedPayload):
-                    result.set_exception(RuntimeError(payload.error))
-                else:
-                    result.set_result(payload.message)
-            if session.pending:
-                self.record(session_id, session.pending[0])
+        if isinstance(payload, (TurnCompletedPayload, TurnFailedPayload)) and (
+            session.pending
+        ):
+            self.record(session_id, session.pending[0])
         return event
 
     def drain(self) -> None:
-        """Execute currently queued actions synchronously, without an inbox wait."""
-        self.check()
-        while self._step():
+        """Run queued actions until the work deque is empty."""
+        while self.step():
             pass
 
-    def _step(self) -> bool:
-        if self.closed or not self.queue:
+    def step(self) -> bool:
+        """Process one queued action, returning false if there was no work."""
+        if not self.queue:
             return False
         action = self.queue.pop()
         session = self.registry[action.conversation_id]
@@ -391,59 +349,3 @@ class LocalExecutor:
         return resolve_subagent(
             conversation, action, request, default_name=default_name
         )
-
-    def run(self) -> None:
-        """Drain actions, then block for the next incoming prompt until closed."""
-        try:
-            while not self.closed:
-                if not self.queue:
-                    request = self.incoming.get()
-                    if request is None or self.closed:
-                        if request is not None:
-                            self.incoming.put(request)
-                        break
-                    if not request.result.set_running_or_notify_cancel():
-                        continue
-                    self._results[request.queued.turn_id] = request.result
-                    self.submit(request.session_id, request.queued)
-                self._step()
-        except Exception as error:
-            logger.exception("Local executor failed")
-            self._failure = error
-        finally:
-            self._stop.set()
-            for result in self._results.values():
-                result.set_exception(self._shutdown_error())
-            self._results.clear()
-            while True:
-                try:
-                    request = self.incoming.get_nowait()
-                except Empty:
-                    break
-                if (
-                    request is not None
-                    and request.result.set_running_or_notify_cancel()
-                ):
-                    request.result.set_exception(self._shutdown_error())
-            self.outgoing.put(None)
-
-    def _shutdown_error(self) -> RuntimeError:
-        error = RuntimeError(
-            "Local executor failed"
-            if self._failure is not None
-            else "Local executor is closed"
-        )
-        error.__cause__ = self._failure
-        return error
-
-    def close(self) -> None:
-        """Signal shutdown without waiting for the caller's execution thread."""
-        self._stop.set()
-        self.incoming.put(None)
-        self.outgoing.put(None)
-
-    def __enter__(self) -> LocalExecutor:
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self.close()

@@ -830,12 +830,10 @@ a separate execution module; the shared APIs retain the same role boundaries.
 prototype into a library component; `contrib/fwflash.py` remains unchanged as
 a reference. It retains per-session event logs, replay state, agents, deps,
 pending turns, and captured tool contexts, with a shared deque of dispatch
-payloads. One execution thread owns all mutable session state. Its blocking
-`run()` drains internal actions, then waits on a thread-safe incoming prompt
-queue. `enqueue()` creates a turn ID and result future without modifying a
-session. Incoming prompts are accepted only when the action queue is empty.
-Synchronous callers can instead use `send()` and `drain()` before starting a
-runner. The executor creates no threads and has no condition or execution lock.
+payloads. One thread owns all mutable session state. The executor is synchronous:
+`step()` processes one action and `drain()` calls it until the deque is empty.
+Standalone callers can use `send()` and `drain()` directly. The executor
+does not manage threads, shutdown, an incoming prompt queue, or result futures.
 
 After recording each event, the executor publishes a copy-on-write mapping of
 read-only session snapshots and sends an outgoing event notification. Snapshots
@@ -844,8 +842,6 @@ published values are never mutated. Settings, history, and tree export read
 published state rather than the live registry, remaining responsive during model
 and tool calls. Snapshot publication copies bookkeeping proportional to retained
 state; model messages and payloads remain shared read-only by contract.
-The executor owns stop/failure state; closed-operation errors refer to the
-executor rather than duplicating a client closed flag.
 Failures become terminal events, propagate to requesting parents, and allow
 later pending turns to proceed. Stale actions for failed turns are skipped.
 
@@ -867,21 +863,22 @@ replay. Each client creates and owns a separate executor; the constructor does
 not accept an external executor. Reopening history requires archive loading.
 Client lifecycle and submission calls assume one owner without checking thread
 identity; one reader may consume and acknowledge events on another thread.
-The client waits for result futures without consuming reader events, and
-uses the outgoing queue to wait for new unread events. Rewind resets only its
-acknowledgement set. `send()` creates a single background thread targeting the
-executor's blocking `run()` and reuses it across turns. Caller context variables
-are not copied; model and dependencies must be configured explicitly.
+The client owns its inbox and result futures. `send()` enqueues a turn and
+starts a single background thread reused across turns. The runner submits the
+next prompt only after draining the executor's work deque. It resolves a
+turn's future after its terminal event is published, without consuming
+notifications. The reader uses the outgoing queue to wake up and the retained
+log to find unacknowledged events. Rewind resets only the acknowledgement set.
+Caller context variables are not copied; model and dependencies must be
+configured explicitly.
 Chat retains its independent context propagation for the prompt_toolkit reader.
 Client close sets a stop event, wakes the inbox and readers, then joins its
-thread. The executor checks stop between actions, finishes an active call without
+thread. The runner checks stop between actions, finishes an active call without
 draining the remaining chain, and rejects unresolved result futures. Unaccepted
-incoming prompts have no event and are not archived. Standalone executor close
-only signals stop; its caller owns any execution thread and must join it.
-Standalone mutation and synchronous draining must not overlap a runner.
-Daemon execution does not
-survive process exit. Archive loading restores settled history, not execution
-checkpoints.
+incoming prompts have no event and are not archived. Standalone mutation and
+synchronous draining must not overlap a client runner. Daemon execution does
+not survive process exit. Archive loading restores settled history, not
+execution checkpoints.
 
 `fw chat --local` selects a fresh local executor for either interactive chat
 or `--msg`. Redis remains the default. Both modes use the same presentation,

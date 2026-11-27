@@ -703,7 +703,6 @@ def test_local_chat_closes_client_when_terminal_fails(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="Local executor is closed"):
         clients[0].send("after exit")
-    assert clients[0].executor.closed
 
 
 def test_local_chat_reports_invalid_configuration_without_redis(

@@ -56,8 +56,8 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- chat.py               Terminal input, event rendering, and reader thread
 |   |-- cli.py                argparse CLI for workers, chat, save/load, sync, web, and reset
 |   |-- conversation.py       Iterable replay, repeatable settings, and pure decisions
-|   |-- local_client.py       Execution thread, reader delivery, and archive save/load
-|   |-- local_executor.py     Blocking FIFO, prompt inbox, published snapshots, and export/restore
+|   |-- local_client.py       Execution thread, prompt inbox, reader delivery, and archive save/load
+|   |-- local_executor.py     Synchronous FIFO, event notifications, published snapshots, and export/restore
 |   |-- models.py             Agent requests, conversation events, and dispatch schemas
 |   |-- names.py              Words and generator for CLI conversation names
 |   |-- recovery.py           Recovery work checklist and placeholder

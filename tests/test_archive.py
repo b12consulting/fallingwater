@@ -312,17 +312,17 @@ def test_namespace_archive_rejects_unsafe_conversation_filename(
 
 @pytest.fixture
 def conversation_tree(tmp_path, isolated_redis):
-    with LocalExecutor() as executor:
-        root = executor.create("tests.test_local_executor:editor")
-        executor.send(root, "edit")
-        executor.drain()
-        executor.send(root, "edit again")
-        executor.drain()
-        snapshots = {
-            key: list(session.events.values())
-            for key, session in executor.registry.items()
-        }
-        archive.save_local_conversation(executor, root, str(tmp_path))
+    executor = LocalExecutor()
+    root = executor.create("tests.test_local_executor:editor")
+    executor.send(root, "edit")
+    executor.drain()
+    executor.send(root, "edit again")
+    executor.drain()
+    snapshots = {
+        key: list(session.events.values())
+        for key, session in executor.registry.items()
+    }
+    archive.save_local_conversation(executor, root, str(tmp_path))
     assert archive.load_namespace(
         isolated_redis, "source", str(tmp_path)
     ) == sum(len(events) for events in snapshots.values())
@@ -367,19 +367,16 @@ def test_redis_tree_save_load_deduplicates_and_preserves_history(
         assert [event.payload for event in stream.iter_events()] == [
             event.payload for event in events
         ]
-    with LocalExecutor() as executor:
-        assert archive.load_local_conversation(
-            executor, root, str(store)
-        ) == sum(len(events) for events in snapshots.values())
-        child = executor.registry[root].conversation.agent_by_name["writer"]
-        turn = executor.send(root, "continue")
-        executor.drain()
-        assert executor.registry[root].conversation.turn_state[turn].completed
-        assert (
-            executor.registry[root].conversation.agent_by_name["writer"]
-            == child
-        )
-        assert len(executor.registry[child].conversation.turn_state) == 6
+    executor = LocalExecutor()
+    assert archive.load_local_conversation(executor, root, str(store)) == sum(
+        len(events) for events in snapshots.values()
+    )
+    child = executor.registry[root].conversation.agent_by_name["writer"]
+    turn = executor.send(root, "continue")
+    executor.drain()
+    assert executor.registry[root].conversation.turn_state[turn].completed
+    assert executor.registry[root].conversation.agent_by_name["writer"] == child
+    assert len(executor.registry[child].conversation.turn_state) == 6
 
 
 @pytest.mark.parametrize("conflict_type", ["stream", "empty-stream", "string"])
