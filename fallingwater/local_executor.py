@@ -130,75 +130,6 @@ class LocalExecutor:
         self.submit(session_id, queued)
         return queued.turn_id
 
-    def export(
-        self, session_id: str
-    ) -> dict[str, tuple[ConversationEvent, ...]]:
-        """Snapshot recorded events for this session and all descendants."""
-        published = self._published
-        snapshots: dict[str, tuple[ConversationEvent, ...]] = {}
-        pending = [session_id]
-        while pending:
-            current = pending.pop()
-            if current in snapshots:
-                continue
-            events = published[current].events
-            snapshots[current] = events
-            pending.extend(
-                event.payload.child_conversation_id
-                for event in events
-                if isinstance(event.payload, AgentRequestedPayload)
-            )
-        return snapshots
-
-    def restore(
-        self, snapshots: Mapping[str, Iterable[ConversationEvent]]
-    ) -> None:
-        """Validate and install supplied settled sessions without scheduling."""
-        sessions: dict[str, Session] = {}
-        latest_id = (self._milliseconds, self._sequence)
-        for current, records in snapshots.items():
-            if current in self.registry:
-                raise ValueError(f"Conversation already exists: {current}")
-            events = list(records)
-            previous = (0, 0)
-            for event in events:
-                entry_id = event.entry_id_tuple()
-                if entry_id <= previous:
-                    raise ValueError(
-                        f"Event IDs are not increasing in {current}"
-                    )
-                previous = entry_id
-            latest_id = max(latest_id, previous)
-            conversation = Conversation(events, conversation_id=current)
-            if any(turn.running for turn in conversation.turn_state.values()):
-                raise ValueError(f"Conversation {current} has unfinished turns")
-            settings = conversation.settings
-            agent = reify_agent(settings.agent)
-            sessions[current] = Session(
-                agent=agent,
-                conversation=conversation,
-                deps=validate_deps(agent, settings.deps),
-                events={event.entry_id: event for event in events},
-            )
-            for event in events:
-                if isinstance(event.payload, AgentRequestedPayload):
-                    child_id = event.payload.child_conversation_id
-                    if child_id not in snapshots:
-                        raise ValueError(
-                            f"Child conversation not supplied: {child_id}"
-                        )
-        self.registry.update(sessions)
-        self._milliseconds, self._sequence = latest_id
-        self._published = {
-            **self._published,
-            **{
-                key: SessionSnapshot(
-                    session.conversation.clone(), tuple(session.events.values())
-                )
-                for key, session in sessions.items()
-            },
-        }
-
     def submit(self, session_id: str, queued: TurnQueuedPayload) -> None:
         session = self.registry[session_id]
         session.pending.append(queued)
@@ -349,3 +280,72 @@ class LocalExecutor:
         return resolve_subagent(
             conversation, action, request, default_name=default_name
         )
+
+    def export(
+        self, session_id: str
+    ) -> dict[str, tuple[ConversationEvent, ...]]:
+        """Snapshot recorded events for this session and all descendants."""
+        published = self._published
+        snapshots: dict[str, tuple[ConversationEvent, ...]] = {}
+        pending = [session_id]
+        while pending:
+            current = pending.pop()
+            if current in snapshots:
+                continue
+            events = published[current].events
+            snapshots[current] = events
+            pending.extend(
+                event.payload.child_conversation_id
+                for event in events
+                if isinstance(event.payload, AgentRequestedPayload)
+            )
+        return snapshots
+
+    def restore(
+        self, snapshots: Mapping[str, Iterable[ConversationEvent]]
+    ) -> None:
+        """Validate and install supplied settled sessions without scheduling."""
+        sessions: dict[str, Session] = {}
+        latest_id = (self._milliseconds, self._sequence)
+        for current, records in snapshots.items():
+            if current in self.registry:
+                raise ValueError(f"Conversation already exists: {current}")
+            events = list(records)
+            previous = (0, 0)
+            for event in events:
+                entry_id = event.entry_id_tuple()
+                if entry_id <= previous:
+                    raise ValueError(
+                        f"Event IDs are not increasing in {current}"
+                    )
+                previous = entry_id
+            latest_id = max(latest_id, previous)
+            conversation = Conversation(events, conversation_id=current)
+            if any(turn.running for turn in conversation.turn_state.values()):
+                raise ValueError(f"Conversation {current} has unfinished turns")
+            settings = conversation.settings
+            agent = reify_agent(settings.agent)
+            sessions[current] = Session(
+                agent=agent,
+                conversation=conversation,
+                deps=validate_deps(agent, settings.deps),
+                events={event.entry_id: event for event in events},
+            )
+            for event in events:
+                if isinstance(event.payload, AgentRequestedPayload):
+                    child_id = event.payload.child_conversation_id
+                    if child_id not in snapshots:
+                        raise ValueError(
+                            f"Child conversation not supplied: {child_id}"
+                        )
+        self.registry.update(sessions)
+        self._milliseconds, self._sequence = latest_id
+        self._published = {
+            **self._published,
+            **{
+                key: SessionSnapshot(
+                    session.conversation.clone(), tuple(session.events.values())
+                )
+                for key, session in sessions.items()
+            },
+        }

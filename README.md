@@ -44,9 +44,8 @@ Prompts enter a thread-safe incoming queue; the execution thread drains internal
 actions before accepting the next prompt. Result futures and an outgoing event
 queue coordinate responses without an executor condition lock. Snapshot reads
 use published, read-only state rather than the live executor registry.
-The executor does not create threads: `run()` blocks for incoming work and
-`drain()` processes currently queued synchronous work. Standalone callers must
-not mutate the registry or call synchronous submission/drain during `run()`.
+For synchronous `step()` and `drain()` without a client, see the
+[LocalExecutor tutorial](docs/local-executor.md).
 
 The local execution thread does not copy the owner's context variables.
 Configure the model and dependencies explicitly rather than relying on
@@ -55,9 +54,7 @@ reader still copies its prompt_toolkit application context.
 
 Closing a client signals stop and joins its execution thread, waiting for the
 active model/tool action but not draining pending actions or incoming prompts.
-Standalone executor `close()` and context-manager exit only signal stop;
-the caller must join any execution thread it created.
-Leaving `Chat.run()` alone does not close its client or executor.
+Leaving `Chat.run()` alone does not close its client.
 Operations rejected after closing report `Local executor is closed`; snapshots,
 settings, and archive saving remain available.
 Incoming prompts not yet accepted have no recorded event and are omitted from
@@ -91,7 +88,7 @@ defaults, dependency parameters, and `--msg` work in both modes. Each local CLI
 invocation creates a fresh executor: without `--load`, an explicit conversation
 ID names a new session. `--group` and `--rewind` apply only to that invocation's
 local events. On exit, the CLI closes
-the local client and executor, waiting for the active action but not draining
+the local client, waiting for the active action but not draining
 pending work.
 
 Add `--save` to archive local recorded history on exit, including referenced

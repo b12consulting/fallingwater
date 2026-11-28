@@ -24,6 +24,7 @@ This is the quick-start guide for agents working in this repository. See
 |   |-- basic-conversation-flow.d2 Basic conversation sequence diagrams
 |   |-- basic-conversation-flow.md Conversation submission, history, and results
 |   |-- basic-conversation-flow.svg Rendered basic conversation diagrams
+|   |-- local-executor.md       Synchronous executor tutorial and guarantees
 |   |-- subagent-flow.d2      Subagent sequence diagrams
 |   |-- subagent-flow.md      Subagent stream events and dispatch flow
 |   |-- subagent-flow.svg     Rendered subagent diagrams
